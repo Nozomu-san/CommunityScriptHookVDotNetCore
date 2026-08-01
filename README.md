@@ -12,7 +12,7 @@
 - Powerhouse for .NET Core.
 - Completely .NET Core scalable (including .NET Core Preview)
 - Fully-supported Visual Basic, F# & C# (based on Runtime you have on Computer). For F# modders, FSharp.Core is required to run.
-- Future-brain replacements ready without rewriting (In case replacing Script Hook V .NET 4).
+- Future-brain replacements ready without rewriting (In case replacing Script Hook V .NET Core).
 ### CommunityScriptHookVDotNetCore (Script Hook V .NET Core)
 - Responsible for mods lifetime, tickrates and so on. Sounds familiar? But no longer contains everything like used to be.
 ### Alloc8orStandardNatives (Alloc8or's Standard Native Executables)
