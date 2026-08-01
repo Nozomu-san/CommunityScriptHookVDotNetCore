@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Platforms>AnyCPU;x64</Platforms>
+    <AssemblyTitle>Script4 Reload Tool</AssemblyTitle>
+    <Authors>Nozomu-san</Authors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Source\AssemblyMetadata.fs" />
+    <Compile Include="Source\ReloadConfiguration.fs" />
+    <Compile Include="Source\ReloadLog.fs" />
+    <Compile Include="Source\ReloadDetection.fs" />
+    <Compile Include="Source\ReloadPlanning.fs" />
+    <Compile Include="Source\Scripts4Watcher.fs" />
+    <Compile Include="Source\ReloadLifecycle.fs" />
+    <Compile Include="Source\Script4ReloadExtension.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Alloc8orStandardNatives\Alloc8orStandardNatives.csproj" />
+    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
+    <ProjectReference Include="..\ScriptHookInput\ScriptHookInput.fsproj" />
+  </ItemGroup>
+
+</Project>

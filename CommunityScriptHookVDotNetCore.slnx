@@ -1,0 +1,20 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Alloc8orStandardNatives/Alloc8orStandardNatives.csproj">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="CommunityScriptHookVDotNetCore/CommunityScriptHookVDotNetCore.csproj">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="CoreCLRHostLoader/CoreCLRHostLoader.vcxproj" />
+  <Project Path="Script4Reload/Script4Reload.fsproj">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="ScriptHookInput/ScriptHookInput.fsproj">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+</Solution>

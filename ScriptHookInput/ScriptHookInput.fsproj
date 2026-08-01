@@ -1,0 +1,24 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Platforms>AnyCPU;x64</Platforms>
+    <AssemblyTitle>Script Hook Inputs</AssemblyTitle>
+    <Authors>Nozomu-san</Authors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Source\Input.fs" />
+    <Compile Include="Source\GameInput.fs" />
+    <Compile Include="Source\DeviceInput.fs" />
+    <Compile Include="Source\Runtime.fs" />
+    <Compile Include="Source\Extension.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Alloc8orStandardNatives\Alloc8orStandardNatives.csproj" />
+    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
+  </ItemGroup>
+
+</Project>
