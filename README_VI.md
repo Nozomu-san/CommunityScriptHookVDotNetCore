@@ -12,7 +12,7 @@
 - Nền tảng cốt lõi dành cho .NET Core.
 - Khả năng mở rộng .NET Core (bao gồm cả các phiên bản .NET Core Preview).
 - Hỗ trợ đầy đủ Visual Basic, F# và C# (dựa trên Runtime có sẵn trên máy tính của bạn). Đối với các modder sử dụng F#, cần phải có `FSharp.Core` để chạy.
-- Có khả năng thay thế cho bộ não trung tâm mà không cần viết lại (trong trường hợp thay thế Script Hook V .NET 4).
+- Có khả năng thay thế cho bộ não trung tâm mà không cần viết lại (trong trường hợp thay thế Script Hook V .NET Core).
 
 ### CommunityScriptHookVDotNetCore (Script Hook V .NET Core)
 - Chịu trách nhiệm về vòng đời của các bản mod, tần suất tick (tickrates), v.v. Nghe có vẻ quen thuộc phải không? Nhưng giờ đây nó không còn chứa mọi thứ gộp chung như trước nữa.
