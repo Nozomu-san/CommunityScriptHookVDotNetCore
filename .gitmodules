@@ -1,0 +1,3 @@
+[submodule "Alloc8orStandardNatives/Source/Json"]
+	path = Alloc8orStandardNatives/Source/Json
+	url = https://github.com/alloc8or/gta5-nativedb-data.git
