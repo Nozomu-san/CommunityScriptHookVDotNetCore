@@ -20,8 +20,7 @@ public enum ScriptStartReason
 {
     InitialActivation,
     LifecycleRestart,
-    BinaryReplacement,
-    Recovery
+    BinaryReplacement
 }
 
 public enum ScriptStopReason
@@ -29,7 +28,8 @@ public enum ScriptStopReason
     RuntimeShutdown,
     PackageFault,
     LifecycleRestart,
-    BinaryReplacement
+    BinaryReplacement,
+    DependencyUnavailable
 }
 
 public interface IScriptServices
@@ -47,7 +47,8 @@ public readonly record struct ScriptStartContext(
     IScriptServices Services,
     ScriptStartReason Reason,
     ulong LifecycleEpoch,
-    CancellationToken LifetimeToken);
+    CancellationToken LifetimeToken,
+    CancellationToken CancellationToken);
 
 public readonly record struct ScriptTickContext(
     ulong TickIndex,
@@ -60,26 +61,26 @@ public readonly record struct ScriptTickContext(
 public readonly record struct ScriptStopContext(
     string PackageName,
     ScriptStopReason Reason,
-    ulong LifecycleEpoch);
+    ulong LifecycleEpoch,
+    CancellationToken CancellationToken);
 
 public abstract class Script4
 {
-    protected abstract void OnStart(ScriptStartContext context);
+    protected abstract ValueTask OnStartAsync(ScriptStartContext context);
 
     protected virtual void OnTick(ScriptTickContext context)
     {
     }
 
-    protected virtual void OnStop(ScriptStopContext context)
-    {
-    }
+    protected virtual ValueTask OnStopAsync(ScriptStopContext context) =>
+        ValueTask.CompletedTask;
 
-    internal void Start(ScriptStartContext context) =>
-        OnStart(context);
+    internal ValueTask StartAsync(ScriptStartContext context) =>
+        OnStartAsync(context);
 
     internal void Tick(ScriptTickContext context) =>
         OnTick(context);
 
-    internal void Stop(ScriptStopContext context) =>
-        OnStop(context);
+    internal ValueTask StopAsync(ScriptStopContext context) =>
+        OnStopAsync(context);
 }

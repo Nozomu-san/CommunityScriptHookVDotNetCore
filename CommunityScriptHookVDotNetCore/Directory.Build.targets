@@ -1,0 +1,6 @@
+<Project>
+  <PropertyGroup>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+</Project>

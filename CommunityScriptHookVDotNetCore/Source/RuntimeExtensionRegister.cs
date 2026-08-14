@@ -4,16 +4,28 @@ using System.Reflection.PortableExecutable;
 
 namespace CommunityScriptHookVDotNetCore.Source;
 
+internal static class RuntimeExtensionMetadataKeys
+{
+    public const string Role = "CSHVDNC.Role";
+    public const string Id = "CSHVDNC.Id";
+    public const string EntryType = "CSHVDNC.EntryType";
+    public const string ContractMajor = "CSHVDNC.ContractMajor";
+    public const string ContractMinor = "CSHVDNC.ContractMinor";
+    public const string Provides = "CSHVDNC.Provides";
+    public const string Requires = "CSHVDNC.Requires";
+    public const string RuntimeExtensionRole = "RuntimeExtension";
+}
+
 public static class RuntimeCapabilities
 {
     public const string RuntimeServices = "runtime.services";
     public const string HostFrame = "host.frame";
     public const string RawNative = "host.native.raw";
+    public const string NativeAdmissionControl = "host.native.admission";
     public const string CooperativeShutdown = "host.shutdown";
     public const string PackageLifecycle = "package.lifecycle";
     public const string PackageTransitionHost = "package.lifecycle.transition";
     public const string ScriptScheduler = "script.scheduler";
-    public const string Scripts4Lifecycle = "scripts4.lifecycle";
 }
 
 public enum RawNativeCallStatus
@@ -24,12 +36,43 @@ public enum RawNativeCallStatus
     TooManyArguments = 2,
     TooManyResults = 3,
     NativeReturnedNull = 4,
-    SessionStopping = 5
+    SessionStopping = 5,
+    AdmissionUnavailable = 6,
+    AdmissionRejected = 7
 }
 
 public readonly record struct RawNativeCallResult(
     RawNativeCallStatus Status,
     ulong[] Results);
+
+public enum NativeCallAdmissionStatus
+{
+    Allowed = 0,
+    UnknownHash = 1,
+    UnsupportedTarget = 2,
+    ArgumentCountMismatch = 3,
+    ResultCountMismatch = 4,
+    ExposureRejected = 5
+}
+
+public readonly record struct NativeCallAdmissionDecision(
+    NativeCallAdmissionStatus Status)
+{
+    public bool IsAllowed => Status is NativeCallAdmissionStatus.Allowed;
+}
+
+public interface INativeCallAdmissionPolicy
+{
+    NativeCallAdmissionDecision Evaluate(
+        ulong hash,
+        int argumentCount,
+        int requestedResultCount);
+}
+
+public interface INativeCallAdmissionControl
+{
+    IDisposable Install(INativeCallAdmissionPolicy policy);
+}
 
 public interface IRawNativeTransport
 {
@@ -94,24 +137,13 @@ public enum ScriptPackageKind
     Library
 }
 
-public sealed record ScriptPackageInfo(
-    string Name,
-    string Directory,
-    ScriptPackageKind Kind,
-    string? EntryAssembly,
-    IReadOnlyList<string> AssemblyFiles,
-    IReadOnlyList<string> DependencyPackageNames);
-
 public enum ScriptLifecycleTransitionReason
 {
     ManualReload,
-    SynchronizedReload,
-    Recovery
+    SynchronizedReload
 }
 
 public sealed record ScriptLifecycleTransitionPlan(
-    IReadOnlyList<string> BinaryReplacementPackages,
-    bool RestartAllExecutables,
     ScriptLifecycleTransitionReason Reason);
 
 public sealed record ScriptLifecycleTransitionResult(
@@ -142,8 +174,7 @@ public enum ScriptLifecycleTransitionOperationState
 
 public readonly record struct ScriptLifecycleTransitionOperationId(Guid Value)
 {
-    public static ScriptLifecycleTransitionOperationId Create() =>
-        new(Guid.NewGuid());
+    public static ScriptLifecycleTransitionOperationId Create() => new(Guid.NewGuid());
 }
 
 public sealed record ScriptLifecycleTransitionOperationSnapshot(
@@ -162,24 +193,26 @@ public sealed record ScriptLifecycleTransitionOperationSnapshot(
 
 public interface IReloadRuntimeHost
 {
-    IReadOnlyList<ScriptPackageInfo> GetInventory();
-
-    void ActivateInitialPackages();
-
     ScriptLifecycleTransitionOperationId RequestTransition(
         ScriptLifecycleTransitionPlan plan);
 
-    IReadOnlyList<ScriptLifecycleTransitionOperationSnapshot>
-        SnapshotOperations();
+    IReadOnlyList<ScriptLifecycleTransitionOperationSnapshot> SnapshotOperations();
 
     void Acknowledge(ScriptLifecycleTransitionOperationId operationId);
 }
 
 internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
 {
+    private sealed record Registration(
+        object Service,
+        string Owner,
+        bool ScriptVisible);
+
+    private const string CoreOwner = "CommunityScriptHookVDotNetCore";
     private readonly Lock _gate = new();
-    private readonly Dictionary<Type, object> _runtimeServices = [];
-    private readonly Dictionary<Type, object> _scriptServices = [];
+    private readonly Dictionary<Type, Registration> _services = [];
+    private readonly HashSet<string> _revokedOwners =
+        new(StringComparer.OrdinalIgnoreCase);
 
     internal RuntimeServiceRegistry()
     {
@@ -188,60 +221,53 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
 
     internal IScriptServices ScriptServices { get; }
 
-    public void Register<TService>(TService service)
-        where TService : class
+    internal IRuntimeServiceRegistry CreateOwnerScope(
+        string owner,
+        bool allowNativeAuthority)
     {
-        ArgumentNullException.ThrowIfNull(service);
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
         lock (_gate)
         {
-            Type contract = typeof(TService);
-            if (_runtimeServices.ContainsKey(contract) ||
-                _scriptServices.ContainsKey(contract))
+            if (_revokedOwners.Contains(owner))
             {
                 throw new InvalidOperationException(
-                    $"Runtime service '{contract.FullName}' is already registered.");
+                    $"Runtime extension owner '{owner}' is permanently revoked " +
+                    "for this GTA process.");
             }
+        }
+        return new OwnerServiceView(this, owner, allowNativeAuthority);
+    }
 
-            _runtimeServices.Add(contract, service);
-            _scriptServices.Add(contract, service);
+    internal void RevokeOwner(string owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+        lock (_gate)
+        {
+            _revokedOwners.Add(owner);
+            Type[] contracts = [.. _services
+                .Where(pair => pair.Value.Owner.Equals(
+                    owner,
+                    StringComparison.OrdinalIgnoreCase))
+                .Select(pair => pair.Key)];
+            foreach (Type contract in contracts)
+            {
+                _services.Remove(contract);
+            }
         }
     }
+
+    public void Register<TService>(TService service)
+        where TService : class =>
+        RegisterCore(service, scriptVisible: true);
 
     public void RegisterRuntimeOnly<TService>(TService service)
-        where TService : class
-    {
-        ArgumentNullException.ThrowIfNull(service);
-        lock (_gate)
-        {
-            Type contract = typeof(TService);
-            if (_runtimeServices.ContainsKey(contract))
-            {
-                throw new InvalidOperationException(
-                    $"Runtime service '{contract.FullName}' is already registered.");
-            }
-
-            _runtimeServices.Add(contract, service);
-        }
-    }
+        where TService : class =>
+        RegisterCore(service, scriptVisible: false);
 
     public bool TryGet<TService>(
         [NotNullWhen(true)] out TService? service)
-        where TService : class
-    {
-        lock (_gate)
-        {
-            if (_runtimeServices.TryGetValue(
-                    typeof(TService),
-                    out object? value))
-            {
-                service = (TService)value;
-                return true;
-            }
-        }
-
-        service = null;
-        return false;
-    }
+        where TService : class =>
+        TryGetCore(scriptOnly: false, out service);
 
     public TService GetRequired<TService>()
         where TService : class =>
@@ -250,23 +276,116 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
             : throw new InvalidOperationException(
                 $"Runtime service '{typeof(TService).FullName}' is unavailable.");
 
-    private bool TryGetForScript<TService>(
+    private void RegisterCore<TService>(TService service, bool scriptVisible)
+        where TService : class =>
+        RegisterOwned(CoreOwner, service, scriptVisible);
+
+    private void RegisterOwned<TService>(
+        string owner,
+        TService service,
+        bool scriptVisible)
+        where TService : class
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+        ArgumentNullException.ThrowIfNull(service);
+        lock (_gate)
+        {
+            if (_revokedOwners.Contains(owner))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime extension owner '{owner}' is permanently revoked " +
+                    "for this GTA process.");
+            }
+
+            Type contract = typeof(TService);
+            if (!_services.TryAdd(
+                    contract,
+                    new(service, owner, scriptVisible)))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime service '{contract.FullName}' is already registered.");
+            }
+        }
+    }
+
+    private bool TryGetOwned<TService>(
+        string owner,
         [NotNullWhen(true)] out TService? service)
         where TService : class
     {
         lock (_gate)
         {
-            if (_scriptServices.TryGetValue(
-                    typeof(TService),
-                    out object? value))
+            if (_revokedOwners.Contains(owner))
             {
-                service = (TService)value;
+                service = null;
+                return false;
+            }
+            if (_services.TryGetValue(
+                    typeof(TService),
+                    out Registration? value))
+            {
+                service = (TService)value.Service;
                 return true;
             }
         }
-
         service = null;
         return false;
+    }
+
+    private bool TryGetCore<TService>(
+        bool scriptOnly,
+        [NotNullWhen(true)] out TService? service)
+        where TService : class
+    {
+        lock (_gate)
+        {
+            if (_services.TryGetValue(typeof(TService), out Registration? value) &&
+                (!scriptOnly || value.ScriptVisible))
+            {
+                service = (TService)value.Service;
+                return true;
+            }
+        }
+        service = null;
+        return false;
+    }
+
+    private static bool IsNativeAuthorityContract(Type contract) =>
+        contract == typeof(IRawNativeTransport) ||
+        contract == typeof(INativeCallAdmissionControl);
+
+    private sealed class OwnerServiceView(
+        RuntimeServiceRegistry owner,
+        string ownerId,
+        bool allowNativeAuthority) : IRuntimeServiceRegistry
+    {
+        public bool TryGet<TService>(
+            [NotNullWhen(true)] out TService? service)
+            where TService : class
+        {
+            if (!allowNativeAuthority && IsNativeAuthorityContract(typeof(TService)))
+            {
+                service = null;
+                return false;
+            }
+            return owner.TryGetOwned(ownerId, out service);
+        }
+
+        public TService GetRequired<TService>()
+            where TService : class =>
+            TryGet(out TService? service)
+                ? service
+                : throw new InvalidOperationException(
+                    $"Runtime service '{typeof(TService).FullName}' is unavailable " +
+                    $"to extension '{ownerId}'.");
+
+        public void Register<TService>(TService service)
+            where TService : class =>
+            owner.RegisterOwned(ownerId, service, scriptVisible: true);
+
+        public void RegisterRuntimeOnly<TService>(TService service)
+            where TService : class =>
+            owner.RegisterOwned(ownerId, service, scriptVisible: false);
     }
 
     private sealed class ScriptServiceView(
@@ -275,7 +394,7 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
         public bool TryGet<TService>(
             [NotNullWhen(true)] out TService? service)
             where TService : class =>
-            owner.TryGetForScript(out service);
+            owner.TryGetCore(scriptOnly: true, out service);
 
         public TService GetRequired<TService>()
             where TService : class =>
@@ -292,7 +411,8 @@ internal sealed record RuntimeExtensionDescriptor(
     string AssemblyName,
     string EntryType,
     IReadOnlyList<string> Provides,
-    IReadOnlyList<string> Requires);
+    IReadOnlyList<string> Requires,
+    IReadOnlyList<string> ReferencedAssemblyNames);
 
 internal static class ManagedAssemblyMetadata
 {
@@ -386,24 +506,28 @@ internal static class RuntimeExtensionDiscovery
     private const int ContractMinor = 0;
 
     public static IReadOnlyList<RuntimeExtensionDescriptor> Discover(
-        string rootDirectory,
+        RootAssemblySnapshot snapshot,
         RuntimeLog log)
     {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(log);
+
         List<RuntimeExtensionDescriptor> result = [];
-        foreach (string path in Directory
-                     .EnumerateFiles(rootDirectory, "*.dll", SearchOption.TopDirectoryOnly)
-                     .OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+        foreach (RootAssemblyImage image in snapshot.Images
+                     .OrderBy(
+                         value => value.Path,
+                         StringComparer.OrdinalIgnoreCase))
         {
             RuntimeExtensionDescriptor? descriptor;
             try
             {
-                descriptor = Inspect(path);
+                descriptor = Inspect(image);
             }
             catch (Exception exception)
             {
                 log.Warning(
-                    $"Root assembly '{Path.GetFileName(path)}' could not be " +
-                    $"inspected: {exception.Message}");
+                    $"Committed root assembly '{Path.GetFileName(image.Path)}' " +
+                    $"could not be inspected: {exception.Message}");
                 continue;
             }
 
@@ -425,13 +549,10 @@ internal static class RuntimeExtensionDiscovery
         return result;
     }
 
-    private static RuntimeExtensionDescriptor? Inspect(string path)
+    private static RuntimeExtensionDescriptor? Inspect(
+        RootAssemblyImage image)
     {
-        using FileStream stream = File.Open(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
+        using MemoryStream stream = new(image.Assembly, writable: false);
         using PEReader pe = new(stream, PEStreamOptions.PrefetchMetadata);
         if (!pe.HasMetadata)
         {
@@ -441,18 +562,18 @@ internal static class RuntimeExtensionDiscovery
         MetadataReader metadata = pe.GetMetadataReader();
         IReadOnlyDictionary<string, string> values =
             ManagedAssemblyMetadata.Read(metadata);
-        if (!values.TryGetValue("SHVDN4.Role", out string? role) ||
-            !role.Equals("RuntimeExtension", StringComparison.OrdinalIgnoreCase))
+        if (!values.TryGetValue(RuntimeExtensionMetadataKeys.Role, out string? role) ||
+            !role.Equals(RuntimeExtensionMetadataKeys.RuntimeExtensionRole, StringComparison.OrdinalIgnoreCase))
         {
             return null;
         }
 
         string assemblyName = metadata.GetString(
             metadata.GetAssemblyDefinition().Name);
-        string id = Required(values, "SHVDN4.Id");
-        string entryType = Required(values, "SHVDN4.EntryType");
-        int major = ParseContract(values, "SHVDN4.ContractMajor");
-        int minor = ParseContract(values, "SHVDN4.ContractMinor");
+        string id = Required(values, RuntimeExtensionMetadataKeys.Id);
+        string entryType = Required(values, RuntimeExtensionMetadataKeys.EntryType);
+        int major = ParseContract(values, RuntimeExtensionMetadataKeys.ContractMajor);
+        int minor = ParseContract(values, RuntimeExtensionMetadataKeys.ContractMinor);
         if (major != ContractMajor || minor > ContractMinor)
         {
             throw new BadImageFormatException(
@@ -460,13 +581,28 @@ internal static class RuntimeExtensionDiscovery
                 $"version {major}.{minor}.");
         }
 
+        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
+        foreach (AssemblyReferenceHandle handle in metadata.AssemblyReferences)
+        {
+            AssemblyReference reference = metadata.GetAssemblyReference(handle);
+            string referencedName = metadata.GetString(reference.Name);
+            if (!string.IsNullOrWhiteSpace(referencedName))
+            {
+                references.Add(referencedName);
+            }
+        }
+
         return new(
             id,
-            Path.GetFullPath(path),
+            image.Path,
             assemblyName,
             entryType,
-            ParseCapabilities(values, "SHVDN4.Provides"),
-            ParseCapabilities(values, "SHVDN4.Requires"));
+            ParseCapabilities(values, RuntimeExtensionMetadataKeys.Provides),
+            ParseCapabilities(values, RuntimeExtensionMetadataKeys.Requires),
+            Array.AsReadOnly(
+                [.. references.OrderBy(
+                    value => value,
+                    StringComparer.OrdinalIgnoreCase)]));
     }
 
     private static string Required(

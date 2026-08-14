@@ -1,0 +1,28 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <Platforms>x64</Platforms>
+  </PropertyGroup>
+  <ItemGroup>
+    <Folder Include="Source\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Alloc8orStandardNatives">
+      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net10.0\Alloc8orStandardNatives.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="CommunityScriptHookVDotNetCore">
+      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net10.0\CommunityScriptHookVDotNetCore.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="LocalNativeMemories">
+      <HintPath>..\LocalNativeMemories\bin\x64\Release\net10.0\LocalNativeMemories.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
+    <Exec Command="xcopy &quot;$(TargetDir)&quot; &quot;C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V&quot; /Y /I" />
+  </Target>
+</Project>

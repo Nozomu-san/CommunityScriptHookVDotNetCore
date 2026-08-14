@@ -48,7 +48,8 @@ module internal ReloadConfiguration =
                 $"Mode={formatMode config.Mode}"
                 ""
                 "; Usable only on Manual mode."
-                "; Visit docs.fivem.net/docs/game-references/controls for GTA game input; every other token than INPUT_* selects device input."
+                "; Visit docs.fivem.net/docs/game-references/controls for GTA game input."
+                "; Every other token than INPUT_* selects device input."
                 $"ReloadInputs={config.ReloadInputs}"
             |])
 

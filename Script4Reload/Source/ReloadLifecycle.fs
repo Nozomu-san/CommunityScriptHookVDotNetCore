@@ -1,17 +1,9 @@
 namespace Script4Reload.Source
 
 open System
-open System.Collections.Generic
-open System.Threading
-open System.Threading.Tasks
-open ScriptHookInput.Source
+open System.Diagnostics
 open CommunityScriptHookVDotNetCore.Source
-
-[<RequireQualifiedAccess>]
-type internal SnapshotWork =
-    | ExplicitRequest
-    | SynchronizedRequest
-    | Reconciliation
+open ScriptHookInput.Source
 
 [<Sealed>]
 type Scripts4Lifecycle
@@ -22,108 +14,63 @@ type Scripts4Lifecycle
         log: ReloadLog
     ) =
 
-    let lifetime = new CancellationTokenSource()
-    let mutable baseline: ScriptsDirectorySnapshot option = None
+    let settleWindow = TimeSpan.FromMilliseconds 150.0
     let mutable watcher: Scripts4Watcher option = None
     let mutable reloadAction: IInputAction option = None
+    let mutable activeOperation: ScriptLifecycleTransitionOperationId option = None
+    let mutable lastOperationState: ScriptLifecycleTransitionOperationState option = None
+    let mutable synchronizedDirty = false
+    let mutable lastDirtyTimestamp = 0L
     let mutable explicitReloadPending = false
-    let mutable synchronizedReloadPending = false
-    let mutable activeOperation:
-        ScriptLifecycleTransitionOperationId option = None
-    let mutable activeInputSnapshot: ScriptsDirectorySnapshot option = None
-    let mutable lastOperationState:
-        ScriptLifecycleTransitionOperationState option = None
-    let mutable reconciliationPending = false
-    let mutable snapshotWork: SnapshotWork option = None
-    let mutable snapshotTask:
-        Task<Result<ScriptsDirectorySnapshot, string>> option = None
-    let mutable lastSnapshotDiagnostic: string option = None
     let mutable shutdown = false
 
-    let formatOperationId
-        (value: ScriptLifecycleTransitionOperationId) =
-        value.Value.ToString("D")
+    let formatOperationId (value: ScriptLifecycleTransitionOperationId) =
+        value.Value.ToString "D"
 
-    let describe (values: IEnumerable<string>) =
+    let describe (values: seq<string>) =
         values
         |> Seq.filter (String.IsNullOrWhiteSpace >> not)
         |> String.concat ", "
 
-    let captureSnapshot (cancellationToken: CancellationToken) =
-        ScriptsDirectorySnapshot.Capture(
-            context.ScriptsDirectory,
-            cancellationToken)
+    let acquireManualInput() =
+        if config.Mode = ReloadMode.Manual && reloadAction.IsNone && not shutdown then
+            let inputActions = context.Services.GetRequired<IInputActions>()
+            let action = inputActions.Create("Script4Reload.Manual", config.ReloadInputs)
+            reloadAction <- Some action
+            log.Information($"Manual reload input is active: {config.ReloadInputs}.")
 
-    let beginTransition
-        (snapshot: ScriptsDirectorySnapshot)
-        (reason: ScriptLifecycleTransitionReason)
-        allowLifecycleOnly =
-        match baseline with
-        | None -> baseline <- Some snapshot
-        | Some previous ->
-            let plan =
-                ReloadPlanning.build(
-                    host.GetInventory(),
-                    previous,
-                    snapshot)
+    let releaseManualInput() =
+        reloadAction
+        |> Option.iter (fun value ->
+            try
+                value.Dispose()
+            with _ -> ())
+        reloadAction <- None
 
-            if not plan.HasBinaryReplacement && not allowLifecycleOnly then
-                baseline <- Some snapshot
-                log.Information(
-                    "The scripts4 signal did not produce a new binary " +
-                    "generation; no lifecycle transition was requested.")
-            else
-                let request =
-                    ScriptLifecycleTransitionPlan(
-                        plan.BinaryReplacementPackages,
-                        plan.RestartAllExecutables,
-                        reason)
-                let operation = host.RequestTransition request
-                activeOperation <- Some operation
-                activeInputSnapshot <- Some snapshot
-                lastOperationState <- None
-                let expansion =
-                    if plan.ExpandedByDependencies then
-                        " The coherent dependency closure was included."
-                    else
-                        String.Empty
-                let replacement =
-                    if plan.HasBinaryReplacement then
-                        "[" +
-                        describe plan.BinaryReplacementPackages +
-                        "]"
-                    else
-                        "none; lifecycle-only restart"
+    let request reason =
+        if activeOperation.IsSome || shutdown then
+            false
+        else
+            let plan = ScriptLifecycleTransitionPlan(reason)
+            let operation = host.RequestTransition plan
+            activeOperation <- Some operation
+            lastOperationState <- None
+            log.Information(
+                $"scripts4 reconcile '{formatOperationId operation}' requested; " +
+                $"reason={reason}.")
+            true
 
-                log.Information(
-                    $"Lifecycle transition '{formatOperationId operation}' " +
-                    $"requested. Binary replacement={replacement}." +
-                    expansion)
-
-    let writeSnapshotDiagnostic prefix message =
-        if lastSnapshotDiagnostic <> Some message then
-            lastSnapshotDiagnostic <- Some message
-            log.Warning(prefix + message)
-
-    let writeOperationResult
-        (snapshot: ScriptLifecycleTransitionOperationSnapshot) =
+    let writeOperationResult (snapshot: ScriptLifecycleTransitionOperationSnapshot) =
         let result = snapshot.Result
         if not (isNull result) then
             let summary =
                 $"Epoch={result.LifecycleEpoch} " +
-                "Restarted=[" +
-                describe result.RestartedInPlacePackages +
-                "] Replaced=[" +
-                describe result.BinaryReplacedPackages +
-                "] Libraries=[" +
-                describe result.RefreshedLibraries +
-                "] Added=[" +
-                describe result.AddedPackages +
-                "] Removed=[" +
-                describe result.RemovedPackages +
-                "] Failed=[" +
-                describe result.FailedPackages +
-                "]."
+                "Restarted=[" + describe result.RestartedInPlacePackages +
+                "] Replaced=[" + describe result.BinaryReplacedPackages +
+                "] Libraries=[" + describe result.RefreshedLibraries +
+                "] Added=[" + describe result.AddedPackages +
+                "] Removed=[" + describe result.RemovedPackages +
+                "] Failed=[" + describe result.FailedPackages + "]."
 
             if result.Succeeded then
                 log.Information summary
@@ -131,14 +78,12 @@ type Scripts4Lifecycle
                 log.Error summary
 
         if not (String.IsNullOrWhiteSpace snapshot.Diagnostic) then
-            if snapshot.State =
-               ScriptLifecycleTransitionOperationState.Failed then
+            match snapshot.State with
+            | ScriptLifecycleTransitionOperationState.Failed ->
                 log.Error snapshot.Diagnostic
-            elif snapshot.State =
-                 ScriptLifecycleTransitionOperationState.Cancelled then
+            | ScriptLifecycleTransitionOperationState.Cancelled ->
                 log.Information snapshot.Diagnostic
-            else
-                log.Warning snapshot.Diagnostic
+            | _ -> log.Information snapshot.Diagnostic
 
     let advanceOperation() =
         match activeOperation with
@@ -151,202 +96,119 @@ type Scripts4Lifecycle
             match current with
             | None ->
                 log.Error(
-                    $"Lifecycle transition " +
-                    $"'{formatOperationId operationId}' disappeared before " +
-                    "it reached a terminal state.")
+                    $"scripts4 reconcile '{formatOperationId operationId}' " +
+                    "disappeared before reaching a terminal state.")
                 activeOperation <- None
                 lastOperationState <- None
-                reconciliationPending <- true
             | Some snapshot ->
                 if lastOperationState <> Some snapshot.State then
                     lastOperationState <- Some snapshot.State
                     log.Information(
-                        $"Lifecycle transition " +
-                        $"'{formatOperationId operationId}' state -> " +
-                        $"{snapshot.State}.")
+                        $"scripts4 reconcile '{formatOperationId operationId}' " +
+                        $"state -> {snapshot.State}.")
 
                 if snapshot.IsTerminal then
                     writeOperationResult snapshot
                     host.Acknowledge operationId
                     activeOperation <- None
                     lastOperationState <- None
-                    reconciliationPending <- true
 
-    let processSnapshot work result =
-        match result with
-        | Error message ->
-            let prefix =
-                match work with
-                | SnapshotWork.Reconciliation ->
-                    "Post-transition scripts4 reconciliation is waiting " +
-                    "for a readable generation: "
-                | _ ->
-                    "The scripts4 generation is not readable yet: "
-            writeSnapshotDiagnostic prefix message
-        | Ok current ->
-            lastSnapshotDiagnostic <- None
-            snapshotWork <- None
-            match work with
-            | SnapshotWork.ExplicitRequest ->
-                explicitReloadPending <- false
-                beginTransition
-                    current
-                    ScriptLifecycleTransitionReason.ManualReload
-                    true
-            | SnapshotWork.SynchronizedRequest ->
-                synchronizedReloadPending <- false
-                beginTransition
-                    current
-                    ScriptLifecycleTransitionReason.SynchronizedReload
-                    false
-            | SnapshotWork.Reconciliation ->
-                reconciliationPending <- false
-                match activeInputSnapshot with
-                | Some captured when not (captured.ContentEquals current) ->
-                    baseline <- Some captured
-                    activeInputSnapshot <- None
+    let advanceWatcher() =
+        match watcher with
+        | None -> ()
+        | Some value ->
+            match value.ConsumeError() with
+            | Some message ->
+                log.Warning(
+                    "The scripts4 watcher lost reliable event history: " + message)
+                if value.Recover() then
+                    synchronizedDirty <- true
+                    lastDirtyTimestamp <- Stopwatch.GetTimestamp()
                     log.Information(
-                        "A newer scripts4 generation appeared during the " +
-                        "lifecycle transition; a follow-up operation is " +
-                        "being requested.")
-                    beginTransition
-                        current
-                        ScriptLifecycleTransitionReason.SynchronizedReload
-                        false
-                | _ ->
-                    baseline <- Some current
-                    activeInputSnapshot <- None
+                        "The scripts4 watcher was recreated; a full CSHVDNC " +
+                        "reconcile will be requested after stabilization.")
+                else
+                    log.Error("The scripts4 watcher could not be recreated.")
+            | None -> ()
 
-    let advanceSnapshotWork() =
-        match snapshotWork, snapshotTask with
-        | Some _, None when not shutdown ->
-            snapshotTask <-
-                Some(
-                    Task.Run(
-                        (fun () -> captureSnapshot lifetime.Token),
-                        lifetime.Token))
-        | Some work, Some task when task.IsCompleted ->
-            snapshotTask <- None
-            if task.IsCanceled || shutdown then
-                snapshotWork <- None
-            else
+            if value.ConsumeSignal() then
+                synchronizedDirty <- true
+                lastDirtyTimestamp <- Stopwatch.GetTimestamp()
+
+    let advanceSynchronized() =
+        if config.Mode = ReloadMode.Synchronized &&
+           synchronizedDirty &&
+           activeOperation.IsNone &&
+           lastDirtyTimestamp <> 0L &&
+           Stopwatch.GetElapsedTime(lastDirtyTimestamp) >= settleWindow then
+            if request ScriptLifecycleTransitionReason.SynchronizedReload then
+                synchronizedDirty <- false
+
+    let advanceManual() =
+        if config.Mode = ReloadMode.Manual then
+            acquireManualInput()
+            match reloadAction with
+            | Some action ->
                 try
-                    task.GetAwaiter().GetResult()
-                    |> processSnapshot work
-                with
-                | :? OperationCanceledException ->
-                    snapshotWork <- None
-                | exceptionValue ->
-                    processSnapshot work (Error exceptionValue.Message)
-        | _ -> ()
+                    if action.State.WasPressed then
+                        explicitReloadPending <- true
+                with exceptionValue ->
+                    log.Warning(
+                        "Manual input became unavailable and will be reacquired: " +
+                        exceptionValue.Message)
+                    releaseManualInput()
+            | None -> ()
 
-    let selectSnapshotWork() =
-        if Option.isNone snapshotWork &&
-           Option.isNone snapshotTask &&
-           Option.isNone activeOperation then
-            if reconciliationPending then
-                snapshotWork <- Some SnapshotWork.Reconciliation
-            elif explicitReloadPending then
-                snapshotWork <- Some SnapshotWork.ExplicitRequest
-            elif synchronizedReloadPending then
-                snapshotWork <- Some SnapshotWork.SynchronizedRequest
+            if explicitReloadPending && activeOperation.IsNone then
+                if request ScriptLifecycleTransitionReason.ManualReload then
+                    explicitReloadPending <- false
 
     member _.Initialize() =
         if shutdown then
             raise (ObjectDisposedException(nameof Scripts4Lifecycle))
 
-        match captureSnapshot lifetime.Token with
-        | Ok snapshot -> baseline <- Some snapshot
-        | Error message ->
-            invalidOp(
-                "The initial scripts4 snapshot could not be captured: " +
-                message)
-
         match config.Mode with
         | ReloadMode.Manual ->
-            let input = context.Services.GetRequired<IScriptHookInput>()
-            reloadAction <-
-                Some(
-                    input.Create(
-                        "Script4Reload.Reload",
-                        config.ReloadInputs))
+            acquireManualInput()
+            log.Information(
+                $"Script4Reload Manual mode is active with input " +
+                $"'{config.ReloadInputs}'. A trigger requests a global lifecycle " +
+                "reload even when no DLL binary changed.")
         | ReloadMode.Synchronized ->
             watcher <- Some(new Scripts4Watcher(context.ScriptsDirectory))
-
-        host.ActivateInitialPackages()
-        log.Information(
-            $"Script4Reload initialized in {config.Mode} mode and " +
-            "activated the initial scripts4 lifecycle generation.")
+            log.Information(
+                "Script4Reload Synchronized mode is active. Filesystem events " +
+                "only mark disk state dirty; CSHVDNC owns capture, validation, " +
+                "RAM staging, diffing, and the global lifecycle barrier.")
 
     member _.RequestExplicitReload(reason: string) =
         if shutdown then
             false
         else
             explicitReloadPending <- true
-            let message =
+            log.Information(
                 if String.IsNullOrWhiteSpace reason then
-                    "Explicit scripts4 lifecycle restart requested."
+                    "An explicit global reload was requested."
                 else
-                    reason.Trim()
-            log.Information message
+                    $"An explicit global reload was requested: {reason.Trim()}.")
             true
 
-    member _.AdvanceFrame(frame: RuntimeExtensionFrameContext) =
+    member _.AdvanceFrame(_: RuntimeExtensionFrameContext) =
         if not shutdown then
-            match reloadAction with
-            | Some action ->
-                let state = action.State
-                if state.FrameIndex = frame.HostFrameIndex &&
-                   state.WasPressed then
-                    explicitReloadPending <- true
-                    log.Information(
-                        "Manual scripts4 lifecycle restart requested by " +
-                        "ScriptHookInput.")
-            | None -> ()
-
-            match watcher with
-            | Some value ->
-                match value.ConsumeError() with
-                | Some message ->
-                    log.Warning(
-                        "The scripts4 watcher lost reliable event history " +
-                        "and requested full reconciliation: " +
-                        message)
-                    if value.Recover() then
-                        log.Information(
-                            "The scripts4 watcher was recreated successfully.")
-                    else
-                        log.Warning(
-                            "The scripts4 watcher could not be recreated yet.")
-                    synchronizedReloadPending <- true
-                | None -> ()
-
-                if value.ConsumeSignal() then
-                    synchronizedReloadPending <- true
-            | None -> ()
-
             advanceOperation()
-            selectSnapshotWork()
-            advanceSnapshotWork()
+            if activeOperation.IsNone then
+                match config.Mode with
+                | ReloadMode.Manual -> advanceManual()
+                | ReloadMode.Synchronized ->
+                    advanceWatcher()
+                    advanceSynchronized()
 
     member _.Shutdown() =
         if not shutdown then
             shutdown <- true
-            lifetime.Cancel()
+            releaseManualInput()
             watcher
-            |> Option.iter (fun value ->
-                (value :> IDisposable).Dispose())
+            |> Option.iter (fun value -> (value :> IDisposable).Dispose())
             watcher <- None
-            reloadAction
-            |> Option.iter (fun value -> value.Dispose())
-            reloadAction <- None
+            synchronizedDirty <- false
             explicitReloadPending <- false
-            synchronizedReloadPending <- false
-            reconciliationPending <- false
-            activeOperation <- None
-            activeInputSnapshot <- None
-            snapshotTask <- None
-            snapshotWork <- None
-            baseline <- None
-            log.Information(
-                "Script4Reload runtime lifecycle shutdown completed.")

@@ -1,4 +1,4 @@
-﻿#requires -Version 7.6
+#requires -Version 7.6
 
 [CmdletBinding()]
 param(
@@ -18,7 +18,6 @@ if (-not [string]::IsNullOrWhiteSpace($InspectName) -and
 $compilerSource = @'
 #nullable enable
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -31,21 +30,21 @@ using System.Text.RegularExpressions;
 
 namespace Alloc8orStandardNatives.CatalogTool;
 
-public static class CatalogCompilerV5
+public static class CatalogCompilerV7
 {
     private const ushort FormatVersion = 2;
     private static readonly UTF8Encoding Utf8 = new(false);
     private static readonly Regex IdentifierRegex = new(
-        "^[A-Za-z_][A-Za-z0-9_]*$",
+        """^[A-Za-z_][A-Za-z0-9_]*$""",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex ByteRegex = new(
-        "0x(?<byte>[0-9A-Fa-f]{2})",
+        """0x(?<byte>[0-9A-Fa-f]{2})""",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex IntegerConstantRegex = new(
-        "internal\\s+const\\s+int\\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*(?<value>[0-9]+)\\s*;",
+        """internal\s+const\s+int\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<value>[0-9]+)\s*;""",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
     private static readonly Regex StringConstantRegex = new(
-        "internal\\s+const\\s+string\\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\"(?<value>[0-9A-Fa-f]+)\"\\s*;",
+        """internal\s+const\s+string\s+(?<name>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*"(?<value>[0-9A-Fa-f]+)"\s*;""",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     private static readonly Dictionary<string, AbiType> NativeTypes =
@@ -125,10 +124,10 @@ public static class CatalogCompilerV5
         new(StringComparer.Ordinal)
         {
             ["BOOL"] = new("bool", "Boolean", false),
-            ["int"] = new("int", "Int32", false),
-            ["float"] = new("NativeFloat32", "Float32", true),
+            ["int"] = new(null, "Int32", false, IsNumeric: true),
+            ["float"] = new(null, "Float32", false, IsNumeric: true),
             ["const char*"] = new("string?", "Text", false),
-            ["Hash"] = new("uint", "Hash32", false),
+            ["Hash"] = new(null, "Hash32", false, IsNumeric: true),
             ["Blip"] = new("Blip", "Blip", true),
             ["Cam"] = new("Cam", "Cam", true),
             ["Entity"] = new("Entity", "Entity", true),
@@ -144,8 +143,7 @@ public static class CatalogCompilerV5
         };
 
     private static readonly HashSet<string> Keywords = new(
-        new[]
-        {
+        [
             "abstract", "as", "base", "bool", "break", "byte", "case",
             "catch", "char", "checked", "class", "const", "continue",
             "decimal", "default", "delegate", "do", "double", "else",
@@ -165,7 +163,7 @@ public static class CatalogCompilerV5
             "notnull", "nuint", "on", "or", "orderby", "partial", "remove",
             "required", "scoped", "select", "set", "unmanaged", "value",
             "var", "when", "where", "with", "yield"
-        },
+        ],
         StringComparer.Ordinal);
 
     public static int Run(
@@ -200,13 +198,18 @@ public static class CatalogCompilerV5
 
         if (verifyOnly)
         {
+            RequireFile(standardPath);
             CatalogImage generated = ReadGeneratedCatalog(dataPath);
             ValidateCatalog(generated.Records);
+            VerifyGeneratedSource(
+                standardPath,
+                RenderStandardNatives(generated.Records));
             Console.WriteLine(
                 $"Current packed catalog format {generated.FormatVersion} " +
                 $"verified: {generated.Records.Count} descriptors, " +
                 $"{generated.PackedLength} packed bytes, " +
-                $"{generated.DecodedLength} decoded bytes.");
+                $"{generated.DecodedLength} decoded bytes; " +
+                "StandardNatives.cs matches the C# 14 generator.");
             if (File.Exists(legacyPath) && File.Exists(enhancedPath))
             {
                 List<NativeRecord> sourceRecords = ReadAndMerge(
@@ -312,7 +315,7 @@ public static class CatalogCompilerV5
                     $"'{enhancedEntry.Name}'.");
             }
 
-            records.Add(new NativeRecord(
+            records.Add(new(
                 hash,
                 source.Name,
                 legacyEntry is null ? null : NativeVariant.From(legacyEntry),
@@ -385,7 +388,6 @@ public static class CatalogCompilerV5
                 }
 
                 SourceEntry entry = new(
-                    namespaceProperty.Name,
                     name,
                     build,
                     returnType,
@@ -427,7 +429,7 @@ public static class CatalogCompilerV5
                 throw new InvalidDataException(
                     $"{context}: invalid parameter name '{name}'.");
             }
-            parameters.Add(new NativeParameter(type, name));
+            parameters.Add(new(type, name));
         }
         return parameters;
     }
@@ -552,6 +554,16 @@ public static class CatalogCompilerV5
         {
             RequireKnownType(parameter.Type, context);
         }
+
+        Exposure expected = ClassifyExposure(
+            variant.ReturnType,
+            variant.Parameters);
+        if (variant.Exposure != expected)
+        {
+            throw new InvalidDataException(
+                $"{context}: stored exposure {variant.Exposure} does not match " +
+                $"the ABI-derived exposure {expected}.");
+        }
     }
 
     private static void RequireKnownType(string type, string context)
@@ -604,9 +616,9 @@ public static class CatalogCompilerV5
         byte[] content)
     {
         hash.AppendData(Utf8.GetBytes(name));
-        hash.AppendData(new byte[] { 0 });
+        hash.AppendData([0]);
         hash.AppendData(content);
-        hash.AppendData(new byte[] { 0 });
+        hash.AppendData([0]);
     }
 
     private static CatalogBuild BuildCatalog(
@@ -674,7 +686,7 @@ public static class CatalogCompilerV5
                 "Brotli failed to compress the native catalog.");
         }
         Array.Resize(ref packed, bytesWritten);
-        return new CatalogBuild(
+        return new(
             sourceFingerprint,
             SHA256.HashData(decoded),
             decoded,
@@ -703,7 +715,7 @@ public static class CatalogCompilerV5
     {
         WriteVarUInt32(writer, EncodeBuild(variant.MinimumBuild));
         writer.Write((byte)NativeTypes[variant.ReturnType]);
-        writer.Write((byte)GetExposure(variant));
+        writer.Write((byte)variant.Exposure);
         WriteVarUInt32(writer, checked((uint)variant.Parameters.Count));
         foreach (NativeParameter parameter in variant.Parameters)
         {
@@ -714,16 +726,16 @@ public static class CatalogCompilerV5
         }
     }
 
-    private static Exposure GetExposure(NativeVariant variant)
+    private static Exposure ClassifyExposure(
+        string returnType,
+        IReadOnlyList<NativeParameter> parameters)
     {
-        if (variant.Parameters.Any(
-                static parameter => parameter.Type == "Any"))
+        if (parameters.Any(static parameter => parameter.Type == "Any"))
         {
             return Exposure.CatalogOnly;
         }
-        if ((variant.ReturnType.Contains('*') &&
-             variant.ReturnType != "const char*") ||
-            variant.Parameters.Any(static parameter =>
+        if ((returnType.Contains('*') && returnType != "const char*") ||
+            parameters.Any(static parameter =>
                 parameter.Type.Contains('*') &&
                 parameter.Type != "const char*"))
         {
@@ -921,20 +933,22 @@ public static class CatalogCompilerV5
         int legacyBuild = DecodeBuild(ReadVarUInt32(reader));
         int enhancedBuild = DecodeBuild(ReadVarUInt32(reader));
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
-        _ = ReadExposure(reader);
+        Exposure exposure = ReadExposure(reader);
         List<NativeParameter> parameters = ReadParameters(reader, strings);
         NativeVariant? legacy = legacyBuild < 0
             ? null
             : new NativeVariant(
                 legacyBuild,
                 returnType,
-                CloneParameters(parameters));
+                CloneParameters(parameters),
+                exposure);
         NativeVariant? enhanced = enhancedBuild < 0
             ? null
             : new NativeVariant(
                 enhancedBuild,
                 returnType,
-                CloneParameters(parameters));
+                CloneParameters(parameters),
+                exposure);
         return new NativeRecord(hash, name, legacy, enhanced);
     }
 
@@ -970,11 +984,13 @@ public static class CatalogCompilerV5
                 "A present native edition variant cannot be unsupported.");
         }
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
-        _ = ReadExposure(reader);
+        Exposure exposure = ReadExposure(reader);
+        List<NativeParameter> parameters = ReadParameters(reader, strings);
         return new NativeVariant(
             minimumBuild,
             returnType,
-            ReadParameters(reader, strings));
+            parameters,
+            exposure);
     }
 
     private static List<NativeParameter> ReadParameters(
@@ -1061,6 +1077,7 @@ public static class CatalogCompilerV5
         }
         if (left is null || right is null ||
             left.MinimumBuild != right.MinimumBuild ||
+            left.Exposure != right.Exposure ||
             !left.ReturnType.Equals(right.ReturnType, StringComparison.Ordinal) ||
             left.Parameters.Count != right.Parameters.Count)
         {
@@ -1166,39 +1183,79 @@ public static class CatalogCompilerV5
         GeneratedMethod method)
     {
         ReturnProjection result = Returns[method.Variant.ReturnType];
+        IReadOnlyList<NativeParameter> parameters = method.Variant.Parameters;
+        int genericCount = parameters.Count(static parameter =>
+            Parameters[parameter.Type].IsNumeric);
+
         builder.Append("    public static ")
             .Append(result.ClrType).Append(' ')
-            .Append(record.Name).AppendLine("(");
-        for (int parameterIndex = 0;
-             parameterIndex < method.Variant.Parameters.Count;
-             ++parameterIndex)
+            .Append(record.Name);
+
+        if (genericCount != 0)
         {
-            NativeParameter parameter = method.Variant.Parameters[parameterIndex];
-            ParameterProjection projection = Parameters[parameter.Type];
-            builder.Append("        ")
-                .Append(projection.ClrType).Append(' ')
-                .Append(EscapeIdentifier(parameter.Name))
-                .AppendLine(
-                    parameterIndex + 1 < method.Variant.Parameters.Count
-                        ? ","
-                        : string.Empty);
+            builder.Append('<');
+            for (int index = 0; index < genericCount; ++index)
+            {
+                if (index != 0)
+                {
+                    builder.Append(", ");
+                }
+                builder.Append('T').Append(index);
+            }
+            builder.Append('>');
         }
-        builder.AppendLine("    )")
-            .Append("        => ").Append(result.Invoker).Append('(')
-            .Append(record.Index.ToString(CultureInfo.InvariantCulture));
-        if (method.Variant.Parameters.Count == 0)
+
+        if (parameters.Count == 0)
         {
-            builder.AppendLine(");")
+            builder.Append("() => ")
+                .Append(result.Invoker).Append('(')
+                .Append(record.Index.ToString(CultureInfo.InvariantCulture))
+                .AppendLine(");")
                 .AppendLine();
             return;
         }
 
-        builder.AppendLine(",");
+        builder.AppendLine("(");
+        int genericIndex = 0;
         for (int parameterIndex = 0;
-             parameterIndex < method.Variant.Parameters.Count;
+             parameterIndex < parameters.Count;
              ++parameterIndex)
         {
-            NativeParameter parameter = method.Variant.Parameters[parameterIndex];
+            NativeParameter parameter = parameters[parameterIndex];
+            ParameterProjection projection = Parameters[parameter.Type];
+            string clrType = projection.IsNumeric
+                ? $"T{genericIndex++}"
+                : projection.ClrType ?? throw new InvalidOperationException(
+                    $"Projection for '{parameter.Type}' has no CLR type.");
+
+            builder.Append("        ")
+                .Append(clrType).Append(' ')
+                .Append(EscapeIdentifier(parameter.Name))
+                .AppendLine(
+                    parameterIndex + 1 < parameters.Count
+                        ? ","
+                        : ")");
+        }
+
+        for (int index = 0; index < genericCount; ++index)
+        {
+            builder.Append("        where T")
+                .Append(index)
+                .Append(" : INumberBase<T")
+                .Append(index)
+                .AppendLine(">");
+        }
+
+        builder.Append("        => ")
+            .Append(result.Invoker).Append('(')
+            .Append(record.Index.ToString(CultureInfo.InvariantCulture))
+            .AppendLine(",");
+
+        for (int parameterIndex = 0;
+             parameterIndex < parameters.Count;
+             ++parameterIndex)
+        {
+            NativeParameter parameter = parameters[parameterIndex];
             ParameterProjection projection = Parameters[parameter.Type];
             string name = EscapeIdentifier(parameter.Name);
             builder.Append("            NativeArgument.")
@@ -1209,7 +1266,7 @@ public static class CatalogCompilerV5
                 builder.Append(".Value");
             }
             builder.AppendLine(
-                parameterIndex + 1 < method.Variant.Parameters.Count
+                parameterIndex + 1 < parameters.Count
                     ? "),"
                     : "));");
         }
@@ -1234,15 +1291,21 @@ public static class CatalogCompilerV5
         {
             string signature = string.Join(
                 "|",
-                variant.Parameters.Select(parameter =>
-                    Parameters[parameter.Type].ClrType));
+                variant.Parameters.Select(static parameter =>
+                {
+                    ParameterProjection projection = Parameters[parameter.Type];
+                    return projection.IsNumeric
+                        ? "<number>"
+                        : projection.ClrType ?? throw new InvalidOperationException(
+                            $"Projection for '{parameter.Type}' has no CLR type.");
+                }));
             if (collisions.Contains(signature))
             {
                 continue;
             }
-            if (!methods.TryGetValue(signature, out GeneratedMethod? existing))
+            if (!methods.TryGetValue(signature, out GeneratedMethod existing))
             {
-                methods.Add(signature, new GeneratedMethod(variant));
+                methods.Add(signature, new(variant));
                 continue;
             }
             if (existing.Variant.HasSameWireContract(variant))
@@ -1261,9 +1324,9 @@ public static class CatalogCompilerV5
         NativeVariant? variant)
     {
         if (variant is null ||
-            GetExposure(variant) != Exposure.SafePublic ||
+            variant.Exposure != Exposure.SafePublic ||
             !Returns.ContainsKey(variant.ReturnType) ||
-            variant.Parameters.Any(parameter =>
+            variant.Parameters.Any(static parameter =>
                 !Parameters.ContainsKey(parameter.Type)))
         {
             return;
@@ -1272,10 +1335,23 @@ public static class CatalogCompilerV5
     }
 
     private static int CountSafeMethods(IReadOnlyList<NativeRecord> records) =>
-        records.Sum(record => GetGeneratedMethods(record).Count);
+        records.Sum(static record => GetGeneratedMethods(record).Count);
 
     private static string EscapeIdentifier(string value) =>
         Keywords.Contains(value) ? "@" + value : value;
+
+    private static void VerifyGeneratedSource(string path, string expected)
+    {
+        string actual = File.ReadAllText(path, Utf8);
+        if (!actual.ReplaceLineEndings("\n").Equals(
+                expected.ReplaceLineEndings("\n"),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{Path.GetFileName(path)} is stale relative to the C# 14 generator. " +
+                "Regenerate before freezing Alloc8orStandardNatives.");
+        }
+    }
 
     private static void WriteAtomic(string path, string content)
     {
@@ -1310,13 +1386,14 @@ public static class CatalogCompilerV5
     {
         Console.WriteLine();
         Console.WriteLine("Readable proof decoded from the packed catalog:");
-        foreach (string name in new[]
-        {
+        string[] proofNames =
+        [
             "SWITCH_TO_MULTI_FIRSTPART",
             "SC_PAUSE_NEWS_INIT_STARTER_PACK",
             "NETWORK_POST_UDS_ACTIVITY_RESUME_WITH_TASKS",
             "OPEN_COMMERCE_STORE"
-        })
+        ];
+        foreach (string name in proofNames)
         {
             NativeRecord? record = records.FirstOrDefault(item =>
                 item.Name.Equals(name, StringComparison.Ordinal));
@@ -1346,7 +1423,8 @@ public static class CatalogCompilerV5
 
         Console.WriteLine(
             $"{edition}: minimum build {variant.MinimumBuild}; " +
-            $"return {variant.ReturnType}; {variant.Parameters.Count} argument(s)");
+            $"exposure {variant.Exposure}; return {variant.ReturnType}; " +
+            $"{variant.Parameters.Count} argument(s)");
         for (int index = 0; index < variant.Parameters.Count; ++index)
         {
             NativeParameter parameter = variant.Parameters[index];
@@ -1370,7 +1448,7 @@ public static class CatalogCompilerV5
             ", ",
             variant.Parameters.Select(parameter =>
                 parameter.Type + " " + parameter.Name));
-        return $"build {variant.MinimumBuild}; " +
+        return $"build {variant.MinimumBuild}; exposure {variant.Exposure}; " +
             $"{variant.ReturnType} ({parameters})";
     }
 
@@ -1418,66 +1496,45 @@ public static class CatalogCompilerV5
         CatalogOnly = 2
     }
 
-    private sealed class SourceEntry
+    private sealed class SourceEntry(
+        string name,
+        int build,
+        string returnType,
+        List<NativeParameter> parameters)
     {
-        internal SourceEntry(
-            string nativeNamespace,
-            string name,
-            int build,
-            string returnType,
-            List<NativeParameter> parameters)
-        {
-            Namespace = nativeNamespace;
-            Name = name;
-            Build = build;
-            ReturnType = returnType;
-            Parameters = parameters;
-        }
-
-        internal string Namespace { get; }
-        internal string Name { get; }
-        internal int Build { get; }
-        internal string ReturnType { get; }
-        internal List<NativeParameter> Parameters { get; }
+        internal string Name { get; } = name;
+        internal int Build { get; } = build;
+        internal string ReturnType { get; } = returnType;
+        internal List<NativeParameter> Parameters { get; } = parameters;
     }
 
-    private sealed class NativeParameter
+    private sealed record NativeParameter(string Type, string Name);
+
+    private sealed class NativeVariant(
+        int minimumBuild,
+        string returnType,
+        List<NativeParameter> parameters,
+        Exposure exposure)
     {
-        internal NativeParameter(string type, string name)
+        internal int MinimumBuild { get; } = minimumBuild;
+        internal string ReturnType { get; } = returnType;
+        internal List<NativeParameter> Parameters { get; } = parameters;
+        internal Exposure Exposure { get; } = exposure;
+
+        internal static NativeVariant From(SourceEntry source)
         {
-            Type = type;
-            Name = name;
-        }
-
-        internal string Type { get; }
-        internal string Name { get; }
-    }
-
-    private sealed class NativeVariant
-    {
-        internal NativeVariant(
-            int minimumBuild,
-            string returnType,
-            List<NativeParameter> parameters)
-        {
-            MinimumBuild = minimumBuild;
-            ReturnType = returnType;
-            Parameters = parameters;
-        }
-
-        internal int MinimumBuild { get; }
-        internal string ReturnType { get; }
-        internal List<NativeParameter> Parameters { get; }
-
-        internal static NativeVariant From(SourceEntry source) =>
-            new(
+            List<NativeParameter> parameters = CloneParameters(source.Parameters);
+            return new(
                 source.Build,
                 source.ReturnType,
-                CloneParameters(source.Parameters));
+                parameters,
+                ClassifyExposure(source.ReturnType, parameters));
+        }
 
         internal bool HasSameWireContract(NativeVariant other)
         {
-            if (!ReturnType.Equals(other.ReturnType, StringComparison.Ordinal) ||
+            if (Exposure != other.Exposure ||
+                !ReturnType.Equals(other.ReturnType, StringComparison.Ordinal) ||
                 Parameters.Count != other.Parameters.Count)
             {
                 return false;
@@ -1495,33 +1552,35 @@ public static class CatalogCompilerV5
         }
     }
 
-    private sealed class NativeRecord
+    private sealed class NativeRecord(
+        ulong hash,
+        string name,
+        NativeVariant? legacy,
+        NativeVariant? enhanced)
     {
-        internal NativeRecord(
-            ulong hash,
-            string name,
-            NativeVariant? legacy,
-            NativeVariant? enhanced)
+        internal int Index
         {
-            Hash = hash;
-            Name = name;
-            Legacy = legacy;
-            Enhanced = enhanced;
+            get;
+            set => field = value >= 0
+                ? value
+                : throw new ArgumentOutOfRangeException(nameof(value));
         }
 
-        internal int Index { get; set; }
-        internal ulong Hash { get; }
-        internal string Name { get; }
-        internal NativeVariant? Legacy { get; }
-        internal NativeVariant? Enhanced { get; }
+        internal ulong Hash { get; } = hash;
+        internal string Name { get; } = name;
+        internal NativeVariant? Legacy { get; } = legacy;
+        internal NativeVariant? Enhanced { get; } = enhanced;
     }
 
-    private sealed record ReturnProjection(string ClrType, string Invoker);
-
-    private sealed record ParameterProjection(
+    private readonly record struct ReturnProjection(
         string ClrType,
+        string Invoker);
+
+    private readonly record struct ParameterProjection(
+        string? ClrType,
         string Factory,
-        bool UseValueProperty);
+        bool UseValueProperty,
+        bool IsNumeric = false);
 
     private sealed record CatalogBuild(
         byte[] SourceFingerprint,
@@ -1537,13 +1596,13 @@ public static class CatalogCompilerV5
         int DecodedLength,
         ushort FormatVersion);
 
-    private sealed record GeneratedMethod(NativeVariant Variant);
+    private readonly record struct GeneratedMethod(NativeVariant Variant);
 
     private sealed class StringPool
     {
         private readonly Dictionary<string, int> _indexes =
             new(StringComparer.Ordinal);
-        private readonly List<string> _values = new();
+        private readonly List<string> _values = [];
 
         internal IReadOnlyList<string> Values => _values;
 
@@ -1563,13 +1622,14 @@ public static class CatalogCompilerV5
 
 '@
 
-$typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompilerV5'
+$typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompilerV7'
 if ($null -eq ($typeName -as [type])) {
     $compilerOptions = @(
         '/langversion:14',
         '/nullable:enable',
         '/optimize+',
-        '/checked+'
+        '/checked+',
+        '/warnaserror+'
     )
 
     $arguments = @{
@@ -1593,12 +1653,9 @@ if ($null -eq ($typeName -as [type])) {
     Add-Type @arguments
 }
 
-[Alloc8orStandardNatives.CatalogTool.CatalogCompilerV5]::Run(
+[Alloc8orStandardNatives.CatalogTool.CatalogCompilerV7]::Run(
     $PSScriptRoot,
     $InspectName,
     $InspectHash,
     $VerifyOnly.IsPresent
 ) | Out-Null
-
-
-

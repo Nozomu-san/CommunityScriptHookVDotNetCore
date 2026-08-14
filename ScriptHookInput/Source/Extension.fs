@@ -7,13 +7,13 @@ open System.Threading.Tasks
 open Alloc8orStandardNatives.Source
 open CommunityScriptHookVDotNetCore.Source
 
-[<assembly: AssemblyMetadata("SHVDN4.Role", "RuntimeExtension")>]
-[<assembly: AssemblyMetadata("SHVDN4.Id", "ScriptHookInput")>]
-[<assembly: AssemblyMetadata("SHVDN4.EntryType", "ScriptHookInput.Source.InputExtension")>]
-[<assembly: AssemblyMetadata("SHVDN4.ContractMajor", "1")>]
-[<assembly: AssemblyMetadata("SHVDN4.ContractMinor", "0")>]
-[<assembly: AssemblyMetadata("SHVDN4.Provides", "input.snapshot;input.actions;input.game;input.device")>]
-[<assembly: AssemblyMetadata("SHVDN4.Requires", "native.standard;host.frame")>]
+[<assembly: AssemblyMetadata("CSHVDNC.Role", "RuntimeExtension")>]
+[<assembly: AssemblyMetadata("CSHVDNC.Id", "ScriptHookInput")>]
+[<assembly: AssemblyMetadata("CSHVDNC.EntryType", "ScriptHookInput.Source.InputExtension")>]
+[<assembly: AssemblyMetadata("CSHVDNC.ContractMajor", "1")>]
+[<assembly: AssemblyMetadata("CSHVDNC.ContractMinor", "0")>]
+[<assembly: AssemblyMetadata("CSHVDNC.Provides", "input.snapshot;input.actions;input.game;input.device")>]
+[<assembly: AssemblyMetadata("CSHVDNC.Requires", "native.standard;host.frame")>]
 do ()
 
 [<Sealed>]

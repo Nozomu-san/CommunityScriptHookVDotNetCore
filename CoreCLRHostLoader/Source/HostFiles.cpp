@@ -460,54 +460,6 @@ namespace CoreCLRHostLoader
             return output.str();
         }
 
-        [[nodiscard]]
-        std::string EscapeJson(std::wstring_view value)
-        {
-            const std::string utf8 = WideToUtf8(value);
-            std::ostringstream output;
-            constexpr char Hex[] = "0123456789ABCDEF";
-
-            for (const unsigned char character : utf8)
-            {
-                switch (character)
-                {
-                case '"':
-                    output << "\\\"";
-                    break;
-                case '\\':
-                    output << "\\\\";
-                    break;
-                case '\b':
-                    output << "\\b";
-                    break;
-                case '\f':
-                    output << "\\f";
-                    break;
-                case '\n':
-                    output << "\\n";
-                    break;
-                case '\r':
-                    output << "\\r";
-                    break;
-                case '\t':
-                    output << "\\t";
-                    break;
-                default:
-                    if (character < 0x20)
-                    {
-                        output << "\\u00"
-                               << Hex[(character >> 4) & 0x0F]
-                               << Hex[character & 0x0F];
-                    }
-                    else
-                    {
-                        output << static_cast<char>(character);
-                    }
-                    break;
-                }
-            }
-            return output.str();
-        }
     }
 
     void WriteLog(LogLevel level, std::wstring_view message) noexcept
@@ -545,43 +497,6 @@ namespace CoreCLRHostLoader
         {
             return std::unexpected(
                 L"An exception occurred while writing CoreCLRHostLoader.ini.");
-        }
-    }
-
-    HostResult<std::filesystem::path> WriteRuntimeConfiguration(
-        const HostState& state,
-        const ManagedBrain& brain) noexcept
-    {
-        try
-        {
-            std::filesystem::path path =
-                state.Paths.Directory / brain.Assembly.filename();
-            path.replace_extension(L".json");
-
-            std::ostringstream json;
-            json
-                << "{\r\n"
-                << "  \"runtimeOptions\": {\r\n"
-                << "    \"tfm\": \"" << EscapeJson(brain.RuntimeTfm) << "\",\r\n"
-                << "    \"rollForward\": \"LatestMajor\",\r\n"
-                << "    \"framework\": {\r\n"
-                << "      \"name\": \"" << EscapeJson(brain.RuntimeFramework) << "\",\r\n"
-                << "      \"version\": \"" << EscapeJson(brain.RuntimeVersion) << "\"\r\n"
-                << "    }\r\n"
-                << "  }\r\n"
-                << "}\r\n";
-
-            auto written = WriteUtf8Atomically(path, json.str());
-            if (!written)
-            {
-                return std::unexpected(written.error());
-            }
-            return path;
-        }
-        catch (...)
-        {
-            return std::unexpected(
-                L"An exception occurred while writing the runtime configuration.");
         }
     }
 

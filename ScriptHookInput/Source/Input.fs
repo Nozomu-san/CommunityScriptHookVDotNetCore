@@ -659,6 +659,39 @@ type InputState =
         InputState(false, false, false, false, 0.0f, frameIndex, origin)
 
 [<Struct; IsReadOnly>]
+type PointerState =
+    val IsAvailable: bool
+    val ScreenX: int
+    val ScreenY: int
+    val ClientX: int
+    val ClientY: int
+    val ClientWidth: int
+    val ClientHeight: int
+    val FrameIndex: uint64
+
+    new(isAvailable, screenX, screenY, clientX, clientY, clientWidth, clientHeight, frameIndex) =
+        { IsAvailable = isAvailable
+          ScreenX = screenX
+          ScreenY = screenY
+          ClientX = clientX
+          ClientY = clientY
+          ClientWidth = clientWidth
+          ClientHeight = clientHeight
+          FrameIndex = frameIndex }
+
+    member this.NormalizedX =
+        if not this.IsAvailable || this.ClientWidth <= 0 then 0.0f
+        else single this.ClientX / single this.ClientWidth
+
+    member this.NormalizedY =
+        if not this.IsAvailable || this.ClientHeight <= 0 then 0.0f
+        else single this.ClientY / single this.ClientHeight
+
+    static member Unavailable(frameIndex: uint64) =
+        PointerState(false, 0, 0, 0, 0, 0, 0, frameIndex)
+
+
+[<Struct; IsReadOnly>]
 type InputFrame =
     val FrameIndex: uint64
     val PerformanceCounter: int64
@@ -920,5 +953,6 @@ type IInputActions =
 type IScriptHookInput =
     inherit IInputActions
     abstract Frame: InputFrame
+    abstract Pointer: PointerState
     abstract Parse: text: string -> InputBinding
     abstract ParseMany: text: string -> IReadOnlyList<InputBinding>

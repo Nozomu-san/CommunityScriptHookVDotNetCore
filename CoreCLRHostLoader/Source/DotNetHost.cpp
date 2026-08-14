@@ -4,6 +4,7 @@
 #include <exception>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace CoreCLRHostLoader
 {
@@ -12,10 +13,23 @@ namespace CoreCLRHostLoader
         using host_char_t = wchar_t;
         using hostfxr_handle = void*;
 
+        struct get_hostfxr_parameters final
+        {
+            std::size_t size = sizeof(get_hostfxr_parameters);
+            const host_char_t* assembly_path = nullptr;
+            const host_char_t* dotnet_root = nullptr;
+        };
+
         enum class HostFxrDelegateType : std::int32_t
         {
             LoadAssemblyAndGetFunctionPointer = 5
         };
+
+        using get_hostfxr_path_fn =
+            std::int32_t(__stdcall*)(
+                host_char_t* buffer,
+                std::size_t* bufferSize,
+                const get_hostfxr_parameters* parameters);
 
         using hostfxr_initialize_for_runtime_config_fn =
             std::int32_t(__cdecl*)(
@@ -57,7 +71,7 @@ namespace CoreCLRHostLoader
         class LoadedLibrary final
         {
         public:
-            explicit LoadedLibrary(HMODULE module) noexcept
+            explicit LoadedLibrary(HMODULE module = nullptr) noexcept
                 : m_module(module)
             {
             }
@@ -75,14 +89,8 @@ namespace CoreCLRHostLoader
             LoadedLibrary(LoadedLibrary&&) = delete;
             LoadedLibrary& operator=(LoadedLibrary&&) = delete;
 
-            [[nodiscard]]
-            HMODULE Get() const noexcept
-            {
-                return m_module;
-            }
-
-            [[nodiscard]]
-            HMODULE Release() noexcept
+            [[nodiscard]] HMODULE Get() const noexcept { return m_module; }
+            [[nodiscard]] HMODULE Release() noexcept
             {
                 return std::exchange(m_module, nullptr);
             }
@@ -94,11 +102,8 @@ namespace CoreCLRHostLoader
         class HostContext final
         {
         public:
-            HostContext(
-                hostfxr_handle context,
-                hostfxr_close_fn close) noexcept
-                : m_context(context),
-                  m_close(close)
+            HostContext(hostfxr_handle context, hostfxr_close_fn close) noexcept
+                : m_context(context), m_close(close)
             {
             }
 
@@ -112,8 +117,6 @@ namespace CoreCLRHostLoader
 
             HostContext(const HostContext&) = delete;
             HostContext& operator=(const HostContext&) = delete;
-            HostContext(HostContext&&) = delete;
-            HostContext& operator=(HostContext&&) = delete;
 
         private:
             hostfxr_handle m_context;
@@ -123,8 +126,7 @@ namespace CoreCLRHostLoader
         class HostFxrErrorWriter final
         {
         public:
-            explicit HostFxrErrorWriter(
-                hostfxr_set_error_writer_fn setWriter) noexcept
+            explicit HostFxrErrorWriter(hostfxr_set_error_writer_fn setWriter) noexcept
                 : m_setWriter(setWriter)
             {
                 if (m_setWriter != nullptr)
@@ -143,12 +145,9 @@ namespace CoreCLRHostLoader
 
             HostFxrErrorWriter(const HostFxrErrorWriter&) = delete;
             HostFxrErrorWriter& operator=(const HostFxrErrorWriter&) = delete;
-            HostFxrErrorWriter(HostFxrErrorWriter&&) = delete;
-            HostFxrErrorWriter& operator=(HostFxrErrorWriter&&) = delete;
 
         private:
-            static void __cdecl WriteHostFxrError(
-                const host_char_t* message) noexcept
+            static void __cdecl WriteHostFxrError(const host_char_t* message) noexcept
             {
                 if (message != nullptr && *message != L'\0')
                 {
@@ -163,9 +162,7 @@ namespace CoreCLRHostLoader
         class EnvironmentVariableOverride final
         {
         public:
-            EnvironmentVariableOverride(
-                const wchar_t* name,
-                const wchar_t* value)
+            EnvironmentVariableOverride(const wchar_t* name, const wchar_t* value)
                 : m_name(name)
             {
                 SetLastError(ERROR_SUCCESS);
@@ -175,19 +172,19 @@ namespace CoreCLRHostLoader
 
                 if (required > 0)
                 {
-                    m_original.assign(required, L'\0');
+                    m_original.resize(required);
                     const DWORD written = GetEnvironmentVariableW(
                         name,
                         m_original.data(),
                         required);
-                    if (written >= required)
+                    if (written < required)
                     {
-                        m_original.clear();
-                        m_existed = false;
+                        m_original.resize(written);
                     }
                     else
                     {
-                        m_original.resize(written);
+                        m_original.clear();
+                        m_existed = false;
                     }
                 }
 
@@ -206,14 +203,8 @@ namespace CoreCLRHostLoader
 
             EnvironmentVariableOverride(const EnvironmentVariableOverride&) = delete;
             EnvironmentVariableOverride& operator=(const EnvironmentVariableOverride&) = delete;
-            EnvironmentVariableOverride(EnvironmentVariableOverride&&) = delete;
-            EnvironmentVariableOverride& operator=(EnvironmentVariableOverride&&) = delete;
 
-            [[nodiscard]]
-            bool Applied() const noexcept
-            {
-                return m_applied;
-            }
+            [[nodiscard]] bool Applied() const noexcept { return m_applied; }
 
         private:
             std::wstring m_name;
@@ -222,21 +213,65 @@ namespace CoreCLRHostLoader
             bool m_applied = false;
         };
 
-        [[nodiscard]]
-        std::wstring FormatStatus(std::int32_t status)
+        [[nodiscard]] std::wstring FormatStatus(std::int32_t status)
         {
             std::wostringstream output;
             output << L"0x" << std::hex << std::uppercase
                    << static_cast<std::uint32_t>(status);
             return output.str();
         }
+
+        [[nodiscard]] HostResult<std::filesystem::path> ResolveHostFxr(
+            const ManagedBrain& brain)
+        {
+            LoadedLibrary nethost(LoadLibraryExW(
+                L"nethost.dll",
+                nullptr,
+                LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
+            if (nethost.Get() == nullptr)
+            {
+                return std::unexpected(
+                    L"nethost.dll could not be loaded. Deploy the Microsoft "
+                    L"native hosting resolver beside CoreCLRHostLoader.");
+            }
+
+            const auto getHostFxrPath = reinterpret_cast<get_hostfxr_path_fn>(
+                GetProcAddress(nethost.Get(), "get_hostfxr_path"));
+            if (getHostFxrPath == nullptr)
+            {
+                return std::unexpected(
+                    L"nethost.dll does not expose get_hostfxr_path.");
+            }
+
+            const std::wstring assemblyPath = brain.Assembly.wstring();
+            get_hostfxr_parameters parameters{};
+            parameters.assembly_path = assemblyPath.c_str();
+
+            std::size_t required = 0;
+            std::int32_t status = getHostFxrPath(nullptr, &required, &parameters);
+            if (required == 0)
+            {
+                return std::unexpected(
+                    L"get_hostfxr_path could not determine a hostfxr path: " +
+                    FormatStatus(status) + L".");
+            }
+
+            std::vector<wchar_t> buffer(required);
+            status = getHostFxrPath(buffer.data(), &required, &parameters);
+            if (status != 0 || buffer.empty() || buffer.front() == L'\0')
+            {
+                return std::unexpected(
+                    L"get_hostfxr_path failed: " + FormatStatus(status) + L".");
+            }
+
+            return std::filesystem::path(buffer.data());
+        }
     }
 
     HostResult<void> RunManagedBrain(
         const HostConfiguration& configuration,
-        const DotNetEnvironment& environment,
         const ManagedBrain& brain,
-        const std::filesystem::path& runtimeConfiguration,
         const BrainRunRequest& request) noexcept
     {
         try
@@ -245,43 +280,51 @@ namespace CoreCLRHostLoader
             {
                 return std::unexpected(
                     L"The managed runtime has already been activated by "
-                    L"CoreCLRHostLoader.");
+                    L"CoreCLRHostLoader in this GTA process.");
             }
 
-            const std::wstring hostFxrPath = environment.HostFxr.wstring();
+            if (!std::filesystem::is_regular_file(brain.RuntimeConfiguration))
+            {
+                return std::unexpected(
+                    L"The managed brain runtime configuration is missing: " +
+                    brain.RuntimeConfiguration.wstring());
+            }
+
+            auto hostFxrPath = ResolveHostFxr(brain);
+            if (!hostFxrPath)
+            {
+                return std::unexpected(hostFxrPath.error());
+            }
+
+            WriteLog(LogLevel::Information, L"hostfxr resolved by nethost: " +
+                hostFxrPath->wstring());
+
             LoadedLibrary hostFxr(LoadLibraryExW(
-                hostFxrPath.c_str(),
+                hostFxrPath->c_str(),
                 nullptr,
                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
             if (hostFxr.Get() == nullptr)
             {
-                return std::unexpected(
-                    L"hostfxr.dll could not be loaded for managed activation.");
+                return std::unexpected(L"The resolved hostfxr.dll could not be loaded.");
             }
 
             const auto initialize =
                 reinterpret_cast<hostfxr_initialize_for_runtime_config_fn>(
-                    GetProcAddress(
-                        hostFxr.Get(),
-                        "hostfxr_initialize_for_runtime_config"));
+                    GetProcAddress(hostFxr.Get(), "hostfxr_initialize_for_runtime_config"));
             const auto getDelegate =
                 reinterpret_cast<hostfxr_get_runtime_delegate_fn>(
-                    GetProcAddress(
-                        hostFxr.Get(),
-                        "hostfxr_get_runtime_delegate"));
-            const auto close =
-                reinterpret_cast<hostfxr_close_fn>(
-                    GetProcAddress(hostFxr.Get(), "hostfxr_close"));
+                    GetProcAddress(hostFxr.Get(), "hostfxr_get_runtime_delegate"));
+            const auto close = reinterpret_cast<hostfxr_close_fn>(
+                GetProcAddress(hostFxr.Get(), "hostfxr_close"));
             const auto setErrorWriter =
                 reinterpret_cast<hostfxr_set_error_writer_fn>(
                     GetProcAddress(hostFxr.Get(), "hostfxr_set_error_writer"));
-            if (initialize == nullptr || getDelegate == nullptr ||
-                close == nullptr)
+
+            if (initialize == nullptr || getDelegate == nullptr || close == nullptr)
             {
                 return std::unexpected(
-                    L"The selected hostfxr does not expose the required "
-                    L"hosting APIs.");
+                    L"hostfxr does not expose the required stable hosting APIs.");
             }
 
             HostFxrErrorWriter errorWriter(setErrorWriter);
@@ -295,12 +338,8 @@ namespace CoreCLRHostLoader
             }
 
             hostfxr_handle context = nullptr;
-            const std::wstring runtimeConfigurationText =
-                runtimeConfiguration.wstring();
-            std::int32_t status = initialize(
-                runtimeConfigurationText.c_str(),
-                nullptr,
-                &context);
+            const std::wstring runtimeConfig = brain.RuntimeConfiguration.wstring();
+            std::int32_t status = initialize(runtimeConfig.c_str(), nullptr, &context);
             if (status < 0 || context == nullptr)
             {
                 if (context != nullptr)
@@ -332,9 +371,8 @@ namespace CoreCLRHostLoader
 
             void* rawRun = nullptr;
             const std::wstring assemblyPath = brain.Assembly.wstring();
-            const auto unmanagedCallersOnly =
-                reinterpret_cast<const host_char_t*>(
-                    static_cast<std::intptr_t>(-1));
+            const auto unmanagedCallersOnly = reinterpret_cast<const host_char_t*>(
+                static_cast<std::intptr_t>(-1));
             status = loadAssembly(
                 assemblyPath.c_str(),
                 brain.EntryType.c_str(),
@@ -345,7 +383,7 @@ namespace CoreCLRHostLoader
             if (status < 0 || rawRun == nullptr)
             {
                 return std::unexpected(
-                    L"The managed session entry point could not be resolved: " +
+                    L"The managed brain entry point could not be resolved: " +
                     FormatStatus(status) + L".");
             }
 
@@ -364,18 +402,11 @@ namespace CoreCLRHostLoader
         catch (const std::exception& exception)
         {
             const int required = MultiByteToWideChar(
-                CP_UTF8,
-                0,
-                exception.what(),
-                -1,
-                nullptr,
-                0);
+                CP_UTF8, 0, exception.what(), -1, nullptr, 0);
             std::wstring message;
             if (required > 1)
             {
-                std::wstring buffer(
-                    static_cast<std::size_t>(required),
-                    L'\0');
+                std::wstring buffer(static_cast<std::size_t>(required), L'\0');
                 if (MultiByteToWideChar(
                         CP_UTF8,
                         0,
@@ -388,8 +419,7 @@ namespace CoreCLRHostLoader
                     message = std::move(buffer);
                 }
             }
-            return std::unexpected(
-                L"Managed activation failed: " + message);
+            return std::unexpected(L"Managed activation failed: " + message);
         }
         catch (...)
         {

@@ -1,4 +1,3 @@
-using Microsoft.Win32.SafeHandles;
 using System.Runtime.InteropServices;
 
 namespace CommunityScriptHookVDotNetCore.Source;
@@ -99,6 +98,7 @@ internal sealed class RuntimeSession : IDisposable
             files.Log);
 
         _services.RegisterRuntimeOnly<IRawNativeTransport>(_native);
+        _services.RegisterRuntimeOnly<INativeCallAdmissionControl>(_native);
         _services.RegisterRuntimeOnly<IReloadRuntimeHost>(_packages);
     }
 
@@ -110,9 +110,11 @@ internal sealed class RuntimeSession : IDisposable
                 "The managed runtime session is already initialized.");
         }
 
-        _packages.RefreshCatalog();
-        _initialized = true;
         _extensions.LoadAndInitialize();
+        _packages.SetUnavailableRuntimeAssemblies(
+            _extensions.UnavailableAssemblyNames);
+        _packages.ActivateInitialPackages();
+        _initialized = true;
     }
 
     public void SignalReady() => _ready.Set();
@@ -173,6 +175,12 @@ internal sealed class RuntimeSession : IDisposable
                 frame.FrameIndex,
                 frame.PerformanceCounter,
                 _request.PerformanceFrequency));
+            IReadOnlyList<string> unavailableRoots =
+                _extensions.DrainNewUnavailableAssemblyNames();
+            if (unavailableRoots.Count != 0)
+            {
+                _packages.QuarantineAssemblyReferences(unavailableRoots);
+            }
             _packages.AdvanceTransitionOperations(frame.FrameIndex);
             _scheduler.Dispatch(frame, _packages.Tick);
         }
@@ -214,11 +222,34 @@ internal sealed class NativeTransport(
     nint mailbox,
     EventWaitHandle requested,
     EventWaitHandle completed,
-    EventWaitHandle stopRequested) : IRawNativeTransport, IDisposable
+    EventWaitHandle stopRequested) :
+    IRawNativeTransport,
+    INativeCallAdmissionControl,
+    IDisposable
 {
     private readonly Lock _gate = new();
     private readonly WaitHandle[] _waits = [stopRequested, completed];
+    private INativeCallAdmissionPolicy? _admissionPolicy;
+    private ulong _admissionGeneration;
     private ulong _requestId;
+
+    public IDisposable Install(INativeCallAdmissionPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+
+        lock (_gate)
+        {
+            if (_admissionPolicy is not null)
+            {
+                throw new InvalidOperationException(
+                    "A native-call admission policy is already installed.");
+            }
+
+            _admissionPolicy = policy;
+            ulong generation = ++_admissionGeneration;
+            return new AdmissionLease(this, generation);
+        }
+    }
 
     public RawNativeCallResult Invoke(
         ulong hash,
@@ -236,6 +267,36 @@ internal sealed class NativeTransport(
 
         lock (_gate)
         {
+            INativeCallAdmissionPolicy? policy = _admissionPolicy;
+            if (policy is null)
+            {
+                return new(
+                    RawNativeCallStatus.AdmissionUnavailable,
+                    []);
+            }
+
+            NativeCallAdmissionDecision admission;
+            try
+            {
+                admission = policy.Evaluate(
+                    hash,
+                    arguments.Length,
+                    resultCount);
+            }
+            catch
+            {
+                return new(
+                    RawNativeCallStatus.AdmissionRejected,
+                    []);
+            }
+
+            if (!admission.IsAllowed)
+            {
+                return new(
+                    RawNativeCallStatus.AdmissionRejected,
+                    []);
+            }
+
             Marshal.WriteInt32(
                 mailbox,
                 HostContract.NativeSizeOffset,
@@ -296,10 +357,42 @@ internal sealed class NativeTransport(
         }
     }
 
+    private void RemoveAdmissionPolicy(ulong generation)
+    {
+        lock (_gate)
+        {
+            if (_admissionPolicy is null ||
+                generation != _admissionGeneration)
+            {
+                return;
+            }
+
+            _admissionPolicy = null;
+            ++_admissionGeneration;
+        }
+    }
+
     public void Dispose()
     {
+        lock (_gate)
+        {
+            _admissionPolicy = null;
+            ++_admissionGeneration;
+        }
+
         stopRequested.Dispose();
         completed.Dispose();
         requested.Dispose();
+    }
+
+    private sealed class AdmissionLease(
+        NativeTransport owner,
+        ulong generation) : IDisposable
+    {
+        private NativeTransport? _owner = owner;
+
+        public void Dispose() =>
+            Interlocked.Exchange(ref _owner, null)?.RemoveAdmissionPolicy(
+                generation);
     }
 }

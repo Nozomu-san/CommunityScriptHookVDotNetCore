@@ -30,11 +30,6 @@ namespace CoreCLRHostLoader
         constexpr std::wstring_view EntryTypeKey = L"CCHL.EntryType";
         constexpr std::wstring_view EntryMethodKey =
             L"CCHL.EntryMethod";
-        constexpr std::wstring_view RuntimeTfmKey = L"CCHL.RuntimeTfm";
-        constexpr std::wstring_view RuntimeFrameworkKey =
-            L"CCHL.RuntimeFramework";
-        constexpr std::wstring_view RuntimeVersionKey =
-            L"CCHL.RuntimeVersion";
 
         template <typename T>
         class ComOwner final
@@ -540,12 +535,6 @@ namespace CoreCLRHostLoader
                 FindValue(*values, EntryTypeKey);
             const std::wstring* entryMethod =
                 FindValue(*values, EntryMethodKey);
-            const std::wstring* runtimeTfm =
-                FindValue(*values, RuntimeTfmKey);
-            const std::wstring* runtimeFramework =
-                FindValue(*values, RuntimeFrameworkKey);
-            const std::wstring* runtimeVersion =
-                FindValue(*values, RuntimeVersionKey);
 
             ManagedBrain brain{};
             if (contractId == nullptr ||
@@ -553,9 +542,6 @@ namespace CoreCLRHostLoader
                 abiMinorText == nullptr ||
                 entryType == nullptr ||
                 entryMethod == nullptr ||
-                runtimeTfm == nullptr ||
-                runtimeFramework == nullptr ||
-                runtimeVersion == nullptr ||
                 *contractId != ManagedBrainContractId ||
                 !ParseUInt16(*abiMajorText, brain.AbiMajor) ||
                 !ParseUInt16(*abiMinorText, brain.AbiMinor) ||
@@ -568,23 +554,20 @@ namespace CoreCLRHostLoader
             }
 
             if (!IsSupportedText(*entryType) ||
-                !IsSupportedText(*entryMethod) ||
-                !IsSupportedText(*runtimeTfm) ||
-                !IsSupportedText(*runtimeFramework) ||
-                !IsSupportedText(*runtimeVersion))
+                !IsSupportedText(*entryMethod))
             {
                 return std::unexpected(
-                    L"The managed-brain runtime metadata is invalid in " +
+                    L"The managed-brain entry-point metadata is invalid in " +
                     path.filename().wstring() + L".");
             }
 
             brain.Assembly = path;
+            brain.RuntimeConfiguration =
+                path.parent_path() /
+                (path.stem().wstring() + L".runtimeconfig.json");
             brain.AssemblyName = path.stem().wstring();
             brain.EntryType = *entryType;
             brain.EntryMethod = *entryMethod;
-            brain.RuntimeTfm = *runtimeTfm;
-            brain.RuntimeFramework = *runtimeFramework;
-            brain.RuntimeVersion = *runtimeVersion;
             return std::optional<ManagedBrain>(std::move(brain));
         }
 

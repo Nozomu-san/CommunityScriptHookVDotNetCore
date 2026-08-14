@@ -5,16 +5,22 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="Alloc8orStandardNatives/Alloc8orStandardNatives.csproj">
-    <Platform Solution="Release|x64" Project="x64" />
+    <Platform Solution="*|x64" Project="x64" />
   </Project>
   <Project Path="CommunityScriptHookVDotNetCore/CommunityScriptHookVDotNetCore.csproj">
-    <Platform Solution="Release|x64" Project="x64" />
+    <Platform Solution="*|x64" Project="x64" />
   </Project>
   <Project Path="CoreCLRHostLoader/CoreCLRHostLoader.vcxproj" />
+  <Project Path="LocalNativeMemories/LocalNativeMemories.csproj" Id="8d5cad39-1ecb-42a5-800d-bde307480739">
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
   <Project Path="Script4Reload/Script4Reload.fsproj">
-    <Platform Solution="Release|x64" Project="x64" />
+    <Platform Solution="*|x64" Project="x64" />
   </Project>
   <Project Path="ScriptHookInput/ScriptHookInput.fsproj">
-    <Platform Solution="Release|x64" Project="x64" />
+    <Platform Solution="*|x64" Project="x64" />
+  </Project>
+  <Project Path="StandardGameOperations/StandardGameOperations.csproj" Id="1fca713e-6e05-4fc0-80b1-73e356030baf">
+    <Platform Solution="*|x64" Project="x64" />
   </Project>
 </Solution>

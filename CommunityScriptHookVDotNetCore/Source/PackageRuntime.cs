@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
@@ -19,8 +20,11 @@ internal sealed class PackageManager(
     private readonly Queue<LifecycleTransitionOperation> _pendingOperations = [];
     private readonly List<LifecycleTransitionOperation> _operations = [];
     private readonly List<UnloadProbe> _unloadProbes = [];
+    private readonly Dictionary<string, string> _activeFingerprints =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _unavailableRuntimeAssemblies =
+        new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<PackageDescriptor> _catalog = [];
-    private IReadOnlyList<ScriptPackageInfo> _inventory = [];
     private LifecycleTransitionOperation? _activeOperation;
     private ulong _lifecycleEpoch;
     private ulong _nextPackageGeneration;
@@ -28,21 +32,6 @@ internal sealed class PackageManager(
     private bool _initialActivationCompleted;
     private bool _lifecycleDispatchPaused;
     private bool _shutdown;
-
-    public void RefreshCatalog()
-    {
-        EnsureRuntimeThread();
-        ThrowIfStopping();
-        _catalog = PackageDiscovery.Discover(scriptsDirectory, log);
-        UpdateInventory();
-
-        int executable = _catalog.Count(value =>
-            value.Kind == ScriptPackageKind.Executable);
-        int libraries = _catalog.Count - executable;
-        log.Information(
-            $"Discovered {_catalog.Count} package(s): {executable} executable " +
-            $"and {libraries} passive library package(s).");
-    }
 
     public void ActivateInitialPackages()
     {
@@ -54,29 +43,75 @@ internal sealed class PackageManager(
                 "The initial scripts4 package generation has already been activated.");
         }
 
+        PackageDiscovery.EnsureFlatAssemblyLayout(scriptsDirectory);
+        string[] names = EnumerateDiskPackageNames();
+        using CancellationTokenSource deadline = new(TimeSpan.FromSeconds(10));
+        CaptureAttempt attempt;
+        for (;;)
+        {
+            deadline.Token.ThrowIfCancellationRequested();
+            attempt = PackageImageCapture.CaptureAsync(
+                    scriptsDirectory,
+                    names,
+                    log,
+                    deadline.Token)
+                .GetAwaiter()
+                .GetResult();
+            if (attempt.Image is not null)
+            {
+                break;
+            }
+            Thread.Sleep(25);
+            names = EnumerateDiskPackageNames();
+        }
+
+        StagedReloadImage staged = ResolveCapturedImage(attempt.Image!);
+        ApplyStagedCatalog(staged);
         _initialActivationCompleted = true;
         _lifecycleEpoch = 1;
-        string[] orderedNames = OrderPackageNames(
-            _catalog,
-            _catalog
-                .Where(value => value.Kind == ScriptPackageKind.Executable)
-                .Select(value => value.Name),
-            reverse: false);
-        Dictionary<string, PackageDescriptor> descriptors = _catalog.ToDictionary(
-            value => value.Name,
-            StringComparer.OrdinalIgnoreCase);
 
-        foreach (string name in orderedNames)
+        Dictionary<string, StagedPackageImage> executable = staged.Packages.Values
+            .Where(value =>
+                value.Descriptor.Kind == ScriptPackageKind.Executable &&
+                _catalog.Any(item => item.Name.Equals(
+                    value.Descriptor.Name,
+                    StringComparison.OrdinalIgnoreCase)))
+            .ToDictionary(
+                value => value.Descriptor.Name,
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (string name in OrderPackageNames(
+                     _catalog,
+                     executable.Keys,
+                     reverse: false))
         {
-            PackageDescriptor descriptor = descriptors[name];
-            ReadOnlyCollection<PackageDescriptor> dependencies =
-                GetDependencyDescriptors(descriptor, _catalog);
-            ScriptPackage? package = ScriptPackage.TryPrepare(
-                descriptor,
-                dependencies,
-                _services,
-                log,
-                NextPackageGeneration());
+            StagedPackageImage image = executable[name];
+            List<StagedPackageImage> dependencies = [];
+            bool valid = true;
+            foreach (string dependencyName in image.Descriptor.DependencyPackageNames)
+            {
+                if (!staged.Packages.TryGetValue(
+                        dependencyName,
+                        out StagedPackageImage? dependency) ||
+                    dependency is null)
+                {
+                    valid = false;
+                    log.Error(
+                        $"Initial package '{name}' is missing passive dependency " +
+                        $"'{dependencyName}'.");
+                    break;
+                }
+                dependencies.Add(dependency);
+            }
+
+            ScriptPackage? package = valid
+                ? ScriptPackage.TryPrepare(
+                    image,
+                    dependencies.AsReadOnly(),
+                    _services,
+                    log,
+                    NextPackageGeneration())
+                : null;
             if (package is not null)
             {
                 _packages.Add(package);
@@ -101,9 +136,58 @@ internal sealed class PackageManager(
 
         int scripts = _packages.Sum(package => package.ActiveScriptCount);
         log.Information(
-            $"Activated {_packages.Count} executable package(s) containing " +
-            $"{scripts} script executable(s) in lifecycle epoch " +
-            $"{_lifecycleEpoch}.");
+            $"Activated RAM-resident scripts4 generation {_lifecycleEpoch}: " +
+            $"{_packages.Count} executable package(s), {scripts} Script4 instance(s). " +
+            "The committed generation no longer depends on its source DLLs on disk.");
+    }
+
+    internal void SetUnavailableRuntimeAssemblies(IEnumerable<string> assemblyNames)
+    {
+        EnsureRuntimeThread();
+        foreach (string name in assemblyNames.Where(value => !string.IsNullOrWhiteSpace(value)))
+        {
+            _unavailableRuntimeAssemblies.Add(name.Trim());
+        }
+    }
+
+    internal void QuarantineAssemblyReferences(IEnumerable<string> assemblyNames)
+    {
+        EnsureRuntimeThread();
+        string[] newlyUnavailable = [.. assemblyNames
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        if (newlyUnavailable.Length == 0)
+        {
+            return;
+        }
+
+        foreach (string name in newlyUnavailable)
+        {
+            _unavailableRuntimeAssemblies.Add(name);
+        }
+
+        HashSet<string> seeds = new(
+            _catalog
+                .Where(package => package.ReferencedAssemblyNames.Any(reference =>
+                    _unavailableRuntimeAssemblies.Contains(reference)))
+                .Select(package => package.Name),
+            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> closure = ExpandDependentClosure(seeds, _catalog);
+        foreach (ScriptPackage package in OrderActivePackages(reverse: true))
+        {
+            if (!closure.Contains(package.Name))
+            {
+                continue;
+            }
+            package.StopInstances(ScriptStopReason.DependencyUnavailable);
+            AddUnloadProbe(package, package.UnloadStopped(), _lastHostFrameIndex);
+            _packages.Remove(package);
+            log.Error(
+                $"Script package '{package.Name}' was stopped because a root " +
+                "runtime-extension assembly it references is unavailable for " +
+                "the remainder of this GTA session.");
+        }
     }
 
     public void AdvanceTransitionOperations(ulong hostFrameIndex)
@@ -197,47 +281,25 @@ internal sealed class PackageManager(
         ObserveUnloadProbes(_lastHostFrameIndex);
     }
 
-    public IReadOnlyList<ScriptPackageInfo> GetInventory() => _inventory;
-
     public ScriptLifecycleTransitionOperationId RequestTransition(
         ScriptLifecycleTransitionPlan plan)
     {
         ArgumentNullException.ThrowIfNull(plan);
-        ArgumentNullException.ThrowIfNull(plan.BinaryReplacementPackages);
         EnsureRuntimeThread();
         ThrowIfStopping();
-        if (!plan.RestartAllExecutables)
-        {
-            throw new NotSupportedException(
-                "Every scripts4 transition must restart all executable Script4 lifecycles.");
-        }
+        PackageDiscovery.EnsureFlatAssemblyLayout(scriptsDirectory);
 
-        string[] requested = NormalizePackageNames(
-            plan.BinaryReplacementPackages);
-        string[] closure = ExpandReloadClosure(requested, _catalog);
-        ScriptLifecycleTransitionPlan normalized = new(
-            Array.AsReadOnly(closure),
-            true,
-            plan.Reason);
         ScriptLifecycleTransitionOperationId id =
             ScriptLifecycleTransitionOperationId.Create();
         LifecycleTransitionOperation operation = new(
             id,
-            normalized,
-            requested,
-            closure,
+            plan,
             scriptsDirectory,
-            _catalog.Select(value => value.Name),
             log);
         _operations.Add(operation);
         _pendingOperations.Enqueue(operation);
-
-        string replacement = closure.Length == 0
-            ? "none; this is a lifecycle-only restart"
-            : $"[{string.Join(", ", closure)}]";
         log.Information(
-            $"Lifecycle transition '{id.Value:D}' queued. Binary replacement " +
-            $"closure={replacement}; reason={plan.Reason}.");
+            $"scripts4 reconcile '{id.Value:D}' queued; reason={plan.Reason}.");
         return id;
     }
 
@@ -261,35 +323,17 @@ internal sealed class PackageManager(
         }
     }
 
-    private static string[] NormalizePackageNames(
-        IReadOnlyCollection<string> packageNames) =>
-        [.. packageNames
-            .Where(value => !string.IsNullOrWhiteSpace(value))
-            .Select(value => value.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)];
-
-    private static string[] ExpandReloadClosure(
+    private static HashSet<string> ExpandDependentClosure(
         IEnumerable<string> seeds,
         IReadOnlyList<PackageDescriptor> catalog)
     {
-        HashSet<string> closure = new(
-            seeds,
-            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> closure = new(seeds, StringComparer.OrdinalIgnoreCase);
         bool changed;
         do
         {
             changed = false;
             foreach (PackageDescriptor package in catalog)
             {
-                if (closure.Contains(package.Name))
-                {
-                    foreach (string dependency in package.DependencyPackageNames)
-                    {
-                        changed |= closure.Add(dependency);
-                    }
-                }
-
                 if (package.DependencyPackageNames.Any(closure.Contains))
                 {
                     changed |= closure.Add(package.Name);
@@ -297,11 +341,86 @@ internal sealed class PackageManager(
             }
         }
         while (changed);
-
-        return [.. closure.OrderBy(
-            value => value,
-            StringComparer.OrdinalIgnoreCase)];
+        return closure;
     }
+
+    private string[] EnumerateDiskPackageNames() =>
+        [.. Directory
+            .EnumerateFiles(scriptsDirectory, "*.dll", SearchOption.TopDirectoryOnly)
+            .Select(Path.GetFileNameWithoutExtension)
+            .OfType<string>()
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)];
+
+    private string[] CreateFullCaptureTargets()
+    {
+        HashSet<string> names = new(
+            _catalog.Select(value => value.Name),
+            StringComparer.OrdinalIgnoreCase);
+        names.UnionWith(EnumerateDiskPackageNames());
+        return [.. names.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    private static Dictionary<string, string> Fingerprints(
+        StagedReloadImage staged)
+    {
+        HashSet<string> valid = new(
+            staged.Catalog.Select(value => value.Name),
+            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> result = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, StagedPackageImage package) in staged.Packages)
+        {
+            if (!valid.Contains(name))
+            {
+                continue;
+            }
+            PackageAssemblyImage image = package.Assemblies.Single();
+            result[name] = image.Sha256;
+        }
+        return result;
+    }
+
+    private string[] DetectChangedSeeds(StagedReloadImage staged)
+    {
+        Dictionary<string, string> candidate = Fingerprints(staged);
+        HashSet<string> names = new(
+            _activeFingerprints.Keys,
+            StringComparer.OrdinalIgnoreCase);
+        names.UnionWith(candidate.Keys);
+
+        HashSet<string> activeExecutables = new(
+            _packages.Select(package => package.Name),
+            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> missingExecutableGeneration = new(
+            staged.Catalog
+                .Where(package =>
+                    package.Kind == ScriptPackageKind.Executable &&
+                    !activeExecutables.Contains(package.Name))
+                .Select(package => package.Name),
+            StringComparer.OrdinalIgnoreCase);
+
+        return [.. names
+            .Where(name =>
+                missingExecutableGeneration.Contains(name) ||
+                !_activeFingerprints.TryGetValue(name, out string? active) ||
+                !candidate.TryGetValue(name, out string? next) ||
+                !active.Equals(next, StringComparison.Ordinal))
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    private bool CandidateRemovesCommittedPackage(StagedReloadImage staged)
+    {
+        Dictionary<string, string> candidate = Fingerprints(staged);
+        return _activeFingerprints.Keys.Any(name => !candidate.ContainsKey(name));
+    }
+
+    private static string CandidateManifestKey(StagedReloadImage staged) =>
+        string.Join(
+            "\n",
+            Fingerprints(staged)
+                .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(pair => $"{pair.Key}={pair.Value}"));
 
     private static ReadOnlyCollection<PackageDescriptor>
         GetDependencyDescriptors(
@@ -392,9 +511,8 @@ internal sealed class PackageManager(
 
         if (ordered.Count != selected.Count)
         {
-            ordered = [.. selected.OrderBy(
-                value => value,
-                StringComparer.OrdinalIgnoreCase)];
+            throw new InvalidDataException(
+                "The scripts4 package dependency graph is cyclic after validation.");
         }
         if (reverse)
         {
@@ -412,9 +530,6 @@ internal sealed class PackageManager(
             .Where(byName.ContainsKey)
             .Select(name => byName[name])];
     }
-
-    private void UpdateInventory() =>
-        _inventory = [.. _catalog.Select(value => value.ToPublicInfo())];
 
     private StagedReloadImage ResolveCapturedImage(
         CapturedReloadImage captured)
@@ -436,6 +551,29 @@ internal sealed class PackageManager(
                 [.. merged.Values.OrderBy(
                     value => value.Name,
                     StringComparer.OrdinalIgnoreCase)]);
+        if (_unavailableRuntimeAssemblies.Count != 0)
+        {
+            HashSet<string> invalidSeeds = new(
+                resolvedCatalog
+                    .Where(package => package.ReferencedAssemblyNames.Any(reference =>
+                        _unavailableRuntimeAssemblies.Contains(reference)))
+                    .Select(package => package.Name),
+                StringComparer.OrdinalIgnoreCase);
+            HashSet<string> invalid = ExpandDependentClosure(
+                invalidSeeds,
+                resolvedCatalog);
+            if (invalid.Count != 0)
+            {
+                foreach (string name in invalid.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
+                {
+                    log.Error(
+                        $"Package '{name}' is excluded because it depends on a " +
+                        "quarantined root extension assembly.");
+                }
+                resolvedCatalog = Array.AsReadOnly(
+                    [.. resolvedCatalog.Where(package => !invalid.Contains(package.Name))]);
+            }
+        }
         Dictionary<string, PackageDescriptor> resolvedByName =
             resolvedCatalog.ToDictionary(
                 value => value.Name,
@@ -467,7 +605,11 @@ internal sealed class PackageManager(
     private void ApplyStagedCatalog(StagedReloadImage staged)
     {
         _catalog = staged.Catalog;
-        UpdateInventory();
+        _activeFingerprints.Clear();
+        foreach ((string name, string fingerprint) in Fingerprints(staged))
+        {
+            _activeFingerprints[name] = fingerprint;
+        }
     }
 
     private ScriptPackage? FindActivePackage(string name) =>
@@ -591,16 +733,13 @@ internal sealed class PackageManager(
     private sealed class LifecycleTransitionOperation(
         ScriptLifecycleTransitionOperationId id,
         ScriptLifecycleTransitionPlan plan,
-        string[] seedPackages,
-        string[] initialClosure,
         string scriptsDirectory,
-        IEnumerable<string> originalPackageNames,
         RuntimeLog log) : IDisposable
     {
+        private static readonly TimeSpan CaptureDeadline = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan RemovalConfirmationWindow =
+            TimeSpan.FromMilliseconds(250);
         private readonly string _scriptsDirectory = scriptsDirectory;
-        private readonly HashSet<string> _originalPackageNames = new(
-                originalPackageNames,
-                StringComparer.OrdinalIgnoreCase);
         private readonly RuntimeLog _log = log;
         private readonly CancellationTokenSource _lifetime = new();
         private readonly List<string> _restartedInPlace = [];
@@ -609,10 +748,13 @@ internal sealed class PackageManager(
         private readonly List<string> _added = [];
         private readonly List<string> _removed = [];
         private readonly List<string> _failed = [];
-        private HashSet<string> _targetSet = new(
-                initialClosure,
-                StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _targetSet = new(StringComparer.OrdinalIgnoreCase);
+        private string[] _binarySeeds = [];
+        private HashSet<string> _originalPackageNames = new(StringComparer.OrdinalIgnoreCase);
         private Task<CaptureAttempt>? _captureTask;
+        private long _captureStarted;
+        private long _removalConfirmationStarted;
+        private string? _pendingRemovalManifest;
         private StagedReloadImage? _staged;
         private Queue<string>? _stopQueue;
         private Queue<string>? _replaceQueue;
@@ -652,40 +794,23 @@ internal sealed class PackageManager(
                 switch (State)
                 {
                     case ScriptLifecycleTransitionOperationState.Queued:
-                        if (initialClosure.Length == 0)
-                        {
-                            State = ScriptLifecycleTransitionOperationState.ReadyInMemory;
-                            _log.Information(
-                                $"Lifecycle transition '{Id.Value:D}' requires no " +
-                                "binary replacement and is ready to restart Script4 " +
-                                "instances in place.");
-                        }
-                        else
-                        {
-                            StartCapture();
-                        }
+                        StartCapture(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.CapturingImages:
                         AdvanceCapture(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.ReadyInMemory:
                         PrepareLifecycleStop(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.StoppingLifecycle:
                         AdvanceLifecycleStop(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.ReplacingBinaries:
                         AdvanceBinaryReplacement(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.RecreatingInstances:
                         AdvanceInstanceRecreation(owner);
                         break;
-
                     case ScriptLifecycleTransitionOperationState.StartingLifecycle:
                         AdvanceLifecycleStart(owner);
                         break;
@@ -707,18 +832,18 @@ internal sealed class PackageManager(
             {
                 return;
             }
-
             _lifetime.Cancel();
             _diagnostic = diagnostic;
             _staged = null;
+            _pendingRemovalManifest = null;
+            _removalConfirmationStarted = 0;
             _stopQueue = null;
             _replaceQueue = null;
             _prepareQueue = null;
             _startQueue = null;
             State = ScriptLifecycleTransitionOperationState.Cancelled;
             _log.Information(
-                $"Lifecycle transition '{Id.Value:D}' was cancelled: " +
-                diagnostic);
+                $"scripts4 reconcile '{Id.Value:D}' was cancelled: {diagnostic}");
         }
 
         public void Dispose()
@@ -735,15 +860,19 @@ internal sealed class PackageManager(
             _lifetime.Dispose();
         }
 
-        private void StartCapture()
+        private void StartCapture(PackageManager owner)
         {
             State = ScriptLifecycleTransitionOperationState.CapturingImages;
-            string[] targetSnapshot = [.. initialClosure];
+            string[] targets = owner.CreateFullCaptureTargets();
             CancellationToken cancellationToken = _lifetime.Token;
+            if (_captureStarted == 0)
+            {
+                _captureStarted = Stopwatch.GetTimestamp();
+            }
             _captureTask = Task.Run(
                 () => PackageImageCapture.CaptureAsync(
                     _scriptsDirectory,
-                    targetSnapshot,
+                    targets,
                     _log,
                     cancellationToken),
                 cancellationToken);
@@ -754,11 +883,25 @@ internal sealed class PackageManager(
             Task<CaptureAttempt>? task = _captureTask;
             if (task is null)
             {
-                StartCapture();
+                if (_pendingRemovalManifest is not null &&
+                    Stopwatch.GetElapsedTime(_removalConfirmationStarted) <
+                        RemovalConfirmationWindow)
+                {
+                    return;
+                }
+                StartCapture(owner);
                 return;
             }
             if (!task.IsCompleted)
             {
+                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
+                {
+                    _lifetime.Cancel();
+                    Fail(owner,
+                        "The disk candidate did not become a coherent readable " +
+                        "generation before the capture deadline. The committed " +
+                        "RAM generation was left untouched.");
+                }
                 return;
             }
 
@@ -769,7 +912,7 @@ internal sealed class PackageManager(
             }
             catch (OperationCanceledException)
             {
-                Cancel("Binary generation capture was cancelled.");
+                Cancel("Generation capture was cancelled.");
                 return;
             }
             catch (Exception exception)
@@ -780,16 +923,24 @@ internal sealed class PackageManager(
             _captureTask = null;
             if (attempt.Image is null)
             {
-                if (!string.Equals(
-                        _diagnostic,
-                        attempt.Diagnostic,
-                        StringComparison.Ordinal))
+                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
                 {
-                    _diagnostic = attempt.Diagnostic;
-                    _log.Warning(
-                        $"Lifecycle transition '{Id.Value:D}' is waiting for " +
-                        $"a complete readable generation: {_diagnostic}");
+                    Fail(owner,
+                        "The disk candidate remained incomplete: " +
+                        attempt.Diagnostic);
+                    return;
                 }
+
+                _diagnostic = attempt.Diagnostic;
+                string[] targets = owner.CreateFullCaptureTargets();
+                CancellationToken cancellationToken = _lifetime.Token;
+                _captureTask = Task.Run(
+                    () => PackageImageCapture.CaptureAsync(
+                        _scriptsDirectory,
+                        targets,
+                        _log,
+                        cancellationToken),
+                    cancellationToken);
                 return;
             }
 
@@ -801,58 +952,86 @@ internal sealed class PackageManager(
             catch (Exception exception) when (
                 exception is BadImageFormatException or InvalidDataException)
             {
-                _diagnostic = exception.Message;
-                _log.Warning(
-                    $"Lifecycle transition '{Id.Value:D}' is waiting for " +
-                    $"a coherent dependency generation: {_diagnostic}");
-                return;
-            }
-
-            HashSet<string> expanded = new(
-                initialClosure,
-                StringComparer.OrdinalIgnoreCase);
-            foreach (string value in ExpandReloadClosure(
-                         seedPackages,
-                         owner._catalog))
-            {
-                expanded.Add(value);
-            }
-            foreach (string value in ExpandReloadClosure(
-                         seedPackages,
-                         staged.Catalog))
-            {
-                expanded.Add(value);
-            }
-
-            string[] finalClosure = [.. expanded.OrderBy(
-                value => value,
-                StringComparer.OrdinalIgnoreCase)];
-            if (!finalClosure.SequenceEqual(
-                    initialClosure,
-                    StringComparer.OrdinalIgnoreCase))
-            {
-                initialClosure = finalClosure;
-                _targetSet = new(
-                    finalClosure,
-                    StringComparer.OrdinalIgnoreCase);
-                plan = plan with
+                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
                 {
-                    BinaryReplacementPackages = Array.AsReadOnly(finalClosure)
-                };
-                _staged = null;
-                _diagnostic = null;
-                _log.Information(
-                    $"Lifecycle transition '{Id.Value:D}' expanded its binary " +
-                    $"replacement closure to [{string.Join(", ", finalClosure)}].");
+                    Fail(owner,
+                        "The disk candidate remained incoherent: " + exception.Message);
+                    return;
+                }
+                _diagnostic = exception.Message;
+                string[] targets = owner.CreateFullCaptureTargets();
+                CancellationToken cancellationToken = _lifetime.Token;
+                _captureTask = Task.Run(
+                    () => PackageImageCapture.CaptureAsync(
+                        _scriptsDirectory,
+                        targets,
+                        _log,
+                        cancellationToken),
+                    cancellationToken);
                 return;
             }
 
+            if (plan.Reason is ScriptLifecycleTransitionReason.SynchronizedReload &&
+                owner.CandidateRemovesCommittedPackage(staged))
+            {
+                string manifest = CandidateManifestKey(staged);
+                if (_pendingRemovalManifest is null ||
+                    !_pendingRemovalManifest.Equals(manifest, StringComparison.Ordinal))
+                {
+                    _pendingRemovalManifest = manifest;
+                    _removalConfirmationStarted = Stopwatch.GetTimestamp();
+                    _diagnostic =
+                        "A committed DLL is absent from disk. Synchronized " +
+                        "reload is confirming the same desired-state deletion " +
+                        "after a second stable observation before entering the " +
+                        "global lifecycle barrier.";
+                    _log.Information(_diagnostic);
+                    return;
+                }
+
+                _pendingRemovalManifest = null;
+                _removalConfirmationStarted = 0;
+            }
+            else
+            {
+                _pendingRemovalManifest = null;
+                _removalConfirmationStarted = 0;
+            }
+
+            _binarySeeds = owner.DetectChangedSeeds(staged);
+            if (_binarySeeds.Length == 0 &&
+                plan.Reason is ScriptLifecycleTransitionReason.SynchronizedReload)
+            {
+                _lifecycleEpoch = owner._lifecycleEpoch;
+                _diagnostic = "The synchronized disk observation matches the committed RAM generation; no reload was performed.";
+                State = ScriptLifecycleTransitionOperationState.Completed;
+                _log.Information(
+                    $"scripts4 reconcile '{Id.Value:D}' observed no binary " +
+                    "change and completed without entering the global barrier.");
+                return;
+            }
+
+            _originalPackageNames = new(
+                owner._catalog.Select(value => value.Name),
+                StringComparer.OrdinalIgnoreCase);
+            HashSet<string> closure = ExpandDependentClosure(
+                _binarySeeds,
+                owner._catalog);
+            closure.UnionWith(ExpandDependentClosure(
+                _binarySeeds,
+                staged.Catalog));
+            _targetSet = closure;
             _staged = staged;
             _diagnostic = null;
             State = ScriptLifecycleTransitionOperationState.ReadyInMemory;
+
+            string seeds = _binarySeeds.Length == 0
+                ? "none; lifecycle-only"
+                : $"[{string.Join(", ", _binarySeeds)}]";
             _log.Information(
-                $"Lifecycle transition '{Id.Value:D}' captured, resolved, and " +
-                "validated its binary replacement generation in RAM.");
+                $"scripts4 reconcile '{Id.Value:D}' is fully captured and " +
+                $"validated in RAM. Binary seeds={seeds}; replacement closure=" +
+                $"[{string.Join(", ", _targetSet.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))}].");
         }
 
         private void PrepareLifecycleStop(PackageManager owner)
@@ -865,8 +1044,8 @@ internal sealed class PackageManager(
                 reverse: true));
             State = ScriptLifecycleTransitionOperationState.StoppingLifecycle;
             _log.Information(
-                $"Lifecycle transition '{Id.Value:D}' entered global Script4 " +
-                $"lifecycle epoch {_lifecycleEpoch.Value}.");
+                $"scripts4 reconcile '{Id.Value:D}' entered global lifecycle " +
+                $"barrier {_lifecycleEpoch.Value}. Every Script4 executable is stopped.");
         }
 
         private void AdvanceLifecycleStop(PackageManager owner)
@@ -882,13 +1061,14 @@ internal sealed class PackageManager(
                 string name = _stopQueue.Dequeue();
                 ScriptPackage? package = owner.FindActivePackage(name);
                 package?.StopInstances(
-                        _targetSet.Contains(name)
-                            ? ScriptStopReason.BinaryReplacement
-                            : ScriptStopReason.LifecycleRestart);
+                    _targetSet.Contains(name)
+                        ? ScriptStopReason.BinaryReplacement
+                        : ScriptStopReason.LifecycleRestart);
                 return;
             }
 
-            _replaceQueue = new(initialClosure);
+            _replaceQueue = new(
+                _targetSet.OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
             State = ScriptLifecycleTransitionOperationState.ReplacingBinaries;
         }
 
@@ -911,56 +1091,65 @@ internal sealed class PackageManager(
                 return;
             }
 
-            if (_staged is not null)
+            if (_staged is null)
+            {
+                Fail(owner, "The RAM candidate disappeared before commit.");
+                return;
+            }
+
+            if (_binarySeeds.Length != 0)
             {
                 owner.ApplyStagedCatalog(_staged);
-                foreach (string name in initialClosure)
-                {
-                    if (!_staged.Packages.TryGetValue(
-                            name,
-                            out StagedPackageImage? package) ||
-                        package is null)
-                    {
-                        _removed.Add(name);
-                        continue;
-                    }
-
-                    if (package.Descriptor.Kind == ScriptPackageKind.Library)
-                    {
-                        _libraries.Add(name);
-                    }
-                    if (!_originalPackageNames.Contains(name))
-                    {
-                        _added.Add(name);
-                    }
-                }
-
-                Dictionary<string, StagedPackageImage> executable =
-                    _staged.Packages.Values
-                        .Where(value =>
-                            value.Descriptor.Kind == ScriptPackageKind.Executable &&
-                            _targetSet.Contains(value.Descriptor.Name))
-                        .ToDictionary(
-                            value => value.Descriptor.Name,
-                            StringComparer.OrdinalIgnoreCase);
-                _prepareQueue = new(
-                    OrderPackageNames(
-                            _staged.Catalog,
-                            executable.Keys,
-                            reverse: false)
-                        .Select(name => executable[name]));
             }
-            else
+
+            HashSet<string> candidateNames = new(
+                _staged.Catalog.Select(value => value.Name),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (string name in _originalPackageNames)
             {
-                _prepareQueue = new();
+                if (!candidateNames.Contains(name))
+                {
+                    AddUnique(_removed, name);
+                }
+            }
+            foreach (string name in candidateNames)
+            {
+                if (!_originalPackageNames.Contains(name))
+                {
+                    AddUnique(_added, name);
+                }
+            }
+            foreach (string name in _targetSet)
+            {
+                PackageDescriptor? descriptor = _staged.Catalog.FirstOrDefault(
+                    value => value.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (descriptor?.Kind == ScriptPackageKind.Library)
+                {
+                    AddUnique(_libraries, name);
+                }
             }
 
+            Dictionary<string, StagedPackageImage> executable =
+                _staged.Packages.Values
+                    .Where(value =>
+                        value.Descriptor.Kind == ScriptPackageKind.Executable &&
+                        _targetSet.Contains(value.Descriptor.Name) &&
+                        owner._catalog.Any(item => item.Name.Equals(
+                            value.Descriptor.Name,
+                            StringComparison.OrdinalIgnoreCase)))
+                    .ToDictionary(
+                        value => value.Descriptor.Name,
+                        StringComparer.OrdinalIgnoreCase);
+
+            _prepareQueue = new(
+                OrderPackageNames(owner._catalog, executable.Keys, reverse: false)
+                    .Select(name => executable[name]));
             State = ScriptLifecycleTransitionOperationState.RecreatingInstances;
         }
 
         private void AdvanceInstanceRecreation(PackageManager owner)
         {
-            if (_prepareQueue is null)
+            if (_prepareQueue is null || _staged is null)
             {
                 Fail(owner, "The executable recreation queue is unavailable.");
                 return;
@@ -971,20 +1160,17 @@ internal sealed class PackageManager(
                 StagedPackageImage image = _prepareQueue.Dequeue();
                 List<StagedPackageImage> dependencies = [];
                 bool dependenciesAvailable = true;
-                foreach (string dependencyName in
-                         image.Descriptor.DependencyPackageNames)
+                foreach (string dependencyName in image.Descriptor.DependencyPackageNames)
                 {
-                    if (_staged is null ||
-                        !_staged.Packages.TryGetValue(
+                    if (!_staged.Packages.TryGetValue(
                             dependencyName,
                             out StagedPackageImage? dependency) ||
                         dependency is null)
                     {
                         dependenciesAvailable = false;
                         _log.Error(
-                            $"Package '{image.Descriptor.Name}' could not be " +
-                            $"prepared because passive dependency " +
-                            $"'{dependencyName}' was not captured.");
+                            $"Package '{image.Descriptor.Name}' cannot be prepared " +
+                            $"because passive dependency '{dependencyName}' is absent.");
                         break;
                     }
                     dependencies.Add(dependency);
@@ -1067,10 +1253,10 @@ internal sealed class PackageManager(
                 : ScriptLifecycleTransitionOperationState.Failed;
             _diagnostic = result.Succeeded
                 ? null
-                : "One or more executable packages failed to enter the new lifecycle epoch.";
+                : "One or more executables failed to enter the committed lifecycle epoch.";
             _staged = null;
             _log.Information(
-                $"Lifecycle transition '{Id.Value:D}' completed at epoch " +
+                $"scripts4 reconcile '{Id.Value:D}' completed at epoch " +
                 $"{result.LifecycleEpoch}. Restarted=[{string.Join(", ", result.RestartedInPlacePackages)}] " +
                 $"Replaced=[{string.Join(", ", result.BinaryReplacedPackages)}] " +
                 $"Libraries=[{string.Join(", ", result.RefreshedLibraries)}] " +
@@ -1089,7 +1275,7 @@ internal sealed class PackageManager(
             _diagnostic = message;
             State = ScriptLifecycleTransitionOperationState.Failed;
             _log.Error(
-                $"Lifecycle transition '{Id.Value:D}' failed: {message}");
+                $"scripts4 reconcile '{Id.Value:D}' failed: {message}");
         }
 
         private ScriptLifecycleTransitionResult BuildResult() => new(
@@ -1109,6 +1295,7 @@ internal sealed class PackageManager(
             }
         }
     }
+
 }
 
 internal sealed class ScriptPackage
@@ -1145,40 +1332,6 @@ internal sealed class ScriptPackage
 
     public int ActiveScriptCount =>
         _scripts.Count(script => script.IsActive);
-
-    public static ScriptPackage? TryPrepare(
-        PackageDescriptor descriptor,
-        IReadOnlyList<PackageDescriptor> dependencies,
-        IScriptServices services,
-        RuntimeLog log,
-        ulong generationId)
-    {
-        if (descriptor.EntryAssembly is null)
-        {
-            return null;
-        }
-
-        ScriptPackageLoadContext? context = null;
-        try
-        {
-            context = new(descriptor, dependencies);
-            Assembly assembly = context.LoadEntryAssembly();
-            return Prepare(
-                descriptor,
-                services,
-                log,
-                context,
-                assembly,
-                generationId);
-        }
-        catch (Exception exception)
-        {
-            log.Error(
-                $"Package '{descriptor.Name}' could not be prepared: {exception}");
-            context?.Unload();
-            return null;
-        }
-    }
 
     public static ScriptPackage? TryPrepare(
         StagedPackageImage staged,
@@ -1387,6 +1540,7 @@ internal sealed class ScriptInstance(
     RuntimeLog log,
     ulong lifecycleEpoch)
 {
+    private static readonly TimeSpan LifecycleDeadline = TimeSpan.FromSeconds(3);
     private readonly CancellationTokenSource _lifetime = new();
     private bool _started;
     private bool _stopped;
@@ -1398,27 +1552,49 @@ internal sealed class ScriptInstance(
     {
         try
         {
-            script.Start(new(
-                packageName,
-                services,
-                reason,
-                lifecycleEpoch,
-                _lifetime.Token));
+            ManagedLifecycleExecutor.Run(
+                async deadlineToken =>
+                {
+                    using CancellationTokenSource start =
+                        CancellationTokenSource.CreateLinkedTokenSource(
+                            _lifetime.Token,
+                            deadlineToken);
+                    await script.StartAsync(new(
+                            packageName,
+                            services,
+                            reason,
+                            lifecycleEpoch,
+                            _lifetime.Token,
+                            start.Token))
+                        .ConfigureAwait(false);
+                },
+                LifecycleDeadline,
+                $"Script executable '{script.GetType().FullName}' exceeded the " +
+                $"{LifecycleDeadline.TotalSeconds:0.###} second startup deadline.");
+
             _started = true;
             log.Information(
                 $"Script executable '{script.GetType().FullName}' started in " +
                 $"lifecycle epoch {lifecycleEpoch}; reason={reason}.");
             return true;
         }
+        catch (ManagedLifecycleTimeoutException)
+        {
+            _faulted = true;
+            _lifetime.Cancel();
+            log.Error(
+                $"Script executable '{script.GetType().FullName}' exceeded the " +
+                $"{LifecycleDeadline.TotalSeconds:0.###} second startup deadline. " +
+                "Its lifecycle authority was revoked; no forced thread abort was attempted.");
+            return false;
+        }
         catch (Exception exception)
         {
             _faulted = true;
             _lifetime.Cancel();
-            _lifetime.Dispose();
             log.Error(
-                $"Script executable '{script.GetType().FullName}' failed " +
-                $"during startup in lifecycle epoch {lifecycleEpoch}: " +
-                exception);
+                $"Script executable '{script.GetType().FullName}' failed during " +
+                $"startup in lifecycle epoch {lifecycleEpoch}: {exception}");
             return false;
         }
     }
@@ -1457,13 +1633,25 @@ internal sealed class ScriptInstance(
         {
             try
             {
-                script.Stop(new(
-                    packageName,
-                    reason,
-                    lifecycleEpoch));
+                ManagedLifecycleExecutor.Run(
+                    token => script.StopAsync(new(
+                        packageName,
+                        reason,
+                        lifecycleEpoch,
+                        token)),
+                    LifecycleDeadline,
+                    $"Script executable '{script.GetType().FullName}' exceeded the " +
+                    $"{LifecycleDeadline.TotalSeconds:0.###} second shutdown deadline.");
                 log.Information(
                     $"Script executable '{script.GetType().FullName}' stopped " +
                     $"from lifecycle epoch {lifecycleEpoch}; reason={reason}.");
+            }
+            catch (ManagedLifecycleTimeoutException)
+            {
+                log.Error(
+                    $"Script executable '{script.GetType().FullName}' exceeded " +
+                    "the shutdown deadline. The runtime detached it and will rely " +
+                    "on cooperative ALC collection when its outstanding work exits.");
             }
             catch (Exception exception)
             {
@@ -1487,6 +1675,11 @@ internal abstract class SharedScriptPackageLoadContext(
             "The Script4 contract assembly has no AssemblyLoadContext.");
     private static readonly string SharedAssemblyName =
         SharedRuntimeAssembly.GetName().Name!;
+    private static readonly HashSet<string> PlatformSharedAssemblyNames =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "FSharp.Core"
+        };
 
     protected static Assembly? FindSharedAssembly(AssemblyName requested)
     {
@@ -1514,7 +1707,23 @@ internal abstract class SharedScriptPackageLoadContext(
             }
         }
 
-        return null;
+        if (!PlatformSharedAssemblyNames.Contains(requested.Name))
+        {
+            return null;
+        }
+
+        try
+        {
+            return SharedLoadContext.LoadFromAssemblyName(requested);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (FileLoadException)
+        {
+            return null;
+        }
     }
 
     protected static Assembly LoadImage(
@@ -1537,10 +1746,10 @@ internal abstract class SharedScriptPackageLoadContext(
                  assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
         {
             if (metadata.Key.Equals(
-                    "SHVDN4.Role",
+                    RuntimeExtensionMetadataKeys.Role,
                     StringComparison.OrdinalIgnoreCase) &&
                 metadata.Value?.Equals(
-                    "RuntimeExtension",
+                    RuntimeExtensionMetadataKeys.RuntimeExtensionRole,
                     StringComparison.OrdinalIgnoreCase) == true)
             {
                 return true;
@@ -1548,103 +1757,6 @@ internal abstract class SharedScriptPackageLoadContext(
         }
 
         return false;
-    }
-}
-
-internal sealed class ScriptPackageLoadContext :
-    SharedScriptPackageLoadContext
-{
-    private readonly AssemblyDependencyResolver _resolver;
-    private readonly Dictionary<string, string> _passiveAssemblyPaths =
-        new(StringComparer.OrdinalIgnoreCase);
-    private readonly string _entryAssembly;
-
-    public ScriptPackageLoadContext(
-        PackageDescriptor package,
-        IReadOnlyList<PackageDescriptor> dependencies) :
-        base($"Script4:{package.Name}")
-    {
-        _entryAssembly = package.EntryAssembly
-            ?? throw new InvalidOperationException(
-                "An executable package has no entry assembly.");
-        _resolver = new(_entryAssembly);
-
-        foreach (PackageDescriptor dependency in dependencies)
-        {
-            foreach ((string assemblyName, string path) in
-                     dependency.AssemblyPathsByName)
-            {
-                if (!_passiveAssemblyPaths.TryAdd(assemblyName, path))
-                {
-                    throw new BadImageFormatException(
-                        $"Package '{package.Name}' has more than one passive " +
-                        $"dependency assembly named '{assemblyName}'.");
-                }
-            }
-        }
-    }
-
-    internal Assembly LoadEntryAssembly() =>
-        LoadManagedAssembly(_entryAssembly);
-
-    private Assembly LoadManagedAssembly(string path)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        string fullPath = Path.GetFullPath(path);
-        byte[] image = ReadSnapshot(fullPath);
-        string pdbPath = Path.ChangeExtension(fullPath, ".pdb");
-        byte[]? symbols = File.Exists(pdbPath)
-            ? ReadSnapshot(pdbPath)
-            : null;
-        return LoadImage(
-            this,
-            new(fullPath, image, symbols));
-    }
-
-    protected override Assembly? Load(AssemblyName assemblyName)
-    {
-        Assembly? shared = FindSharedAssembly(assemblyName);
-        if (shared is not null)
-        {
-            return shared;
-        }
-
-        string? localPath = _resolver.ResolveAssemblyToPath(assemblyName);
-        if (localPath is not null)
-        {
-            return LoadManagedAssembly(localPath);
-        }
-
-        return !string.IsNullOrWhiteSpace(assemblyName.Name) &&
-            _passiveAssemblyPaths.TryGetValue(
-                assemblyName.Name,
-                out string? passivePath) &&
-            passivePath is not null
-                ? LoadManagedAssembly(passivePath)
-                : null;
-    }
-
-    protected override nint LoadUnmanagedDll(string unmanagedDllName)
-    {
-        string? path = _resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
-        return path is null ? 0 : LoadUnmanagedDllFromPath(path);
-    }
-
-    private static byte[] ReadSnapshot(string path)
-    {
-        using FileStream stream = new(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read | FileShare.Delete,
-            bufferSize: 64 * 1024,
-            FileOptions.SequentialScan);
-        using MemoryStream copy = new(
-            stream.Length <= int.MaxValue
-                ? checked((int)stream.Length)
-                : 0);
-        stream.CopyTo(copy);
-        return copy.ToArray();
     }
 }
 

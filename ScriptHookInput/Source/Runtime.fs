@@ -49,9 +49,18 @@ type internal ObservationEntry(key: ObservationKey, origin: InputOrigin) =
         initialized <- true
 
     member _.PublishUnavailable(frameIndex: uint64) =
-        state <- InputState.Unavailable(frameIndex, origin)
+        let wasReleased = initialized && previousDown
+        state <-
+            InputState(
+                false,
+                false,
+                false,
+                wasReleased,
+                0.0f,
+                frameIndex,
+                origin)
         previousDown <- false
-        initialized <- false
+        initialized <- true
 
 [<Sealed>]
 type internal InputRuntime(nativeServices: IStandardNatives) as this =
@@ -61,6 +70,7 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
     let observations = Dictionary<ObservationKey, ObservationEntry>()
     let actions = ResizeArray<InputAction>()
     let mutable frame = InputFrame.Empty
+    let mutable pointer = PointerState.Unavailable 0UL
     let mutable disposed = false
 
     let throwIfDisposed() =
@@ -124,6 +134,9 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
                 DeviceInputFrameContext(
                     context.HostFrameIndex,
                     foreground)
+
+            deviceReader.Capture frameContext
+            pointer <- deviceReader.Pointer
 
             let usingKeyboardAndMouse =
                 foreground && gameReader.IsUsingKeyboardAndMouse()
@@ -195,6 +208,7 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
 
     interface IScriptHookInput with
         member _.Frame = lock gate (fun () -> frame)
+        member _.Pointer = lock gate (fun () -> pointer)
         member _.Parse(text) = InputBindingCodec.Parse(text)
         member _.ParseMany(text) = InputBindingCodec.ParseMany(text)
 
@@ -215,6 +229,7 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
                     actions.Clear()
                     observations.Clear()
                     frame <- InputFrame.Empty
+                    pointer <- PointerState.Unavailable frame.FrameIndex
                     (deviceReader :> IDisposable).Dispose())
 
 and internal InputAction(
@@ -255,11 +270,17 @@ and internal InputAction(
                                 downOrigin <- sample.Origin
 
                 if availableCount = 0 then
+                    let wasReleased = initialized && previousDown
                     state <-
-                        InputState.Unavailable(
+                        InputState(
+                            false,
+                            false,
+                            false,
+                            wasReleased,
+                            0.0f,
                             frameIndex,
-                            InputOrigin.None)
-                    initialized <- false
+                            previousOrigin)
+                    initialized <- true
                     previousDown <- false
                     previousOrigin <- InputOrigin.None
                 else

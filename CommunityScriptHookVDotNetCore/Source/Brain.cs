@@ -13,11 +13,6 @@ using System.Runtime.InteropServices;
     "CommunityScriptHookVDotNetCore.Source.Brain, " +
     "CommunityScriptHookVDotNetCore")]
 [assembly: AssemblyMetadata("CCHL.EntryMethod", "Run")]
-[assembly: AssemblyMetadata("CCHL.RuntimeTfm", "net10.0")]
-[assembly: AssemblyMetadata(
-    "CCHL.RuntimeFramework",
-    "Microsoft.NETCore.App")]
-[assembly: AssemblyMetadata("CCHL.RuntimeVersion", "10.0.0")]
 
 namespace CommunityScriptHookVDotNetCore.Source;
 

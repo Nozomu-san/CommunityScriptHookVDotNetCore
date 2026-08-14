@@ -107,70 +107,6 @@ public readonly record struct Player(int Value);
 public readonly record struct ScrHandle(int Value);
 public readonly record struct Vehicle(int Value);
 
-public readonly struct NativeFloat32 : IEquatable<NativeFloat32>
-{
-    private readonly float _value;
-
-    private NativeFloat32(float value)
-    {
-        if (!float.IsFinite(value))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(value),
-                "A GTA Float32 argument must be finite.");
-        }
-
-        _value = value;
-    }
-
-    internal float Value => _value;
-
-    public static NativeFloat32 FromSingle(float value) => new(value);
-
-    public static NativeFloat32 FromDouble(double value)
-    {
-        if (!double.IsFinite(value) ||
-            value > float.MaxValue ||
-            value < -float.MaxValue)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(value),
-                "The value cannot be represented by the GTA Float32 ABI.");
-        }
-
-        return new NativeFloat32((float)value);
-    }
-
-    public static NativeFloat32 FromDecimal(decimal value) =>
-        new((float)value);
-
-    public static implicit operator NativeFloat32(float value) =>
-        FromSingle(value);
-
-    public static implicit operator NativeFloat32(double value) =>
-        FromDouble(value);
-
-    public static implicit operator NativeFloat32(decimal value) =>
-        FromDecimal(value);
-
-    public bool Equals(NativeFloat32 other) => _value.Equals(other._value);
-    public override bool Equals(object? obj) =>
-        obj is NativeFloat32 other && Equals(other);
-    public override int GetHashCode() => _value.GetHashCode();
-    public override string ToString() =>
-        _value.ToString("R", CultureInfo.InvariantCulture);
-
-    public static bool operator ==(NativeFloat32 left, NativeFloat32 right)
-    {
-        return left.Equals(right);
-    }
-
-    public static bool operator !=(NativeFloat32 left, NativeFloat32 right)
-    {
-        return !(left == right);
-    }
-}
-
 public sealed record NativeParameterDescriptor(
     string Name,
     NativeAbiType Type);
@@ -350,40 +286,93 @@ public interface INativeCatalog
         [NotNullWhen(true)] out NativeDescriptor? descriptor);
 }
 
-public readonly struct KnownNativeArgument
+public sealed class KnownNativeInt32Output
 {
-    private readonly NativeArgument _value;
+    public int Value { get; internal set; }
+}
 
-    private KnownNativeArgument(NativeArgument value)
+public sealed class KnownNativeInt32BufferOutput
+{
+    private readonly int[] _initialValues;
+
+    public KnownNativeInt32BufferOutput(int[] initialValues)
     {
-        _value = value;
+        ArgumentNullException.ThrowIfNull(initialValues);
+        if (initialValues.Length == 0)
+        {
+            throw new ArgumentException(
+                "A native output buffer cannot be empty.",
+                nameof(initialValues));
+        }
+
+        _initialValues = [.. initialValues];
+        Values = new ReadOnlyMemory<int>([.. initialValues]);
     }
 
-    internal NativeArgument Value => _value;
+    public ReadOnlyMemory<int> Values { get; internal set; }
+
+    internal int[] InitialValues => _initialValues;
+}
+
+public sealed class KnownNativeVector3Output
+{
+    public Vector3 Value { get; internal set; }
+}
+
+public readonly struct KnownNativeArgument
+{
+    private KnownNativeArgument(NativeArgument value) => Value = value;
+
+    internal NativeArgument Value { get; }
 
     public static KnownNativeArgument Boolean(bool value) =>
         new(NativeArgument.Boolean(value));
 
-    public static KnownNativeArgument Int32(int value) =>
+    public static KnownNativeArgument Int32<T>(T value)
+        where T : INumberBase<T> =>
         new(NativeArgument.Int32(value));
 
-    public static KnownNativeArgument Float32(NativeFloat32 value) =>
-        new(NativeArgument.Float32(value.Value));
-
-    public static KnownNativeArgument Float32(float value) =>
-        Float32(NativeFloat32.FromSingle(value));
-
-    public static KnownNativeArgument Float32(double value) =>
-        Float32(NativeFloat32.FromDouble(value));
-
-    public static KnownNativeArgument Float32(decimal value) =>
-        Float32(NativeFloat32.FromDecimal(value));
+    public static KnownNativeArgument Float32<T>(T value)
+        where T : INumberBase<T> =>
+        new(NativeArgument.Float32(value));
 
     public static KnownNativeArgument Text(string? value) =>
         new(NativeArgument.Text(value));
 
-    public static KnownNativeArgument Hash32(uint value) =>
+    public static KnownNativeArgument Text(char value) =>
+        Text(value.ToString());
+
+    public static KnownNativeArgument Hash32<T>(T value)
+        where T : INumberBase<T> =>
         new(NativeArgument.Hash32(value));
+
+    public static KnownNativeArgument Any(NativeAny value) =>
+        new(NativeArgument.Any(value.Value));
+
+    public static KnownNativeArgument Any<T>(T value)
+        where T : INumberBase<T> =>
+        new(NativeArgument.Any(value));
+
+    public static KnownNativeArgument Int32Output(
+        KnownNativeInt32Output output) =>
+        new(NativeArgument.BindOutput(
+            NativeAbiType.Int32Pointer,
+            new Int32OutputBinding(
+                output ?? throw new ArgumentNullException(nameof(output)))));
+
+    public static KnownNativeArgument AnyInt32BufferOutput(
+        KnownNativeInt32BufferOutput output) =>
+        new(NativeArgument.BindOutput(
+            NativeAbiType.AnyPointer,
+            new Int32BufferOutputBinding(
+                output ?? throw new ArgumentNullException(nameof(output)))));
+
+    public static KnownNativeArgument Vector3Output(
+        KnownNativeVector3Output output) =>
+        new(NativeArgument.BindOutput(
+            NativeAbiType.Vector3Pointer,
+            new Vector3OutputBinding(
+                output ?? throw new ArgumentNullException(nameof(output)))));
 
     public static KnownNativeArgument Blip(Blip value) =>
         new(NativeArgument.Blip(value.Value));
@@ -438,7 +427,7 @@ public sealed class KnownNativeResult
 
     public NativeDescriptor Descriptor { get; }
     public NativeSignatureVariant Variant { get; }
-    public IReadOnlyList<ulong> RawResults => _results;
+    internal ReadOnlySpan<ulong> RawResults => _results;
 
     public bool AsBoolean() =>
         RequireScalar(NativeAbiType.Boolean32) != 0;
@@ -473,25 +462,47 @@ public sealed class KnownNativeResult
                 "The native result does not contain a Vector3 payload.");
         }
 
-        return new Vector3(
+        return new(
             BitConverter.Int32BitsToSingle(unchecked((int)_results[0])),
             BitConverter.Int32BitsToSingle(unchecked((int)_results[1])),
             BitConverter.Int32BitsToSingle(unchecked((int)_results[2])));
     }
 
-    public int AsHandle(NativeAbiType expectedHandleType)
-    {
-        if (expectedHandleType is < NativeAbiType.Blip or
-            > NativeAbiType.Vehicle)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(expectedHandleType),
-                expectedHandleType,
-                "The requested ABI type is not a handle.");
-        }
+    public Blip AsBlip() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Blip)));
 
-        return unchecked((int)RequireScalar(expectedHandleType));
-    }
+    public Cam AsCam() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Cam)));
+
+    public Entity AsEntity() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Entity)));
+
+    public FireId AsFireId() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.FireId)));
+
+    public Interior AsInterior() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Interior)));
+
+    public ItemSet AsItemSet() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.ItemSet)));
+
+    public GameObject AsGameObject() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Object)));
+
+    public Ped AsPed() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Ped)));
+
+    public Pickup AsPickup() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Pickup)));
+
+    public Player AsPlayer() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Player)));
+
+    public ScrHandle AsScrHandle() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.ScrHandle)));
+
+    public Vehicle AsVehicle() =>
+        new(unchecked((int)RequireScalar(NativeAbiType.Vehicle)));
 
     private ulong RequireScalar(NativeAbiType expected)
     {
@@ -517,6 +528,13 @@ public sealed class KnownNativeResult
     }
 }
 
+public interface IStandardNatives
+{
+    IGameBuildService GameBuild { get; }
+    INativeCatalog Catalog { get; }
+    INativeDatabaseInfo Database { get; }
+}
+
 public interface IKnownNativeInvoker
 {
     KnownNativeResult Invoke(
@@ -524,24 +542,14 @@ public interface IKnownNativeInvoker
         ReadOnlySpan<KnownNativeArgument> arguments);
 }
 
-public interface IStandardNatives
-{
-    IGameBuildService GameBuild { get; }
-    INativeCatalog Catalog { get; }
-    INativeDatabaseInfo Database { get; }
-    IKnownNativeInvoker Known { get; }
-}
-
 internal sealed class StandardNativeServices(
     IGameBuildService gameBuild,
     INativeCatalog catalog,
-    INativeDatabaseInfo database,
-    IKnownNativeInvoker known) : IStandardNatives
+    INativeDatabaseInfo database) : IStandardNatives
 {
     public IGameBuildService GameBuild { get; } = gameBuild;
     public INativeCatalog Catalog { get; } = catalog;
     public INativeDatabaseInfo Database { get; } = database;
-    public IKnownNativeInvoker Known { get; } = known;
 }
 
 internal sealed class GameBuildService(GameBuildInfo current) :
@@ -573,7 +581,7 @@ internal sealed class GameBuildService(GameBuildInfo current) :
 
         if (executablePath.Length == 0)
         {
-            return new GameBuildInfo(
+            return new(
                 edition,
                 -1,
                 string.Empty,
@@ -589,7 +597,7 @@ internal sealed class GameBuildService(GameBuildInfo current) :
                 ? version.ProductBuildPart
                 : ParseBuild(productVersion);
 
-            return new GameBuildInfo(
+            return new(
                 edition,
                 build,
                 executablePath,
@@ -597,7 +605,7 @@ internal sealed class GameBuildService(GameBuildInfo current) :
         }
         catch
         {
-            return new GameBuildInfo(
+            return new(
                 edition,
                 -1,
                 executablePath,
@@ -643,10 +651,8 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
     {
         _entries = entries;
         Identity = identity;
-        _byName = new Dictionary<string, NativeDescriptor>(
-            entries.Length,
-            StringComparer.Ordinal);
-        _byHash = new Dictionary<ulong, NativeDescriptor>(entries.Length);
+        _byName = new(entries.Length, StringComparer.Ordinal);
+        _byHash = new(entries.Length);
 
         foreach (NativeDescriptor descriptor in entries)
         {
@@ -801,7 +807,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
             entries.Length,
             NativeCatalogData.CompressedCatalog.Length,
             decoded.Length);
-        return new NativeCatalog(entries, identity);
+        return new(entries, identity);
     }
 
     private static NativeDescriptor ReadVersion1Descriptor(
@@ -820,19 +826,19 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
 
         NativeSignatureVariant? legacy = legacyBuild < 0
             ? null
-            : new NativeSignatureVariant(
+            : new(
                 legacyBuild,
                 returnType,
                 parameters,
                 exposure);
         NativeSignatureVariant? enhanced = enhancedBuild < 0
             ? null
-            : new NativeSignatureVariant(
+            : new(
                 enhancedBuild,
                 returnType,
                 CloneParameters(parameters),
                 exposure);
-        return new NativeDescriptor(
+        return new(
             index,
             hash,
             name,
@@ -860,7 +866,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         NativeSignatureVariant? enhanced = (editions & 0x02) != 0
             ? ReadVariant(reader, strings)
             : null;
-        return new NativeDescriptor(
+        return new(
             index,
             hash,
             name,
@@ -883,7 +889,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         NativeExposure exposure = ReadExposure(reader);
         NativeParameterDescriptor[] parameters =
             ReadParameters(reader, strings);
-        return new NativeSignatureVariant(
+        return new(
             minimumBuild,
             returnType,
             parameters,
@@ -915,8 +921,9 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
     private static NativeAbiType ReadAbiType(BinaryReader reader)
     {
         byte value = reader.ReadByte();
-        return Enum.IsDefined(typeof(NativeAbiType), value)
-            ? (NativeAbiType)value
+        NativeAbiType type = (NativeAbiType)value;
+        return Enum.IsDefined(type)
+            ? type
             : throw new InvalidDataException(
                 $"The ASN catalog contains unknown ABI type {value}.");
     }
@@ -962,42 +969,196 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
     }
 }
 
+internal abstract class NativeOutputBinding
+{
+    internal abstract NativeAbiType PointerType { get; }
+    internal abstract int ByteSize { get; }
+    internal abstract void Initialize(nint address);
+    internal abstract void Capture(nint address);
+}
+
+internal sealed class Int32OutputBinding(
+    KnownNativeInt32Output output) : NativeOutputBinding
+{
+    private readonly KnownNativeInt32Output _output = output;
+
+    internal override NativeAbiType PointerType =>
+        NativeAbiType.Int32Pointer;
+
+    internal override int ByteSize => sizeof(int);
+
+    internal override void Initialize(nint address) =>
+        Marshal.WriteInt32(address, 0);
+
+    internal override void Capture(nint address) =>
+        _output.Value = Marshal.ReadInt32(address);
+}
+
+internal sealed class Int32BufferOutputBinding(
+    KnownNativeInt32BufferOutput output) : NativeOutputBinding
+{
+    private readonly KnownNativeInt32BufferOutput _output = output;
+
+    internal override NativeAbiType PointerType =>
+        NativeAbiType.AnyPointer;
+
+    internal override int ByteSize =>
+        checked(_output.InitialValues.Length * sizeof(int));
+
+    internal override void Initialize(nint address) =>
+        Marshal.Copy(
+            _output.InitialValues,
+            0,
+            address,
+            _output.InitialValues.Length);
+
+    internal override void Capture(nint address)
+    {
+        int[] values = new int[_output.InitialValues.Length];
+        Marshal.Copy(address, values, 0, values.Length);
+        _output.Values = new ReadOnlyMemory<int>(values);
+    }
+}
+
+internal sealed class Vector3OutputBinding(
+    KnownNativeVector3Output output) : NativeOutputBinding
+{
+    private const int PayloadSize = 0x18;
+    private const int XOffset = 0x00;
+    private const int YOffset = 0x08;
+    private const int ZOffset = 0x10;
+
+    private readonly KnownNativeVector3Output _output = output;
+
+    internal override NativeAbiType PointerType =>
+        NativeAbiType.Vector3Pointer;
+
+    internal override int ByteSize => PayloadSize;
+
+    internal override void Initialize(nint address)
+    {
+        Marshal.WriteInt64(address, XOffset, 0L);
+        Marshal.WriteInt64(address, YOffset, 0L);
+        Marshal.WriteInt64(address, ZOffset, 0L);
+    }
+
+    internal override void Capture(nint address) =>
+        _output.Value = new(
+            ReadFloat(address, XOffset),
+            ReadFloat(address, YOffset),
+            ReadFloat(address, ZOffset));
+
+    private static float ReadFloat(nint address, int offset) =>
+        BitConverter.Int32BitsToSingle(
+            Marshal.ReadInt32(address, offset));
+}
+
 internal readonly struct NativeArgument
 {
     private NativeArgument(
         NativeAbiType type,
         ulong rawValue,
-        string? textValue)
+        string? textValue,
+        NativeOutputBinding? output = null)
     {
         Type = type;
         RawValue = rawValue;
         TextValue = textValue;
+        Output = output;
     }
 
     internal NativeAbiType Type { get; }
     internal ulong RawValue { get; }
     internal string? TextValue { get; }
+    internal NativeOutputBinding? Output { get; }
 
     internal static NativeArgument Boolean(bool value) =>
         new(NativeAbiType.Boolean32, value ? 1UL : 0UL, null);
 
-    internal static NativeArgument Int32(int value) =>
-        new(
-            NativeAbiType.Int32,
-            unchecked((ulong)(long)value),
-            null);
+    internal static NativeArgument Int32<T>(T value)
+        where T : INumberBase<T>
+    {
+        if (!T.IsInteger(value))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                "A GTA Int32 argument must represent an integer value.");
+        }
 
-    internal static NativeArgument Float32(float value) =>
-        new(
-            NativeAbiType.Float32,
-            unchecked((uint)BitConverter.SingleToInt32Bits(value)),
+        int normalized = int.CreateChecked(value);
+        return new(
+            NativeAbiType.Int32,
+            unchecked((ulong)(long)normalized),
             null);
+    }
+
+    internal static NativeArgument Float32<T>(T value)
+        where T : INumberBase<T>
+    {
+        float normalized = float.CreateChecked(value);
+        if (!float.IsFinite(normalized))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                "A GTA Float32 argument must be finite.");
+        }
+
+        return new(
+            NativeAbiType.Float32,
+            unchecked((uint)BitConverter.SingleToInt32Bits(normalized)),
+            null);
+    }
 
     internal static NativeArgument Text(string? value) =>
         new(NativeAbiType.ConstCharPointer, 0, value);
 
-    internal static NativeArgument Hash32(uint value) =>
-        new(NativeAbiType.Hash32, value, null);
+    internal static NativeArgument Hash32<T>(T value)
+        where T : INumberBase<T>
+    {
+        if (!T.IsInteger(value))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                "A GTA Hash32 argument must represent an integer value.");
+        }
+
+        uint normalized = uint.CreateChecked(value);
+        return new(NativeAbiType.Hash32, normalized, null);
+    }
+
+    internal static NativeArgument Any(ulong value) =>
+        new(NativeAbiType.Any, value, null);
+
+    internal static NativeArgument Any<T>(T value)
+        where T : INumberBase<T>
+    {
+        if (!T.IsInteger(value))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                "A GTA Any numeric argument must represent an integer value.");
+        }
+
+        ulong normalized = T.IsNegative(value)
+            ? unchecked((ulong)long.CreateChecked(value))
+            : ulong.CreateChecked(value);
+        return new(NativeAbiType.Any, normalized, null);
+    }
+
+    internal static NativeArgument BindOutput(
+        NativeAbiType type,
+        NativeOutputBinding output)
+    {
+        ArgumentNullException.ThrowIfNull(output);
+        if (type != output.PointerType)
+        {
+            throw new ArgumentException(
+                "The native output binding does not match the ABI pointer type.",
+                nameof(output));
+        }
+
+        return new(type, 0, null, output);
+    }
 
     internal static NativeArgument Blip(int value) =>
         Handle(NativeAbiType.Blip, value);
@@ -1028,6 +1189,57 @@ internal readonly struct NativeArgument
         new(type, unchecked((ulong)(long)value), null);
 }
 
+internal sealed class CatalogNativeCallAdmissionPolicy(
+    NativeCatalog catalog,
+    IGameBuildService gameBuild) : INativeCallAdmissionPolicy
+{
+    public NativeCallAdmissionDecision Evaluate(
+        ulong hash,
+        int argumentCount,
+        int requestedResultCount)
+    {
+        if (!catalog.TryGet(hash, out NativeDescriptor? descriptor))
+        {
+            return new(NativeCallAdmissionStatus.UnknownHash);
+        }
+
+        GameBuildInfo game = gameBuild.Current;
+        if (!game.IsSupported)
+        {
+            return new(NativeCallAdmissionStatus.UnsupportedTarget);
+        }
+
+        NativeSignatureVariant? variant =
+            descriptor.GetVariant(game.Edition);
+        if (variant is null || game.Build < variant.MinimumBuild)
+        {
+            return new(NativeCallAdmissionStatus.UnsupportedTarget);
+        }
+        if (variant.Exposure is NativeExposure.CatalogOnly)
+        {
+            return new(NativeCallAdmissionStatus.ExposureRejected);
+        }
+
+        if (argumentCount != variant.Parameters.Count)
+        {
+            return new(NativeCallAdmissionStatus.ArgumentCountMismatch);
+        }
+
+        int expectedResultCount = variant.ReturnType switch
+        {
+            NativeAbiType.Void => 0,
+            NativeAbiType.Vector3 => 3,
+            _ => 1
+        };
+        if (requestedResultCount != expectedResultCount)
+        {
+            return new(NativeCallAdmissionStatus.ResultCountMismatch);
+        }
+
+        return new(NativeCallAdmissionStatus.Allowed);
+    }
+}
+
 internal enum NativeExecutionStatus
 {
     Success = 0,
@@ -1042,7 +1254,9 @@ internal enum NativeExecutionStatus
     TransportLimitExceeded = 9,
     NativeReturnedNull = 10,
     SessionStopping = 11,
-    TransportFailure = 12
+    NativeAdmissionUnavailable = 12,
+    NativeAdmissionRejected = 13,
+    TransportFailure = 14
 }
 
 internal readonly record struct NativeExecutionResult(
@@ -1093,23 +1307,17 @@ internal sealed class NativeGateway(
     internal NativeExecutionResult InvokeGenerated(
         NativeDescriptor descriptor,
         ReadOnlySpan<NativeArgument> arguments) =>
-        Invoke(
-            descriptor,
-            arguments,
-            requireSafePublic: true);
+        Invoke(descriptor, arguments, NativeExposure.SafePublic);
 
     internal NativeExecutionResult InvokeKnownHash(
         NativeDescriptor descriptor,
         ReadOnlySpan<NativeArgument> arguments) =>
-        Invoke(
-            descriptor,
-            arguments,
-            requireSafePublic: false);
+        Invoke(descriptor, arguments, NativeExposure.ManualContractRequired);
 
     private NativeExecutionResult Invoke(
         NativeDescriptor descriptor,
         ReadOnlySpan<NativeArgument> arguments,
-        bool requireSafePublic)
+        NativeExposure requiredExposure)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
 
@@ -1136,8 +1344,7 @@ internal sealed class NativeGateway(
             return Failure(NativeExecutionStatus.UnsupportedBuild);
         }
 
-        if (requireSafePublic &&
-            variant.Exposure is not NativeExposure.SafePublic)
+        if (variant.Exposure != requiredExposure)
         {
             return Failure(NativeExecutionStatus.CatalogOnly);
         }
@@ -1148,7 +1355,8 @@ internal sealed class NativeGateway(
         }
 
         Span<ulong> rawArguments = stackalloc ulong[arguments.Length];
-        List<nint>? allocations = null;
+        List<nint>? textAllocations = null;
+        List<NativeOutputAllocation>? outputAllocations = null;
         try
         {
             for (int index = 0; index < arguments.Length; ++index)
@@ -1161,6 +1369,19 @@ internal sealed class NativeGateway(
                         NativeExecutionStatus.ArgumentTypeMismatch);
                 }
 
+                if (argument.Output is not null)
+                {
+                    nint pointer = Marshal.AllocHGlobal(
+                        argument.Output.ByteSize);
+                    outputAllocations ??= [];
+                    outputAllocations.Add(
+                        new(pointer, argument.Output));
+                    argument.Output.Initialize(pointer);
+                    rawArguments[index] =
+                        unchecked((ulong)(nuint)pointer);
+                    continue;
+                }
+
                 if (argument.Type is NativeAbiType.ConstCharPointer)
                 {
                     if (argument.TextValue is null)
@@ -1171,8 +1392,8 @@ internal sealed class NativeGateway(
                     {
                         nint pointer = Marshal.StringToCoTaskMemUTF8(
                             argument.TextValue);
-                        allocations ??= [];
-                        allocations.Add(pointer);
+                        textAllocations ??= [];
+                        textAllocations.Add(pointer);
                         rawArguments[index] =
                             unchecked((ulong)(nuint)pointer);
                     }
@@ -1195,7 +1416,16 @@ internal sealed class NativeGateway(
                 rawArguments,
                 resultCount);
 
-            return new NativeExecutionResult(
+            if (result.Status is RawNativeCallStatus.Success &&
+                outputAllocations is not null)
+            {
+                foreach (NativeOutputAllocation allocation in outputAllocations)
+                {
+                    allocation.Binding.Capture(allocation.Address);
+                }
+            }
+
+            return new(
                 MapStatus(result.Status),
                 result.Status is RawNativeCallStatus.Success
                     ? variant
@@ -1206,15 +1436,27 @@ internal sealed class NativeGateway(
         }
         finally
         {
-            if (allocations is not null)
+            if (textAllocations is not null)
             {
-                foreach (nint allocation in allocations)
+                foreach (nint allocation in textAllocations)
                 {
                     Marshal.FreeCoTaskMem(allocation);
                 }
             }
+
+            if (outputAllocations is not null)
+            {
+                foreach (NativeOutputAllocation allocation in outputAllocations)
+                {
+                    Marshal.FreeHGlobal(allocation.Address);
+                }
+            }
         }
     }
+
+    private readonly record struct NativeOutputAllocation(
+        nint Address,
+        NativeOutputBinding Binding);
 
     private static NativeExecutionResult Failure(
         NativeExecutionStatus status) =>
@@ -1238,6 +1480,12 @@ internal sealed class NativeGateway(
 
         RawNativeCallStatus.SessionStopping =>
             NativeExecutionStatus.SessionStopping,
+
+        RawNativeCallStatus.AdmissionUnavailable =>
+            NativeExecutionStatus.NativeAdmissionUnavailable,
+
+        RawNativeCallStatus.AdmissionRejected =>
+            NativeExecutionStatus.NativeAdmissionRejected,
 
         _ => NativeExecutionStatus.TransportFailure
     };
@@ -1414,7 +1662,7 @@ public static partial class StandardNatives
             descriptorIndex,
             NativeAbiType.Vector3,
             arguments).Results;
-        return new Vector3(
+        return new(
             BitConverter.Int32BitsToSingle(unchecked((int)results[0])),
             BitConverter.Int32BitsToSingle(unchecked((int)results[1])),
             BitConverter.Int32BitsToSingle(unchecked((int)results[2])));

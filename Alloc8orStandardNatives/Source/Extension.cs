@@ -1,22 +1,25 @@
 using CommunityScriptHookVDotNetCore.Source;
 using System.Reflection;
 
-[assembly: AssemblyMetadata("SHVDN4.Role", "RuntimeExtension")]
-[assembly: AssemblyMetadata("SHVDN4.Id", "Alloc8orStandardNatives")]
+[assembly: AssemblyMetadata("CSHVDNC.Role", "RuntimeExtension")]
+[assembly: AssemblyMetadata("CSHVDNC.Id", "Alloc8orStandardNatives")]
 [assembly: AssemblyMetadata(
-    "SHVDN4.EntryType",
+    "CSHVDNC.EntryType",
     "Alloc8orStandardNatives.Source.NativeExtension")]
-[assembly: AssemblyMetadata("SHVDN4.ContractMajor", "1")]
-[assembly: AssemblyMetadata("SHVDN4.ContractMinor", "0")]
+[assembly: AssemblyMetadata("CSHVDNC.ContractMajor", "1")]
+[assembly: AssemblyMetadata("CSHVDNC.ContractMinor", "0")]
 [assembly: AssemblyMetadata(
-    "SHVDN4.Provides",
-    "native.standard;game.build")]
-[assembly: AssemblyMetadata("SHVDN4.Requires", "host.native.raw")]
+    "CSHVDNC.Provides",
+    "native.call.admission;native.standard;game.build")]
+[assembly: AssemblyMetadata(
+    "CSHVDNC.Requires",
+    "host.native.raw;host.native.admission")]
 
 namespace Alloc8orStandardNatives.Source;
 
 internal sealed class NativeExtension : IScript4RuntimeExtension
 {
+    private IDisposable? _admissionLease;
     private bool _initialized;
 
     public async ValueTask InitializeAsync(
@@ -34,30 +37,39 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
 
         IRawNativeTransport transport =
             context.Services.GetRequired<IRawNativeTransport>();
+        INativeCallAdmissionControl admission =
+            context.Services.GetRequired<INativeCallAdmissionControl>();
         GameBuildService gameBuild = GameBuildService.Detect();
         NativeCatalog catalog = await NativeCatalog.LoadAsync(
             cancellationToken).ConfigureAwait(false);
+        CatalogNativeCallAdmissionPolicy admissionPolicy = new(
+            catalog,
+            gameBuild);
         NativeGateway gateway = new(transport, gameBuild, catalog);
         KnownNativeInvoker known = new(catalog, gateway);
         StandardNativeServices services = new(
             gameBuild,
             catalog,
-            catalog,
-            known);
+            catalog);
 
-        StandardNatives.Bind(catalog, gateway);
+        IDisposable? admissionLease = null;
         try
         {
+            admissionLease = admission.Install(admissionPolicy);
+            StandardNatives.Bind(catalog, gateway);
             context.Services.Register<IGameBuildService>(gameBuild);
             context.Services.Register<INativeCatalog>(catalog);
             context.Services.Register<INativeDatabaseInfo>(catalog);
-            context.Services.Register<IKnownNativeInvoker>(known);
+            context.Services.RegisterRuntimeOnly<IKnownNativeInvoker>(known);
             context.Services.Register<IStandardNatives>(services);
+            _admissionLease = admissionLease;
+            admissionLease = null;
             _initialized = true;
         }
         catch
         {
             StandardNatives.Unbind();
+            admissionLease?.Dispose();
             throw;
         }
     }
@@ -68,13 +80,15 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
 
     public ValueTask ShutdownAsync(CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         if (_initialized)
         {
+            _admissionLease?.Dispose();
+            _admissionLease = null;
             StandardNatives.Unbind();
             _initialized = false;
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.CompletedTask;
     }
 }

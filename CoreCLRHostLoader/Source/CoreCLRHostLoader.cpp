@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <process.h>
+#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -12,6 +13,7 @@ namespace
     using namespace CoreCLRHostLoader;
 
     constexpr double SessionTimeoutSeconds = 30.0;
+    constexpr DWORD SessionJoinTimeoutMilliseconds = 30'000;
 
     std::atomic<HMODULE> g_module = nullptr;
     std::atomic<bool> g_shutdownRequested = false;
@@ -25,7 +27,10 @@ namespace
         ~HostSession()
         {
             StopAndJoin();
-            CloseHandles();
+            if (!m_workerDetached)
+            {
+                CloseHandles();
+            }
         }
 
         HostSession(const HostSession&) = delete;
@@ -36,9 +41,7 @@ namespace
         [[nodiscard]]
         HostResult<void> Start(
             HostConfiguration configuration,
-            DotNetEnvironment environment,
-            ManagedBrain brain,
-            std::filesystem::path runtimeConfiguration)
+            ManagedBrain brain)
         {
             if (m_state.load(std::memory_order_acquire) !=
                 SessionState::Created)
@@ -62,9 +65,7 @@ namespace
             }
 
             m_configuration = std::move(configuration);
-            m_environment = std::move(environment);
             m_brain = std::move(brain);
-            m_runtimeConfiguration = std::move(runtimeConfiguration);
             m_frequency = frequency.QuadPart;
             m_request.ReadyEvent = m_readyEvent;
             m_request.FrameRequestedEvent = m_frameRequestedEvent;
@@ -204,16 +205,40 @@ namespace
 
         void StopAndJoin() noexcept
         {
-            if (m_thread == nullptr)
+            if (m_thread == nullptr || m_workerDetached)
             {
                 return;
             }
 
             RequestStop();
-            WaitForSingleObject(m_thread, INFINITE);
+            const DWORD wait = WaitForSingleObject(
+                m_thread,
+                SessionJoinTimeoutMilliseconds);
+            if (wait != WAIT_OBJECT_0)
+            {
+                m_workerDetached = true;
+                const std::wstring prefix = wait == WAIT_TIMEOUT
+                    ? L"The managed root did not finish cooperative shutdown "
+                      L"before the join deadline. Its bounded host-session state "
+                    : L"The managed root join could not be confirmed. Its "
+                      L"bounded host-session state ";
+                WriteLog(
+                    LogLevel::Warning,
+                    prefix +
+                        L"will remain resident until GTA exits; no thread "
+                        L"termination or root retry will be attempted.");
+                return;
+            }
+
             CloseHandle(m_thread);
             m_thread = nullptr;
             g_stopEvent.store(nullptr, std::memory_order_release);
+        }
+
+        [[nodiscard]]
+        bool WorkerDetached() const noexcept
+        {
+            return m_workerDetached;
         }
 
         [[nodiscard]]
@@ -468,9 +493,7 @@ namespace
             auto& session = *static_cast<HostSession*>(context);
             auto result = RunManagedBrain(
                 session.m_configuration,
-                session.m_environment,
                 session.m_brain,
-                session.m_runtimeConfiguration,
                 session.m_request);
 
             if (!result)
@@ -508,9 +531,7 @@ namespace
         }
 
         HostConfiguration m_configuration;
-        DotNetEnvironment m_environment;
         ManagedBrain m_brain;
-        std::filesystem::path m_runtimeConfiguration;
         BrainRunRequest m_request{};
         FrameMailbox m_frame{};
         NativeCallMailbox m_nativeCall{};
@@ -532,6 +553,7 @@ namespace
         std::int64_t m_startCounter = 0;
         std::int64_t m_frameStartCounter = 0;
         bool m_frameInFlight = false;
+        bool m_workerDetached = false;
     };
 
     void IdleUntilShutdown()
@@ -556,35 +578,11 @@ namespace
             return;
         }
 
-        auto environment = InspectDotNetEnvironment(state->Configuration);
-        if (!environment)
-        {
-            WriteLog(LogLevel::Error, environment.error());
-            IdleUntilShutdown();
-            return;
-        }
-
-        WriteLog(
-            LogLevel::Information,
-            L".NET root: " + environment->Root.wstring());
-        WriteLog(
-            LogLevel::Information,
-            L"hostfxr: " + environment->HostFxr.wstring() + L" (" +
-                environment->HostFxrVersion + L").");
-
-        if (environment->NewestEligibleRuntime)
-        {
-            WriteLog(
-                LogLevel::Information,
-                L"Newest eligible Microsoft.NETCore.App runtime: " +
-                    environment->NewestEligibleRuntime->Version + L".");
-        }
-
         WriteLog(
             LogLevel::Information,
             state->Configuration.AllowPrereleaseRuntime
-                ? L"Prerelease .NET runtimes are eligible."
-                : L"Prerelease .NET runtimes are disabled.");
+                ? L"Prerelease .NET runtimes may participate in hostfxr resolution."
+                : L"Prerelease .NET roll-forward is not explicitly enabled by CCHL.");
 
         auto brain = DiscoverManagedBrain(*state);
         if (!brain)
@@ -623,26 +621,25 @@ namespace
             L"Managed brain discovered: " +
                 (*brain)->Assembly.filename().wstring() + L".");
 
-        auto runtimeConfiguration =
-            WriteRuntimeConfiguration(*state, **brain);
-        if (!runtimeConfiguration)
+        if (!std::filesystem::is_regular_file((*brain)->RuntimeConfiguration))
         {
-            WriteLog(LogLevel::Error, runtimeConfiguration.error());
+            WriteLog(
+                LogLevel::Error,
+                L"Managed brain runtime configuration was not found: " +
+                    (*brain)->RuntimeConfiguration.wstring());
             IdleUntilShutdown();
             return;
         }
 
         WriteLog(
             LogLevel::Information,
-            L"Runtime configuration is ready: " +
-                runtimeConfiguration->wstring());
+            L"Managed runtime policy is owned by: " +
+                (*brain)->RuntimeConfiguration.filename().wstring());
 
-        HostSession session;
-        auto started = session.Start(
+        auto session = std::make_unique<HostSession>();
+        auto started = session->Start(
             state->Configuration,
-            *environment,
-            **brain,
-            *runtimeConfiguration);
+            **brain);
         if (!started)
         {
             WriteLog(LogLevel::Error, started.error());
@@ -652,17 +649,17 @@ namespace
 
         while (!g_shutdownRequested.load(std::memory_order_acquire))
         {
-            if (!session.AdvanceFrame())
+            if (!session->AdvanceFrame())
             {
                 break;
             }
             scriptWait(0);
         }
 
-        session.StopAndJoin();
-        if (session.State() == SessionState::Faulted)
+        session->StopAndJoin();
+        if (session->State() == SessionState::Faulted)
         {
-            const std::wstring error = session.Error();
+            const std::wstring error = session->Error();
             WriteLog(
                 LogLevel::Error,
                 error.empty()
@@ -674,6 +671,11 @@ namespace
             WriteLog(
                 LogLevel::Information,
                 L"Managed brain session stopped cooperatively.");
+        }
+
+        if (session->WorkerDetached())
+        {
+            static_cast<void>(session.release());
         }
     }
 

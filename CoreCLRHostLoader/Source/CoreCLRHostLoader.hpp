@@ -15,8 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
-#include <vector>
+#include <type_traits>
 
 namespace CoreCLRHostLoader
 {
@@ -98,32 +97,13 @@ namespace CoreCLRHostLoader
         HostConfiguration Configuration;
     };
 
-    struct RuntimeDescriptor final
-    {
-        std::wstring Name;
-        std::wstring Version;
-        std::filesystem::path Path;
-        bool IsPrerelease = false;
-    };
-
-    struct DotNetEnvironment final
-    {
-        std::filesystem::path Root;
-        std::filesystem::path HostFxr;
-        std::wstring HostFxrVersion;
-        std::vector<RuntimeDescriptor> Runtimes;
-        std::optional<RuntimeDescriptor> NewestEligibleRuntime;
-    };
-
     struct ManagedBrain final
     {
         std::filesystem::path Assembly;
+        std::filesystem::path RuntimeConfiguration;
         std::wstring AssemblyName;
         std::wstring EntryType;
         std::wstring EntryMethod;
-        std::wstring RuntimeTfm;
-        std::wstring RuntimeFramework;
-        std::wstring RuntimeVersion;
         std::uint16_t AbiMajor = 0;
         std::uint16_t AbiMinor = 0;
     };
@@ -142,8 +122,7 @@ namespace CoreCLRHostLoader
         std::uint32_t Size = sizeof(NativeCallMailbox);
         std::uint32_t ArgumentCount = 0;
         std::uint32_t RequestedResultCount = 0;
-        std::int32_t Status =
-            std::to_underlying(NativeCallStatus::Pending);
+        std::int32_t Status = std::to_underlying(NativeCallStatus::Pending);
         std::uint64_t RequestId = 0;
         std::uint64_t Hash = 0;
         std::array<std::uint64_t, MaximumNativeArguments> Arguments{};
@@ -184,16 +163,7 @@ namespace CoreCLRHostLoader
     [[nodiscard]]
     HostResult<void> SaveHostConfiguration(const HostState& state) noexcept;
 
-    [[nodiscard]]
-    HostResult<std::filesystem::path> WriteRuntimeConfiguration(
-        const HostState& state,
-        const ManagedBrain& brain) noexcept;
-
     void WriteLog(LogLevel level, std::wstring_view message) noexcept;
-
-    [[nodiscard]]
-    HostResult<DotNetEnvironment> InspectDotNetEnvironment(
-        const HostConfiguration& configuration) noexcept;
 
     [[nodiscard]]
     HostResult<std::optional<ManagedBrain>> DiscoverManagedBrain(
@@ -202,8 +172,6 @@ namespace CoreCLRHostLoader
     [[nodiscard]]
     HostResult<void> RunManagedBrain(
         const HostConfiguration& configuration,
-        const DotNetEnvironment& environment,
         const ManagedBrain& brain,
-        const std::filesystem::path& runtimeConfiguration,
         const BrainRunRequest& request) noexcept;
 }

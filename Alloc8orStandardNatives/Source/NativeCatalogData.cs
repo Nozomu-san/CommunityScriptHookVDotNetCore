@@ -1,3 +1,5 @@
+using System;
+
 namespace Alloc8orStandardNatives.Source;
 
 internal static class NativeCatalogData

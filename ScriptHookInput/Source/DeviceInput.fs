@@ -19,6 +19,13 @@ type private NativePoint =
     val mutable Y: int
 
 [<Struct; StructLayout(LayoutKind.Sequential)>]
+type private NativeRect =
+    val mutable Left: int
+    val mutable Top: int
+    val mutable Right: int
+    val mutable Bottom: int
+
+[<Struct; StructLayout(LayoutKind.Sequential)>]
 type private XInputGamepad =
     val mutable Buttons: uint16
     val mutable LeftTrigger: byte
@@ -52,6 +59,14 @@ module private NativeDeviceInput =
     [<DllImport("user32.dll", ExactSpelling = true)>]
     [<return: MarshalAs(UnmanagedType.Bool)>]
     extern bool GetCursorPos(NativePoint& point)
+
+    [<DllImport("user32.dll", ExactSpelling = true)>]
+    [<return: MarshalAs(UnmanagedType.Bool)>]
+    extern bool ScreenToClient(nativeint windowHandle, NativePoint& point)
+
+    [<DllImport("user32.dll", ExactSpelling = true)>]
+    [<return: MarshalAs(UnmanagedType.Bool)>]
+    extern bool GetClientRect(nativeint windowHandle, NativeRect& rect)
 
     [<DllImport("xinput1_4.dll", EntryPoint = "XInputGetState", ExactSpelling = true)>]
     extern uint32 XInputGetState14(uint32 userIndex, XInputState& state)
@@ -102,6 +117,7 @@ type internal DeviceInputReader() =
     let mutable cursorY = 0
     let mutable cursorDeltaX = 0
     let mutable cursorDeltaY = 0
+    let mutable pointerState = PointerState.Unavailable 0UL
     let mutable disposed = false
 
     let throwIfDisposed() =
@@ -162,6 +178,7 @@ type internal DeviceInputReader() =
 
             if not foreground then
                 cursorBaseline <- false
+                pointerState <- PointerState.Unavailable frame.FrameIndex
                 Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
             else
                 let mutable point = NativePoint()
@@ -172,8 +189,28 @@ type internal DeviceInputReader() =
                     cursorX <- point.X
                     cursorY <- point.Y
                     cursorBaseline <- true
+
+                    let window = NativeDeviceInput.GetForegroundWindow()
+                    let mutable clientPoint = point
+                    let mutable rect = NativeRect()
+                    if window <> 0n &&
+                       NativeDeviceInput.ScreenToClient(window, &clientPoint) &&
+                       NativeDeviceInput.GetClientRect(window, &rect) then
+                        pointerState <-
+                            PointerState(
+                                true,
+                                point.X,
+                                point.Y,
+                                clientPoint.X,
+                                clientPoint.Y,
+                                max 0 (rect.Right - rect.Left),
+                                max 0 (rect.Bottom - rect.Top),
+                                frame.FrameIndex)
+                    else
+                        pointerState <- PointerState.Unavailable frame.FrameIndex
                 else
                     cursorBaseline <- false
+                    pointerState <- PointerState.Unavailable frame.FrameIndex
 
                 for index = 0 to controllerStates.Length - 1 do
                     match NativeDeviceInput.tryGetControllerState index with
@@ -230,6 +267,16 @@ type internal DeviceInputReader() =
         else
             ValueNone
 
+    member _.Capture(frame: DeviceInputFrameContext) =
+        lock gate (fun () ->
+            throwIfDisposed()
+            captureFrame frame)
+
+    member _.Pointer =
+        lock gate (fun () ->
+            throwIfDisposed()
+            pointerState)
+
     member _.Read(
         frame: DeviceInputFrameContext,
         control: DeviceControl) : struct (bool * single) voption =
@@ -275,6 +322,7 @@ type internal DeviceInputReader() =
             lock gate (fun () ->
                 if not disposed then
                     disposed <- true
+                    pointerState <- PointerState.Unavailable capturedFrame
                     Array.Clear(controllerAvailable, 0, controllerAvailable.Length))
 
     static member IsCurrentProcessForeground() =

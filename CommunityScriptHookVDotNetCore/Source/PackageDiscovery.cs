@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using System.Security.Cryptography;
 
 namespace CommunityScriptHookVDotNetCore.Source;
 
@@ -17,20 +18,15 @@ internal sealed record PackageDescriptor(
     IReadOnlyList<string> DependencyPackageNames)
 {
     public static int PackageLocalLibraryCount => 0;
-
-    public ScriptPackageInfo ToPublicInfo() => new(
-        Name,
-        Directory,
-        Kind,
-        EntryAssembly,
-        AssemblyFiles,
-        DependencyPackageNames);
 }
 
 internal sealed record PackageAssemblyImage(
     string Path,
     byte[] Assembly,
-    byte[]? Symbols);
+    byte[]? Symbols)
+{
+    public string Sha256 { get; } = Convert.ToHexString(SHA256.HashData(Assembly));
+}
 
 internal sealed record CapturedPackageImage(
     PackageDescriptor Descriptor,
@@ -359,18 +355,13 @@ internal static class PackageDiscovery
             }
         }
 
-        Dictionary<string, string> passiveAssemblyOwners = new(
+        Dictionary<string, string> assemblyOwners = new(
             StringComparer.OrdinalIgnoreCase);
         foreach (PackageDescriptor package in packages)
         {
-            if (package.Kind != ScriptPackageKind.Library)
-            {
-                continue;
-            }
-
             foreach (string assemblyName in package.AssemblyPathsByName.Keys)
             {
-                if (passiveAssemblyOwners.TryGetValue(
+                if (assemblyOwners.TryGetValue(
                         assemblyName,
                         out string? existingOwner) &&
                     !existingOwner.Equals(
@@ -378,12 +369,11 @@ internal static class PackageDiscovery
                         StringComparison.OrdinalIgnoreCase))
                 {
                     throw new BadImageFormatException(
-                        $"Passive library packages '{existingOwner}' and " +
-                        $"'{package.Name}' both provide assembly identity " +
-                        $"'{assemblyName}'.");
+                        $"scripts4 packages '{existingOwner}' and '{package.Name}' " +
+                        $"both provide assembly identity '{assemblyName}'.");
                 }
 
-                passiveAssemblyOwners[assemblyName] = package.Name;
+                assemblyOwners[assemblyName] = package.Name;
             }
         }
 
@@ -395,26 +385,87 @@ internal static class PackageDiscovery
                 StringComparer.OrdinalIgnoreCase);
             foreach (string reference in package.ReferencedAssemblyNames)
             {
-                if (package.AssemblyPathsByName.ContainsKey(reference))
+                if (package.AssemblyPathsByName.ContainsKey(reference) ||
+                    !assemblyOwners.TryGetValue(reference, out string? owner) ||
+                    owner.Equals(
+                        package.Name,
+                        StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                if (passiveAssemblyOwners.TryGetValue(
-                        reference,
-                        out string? owner) &&
-                    !owner.Equals(
-                        package.Name,
-                        StringComparison.OrdinalIgnoreCase))
+                if (!byPackageName.TryGetValue(
+                        owner,
+                        out PackageDescriptor? provider))
                 {
-                    dependencies.Add(owner);
+                    throw new BadImageFormatException(
+                        $"Package '{package.Name}' references scripts4 assembly " +
+                        $"'{reference}', but its owning package is unavailable.");
                 }
+
+                if (provider.Kind != ScriptPackageKind.Library)
+                {
+                    throw new BadImageFormatException(
+                        $"Package '{package.Name}' references executable package " +
+                        $"'{provider.Name}'. Script4 executables are independent " +
+                        "lifecycle actors and cannot be compile-time dependencies. " +
+                        "Move shared code into a passive library package.");
+                }
+
+                dependencies.Add(provider.Name);
             }
 
             directDependencies[package.Name] =
                 [.. dependencies.OrderBy(
                     value => value,
                     StringComparer.OrdinalIgnoreCase)];
+        }
+
+        Dictionary<string, byte> visitState = new(
+            StringComparer.OrdinalIgnoreCase);
+        List<string> visitStack = [];
+
+        void VisitDependency(string packageName)
+        {
+            visitState[packageName] = 1;
+            visitStack.Add(packageName);
+
+            foreach (string dependencyName in directDependencies[packageName])
+            {
+                if (!visitState.TryGetValue(dependencyName, out byte state))
+                {
+                    VisitDependency(dependencyName);
+                    continue;
+                }
+                if (state != 1)
+                {
+                    continue;
+                }
+
+                int cycleStart = visitStack.FindIndex(value =>
+                    value.Equals(
+                        dependencyName,
+                        StringComparison.OrdinalIgnoreCase));
+                IEnumerable<string> cycle = cycleStart >= 0
+                    ? visitStack.Skip(cycleStart).Append(dependencyName)
+                    : [dependencyName, packageName, dependencyName];
+                throw new BadImageFormatException(
+                    "scripts4 package dependency cycle detected: " +
+                    string.Join(" -> ", cycle) + ".");
+            }
+
+            visitStack.RemoveAt(visitStack.Count - 1);
+            visitState[packageName] = 2;
+        }
+
+        foreach (string packageName in directDependencies.Keys.OrderBy(
+                     value => value,
+                     StringComparer.OrdinalIgnoreCase))
+        {
+            if (!visitState.ContainsKey(packageName))
+            {
+                VisitDependency(packageName);
+            }
         }
 
         List<PackageDescriptor> resolved = [];
@@ -566,6 +617,13 @@ internal static class PackageDiscovery
                 value => value,
                 StringComparer.OrdinalIgnoreCase)]);
         bool executable = inspection.ScriptTypeNames.Count != 0;
+        if (inspection.HasScript4DerivedType && !executable)
+        {
+            throw new BadImageFormatException(
+                $"Package '{assemblyName}' derives from Script4 but contains no " +
+                "concrete Script4 executable. Passive libraries must not derive " +
+                "from Script4, even through an abstract base type.");
+        }
 
         return new(
             assemblyName,
@@ -581,7 +639,7 @@ internal static class PackageDiscovery
             DependencyPackageNames: []);
     }
 
-    private static void EnsureFlatAssemblyLayout(string scriptsRoot)
+    internal static void EnsureFlatAssemblyLayout(string scriptsRoot)
     {
         foreach (string nestedAssembly in Directory.EnumerateFiles(
                      scriptsRoot,
@@ -656,10 +714,10 @@ internal static class PackageDiscovery
                 out string? cchlRole) &&
             cchlRole.Equals("ManagedBrain", StringComparison.OrdinalIgnoreCase);
         bool runtimeExtension = assemblyMetadata.TryGetValue(
-                "SHVDN4.Role",
+                RuntimeExtensionMetadataKeys.Role,
                 out string? runtimeRole) &&
             runtimeRole.Equals(
-                "RuntimeExtension",
+                RuntimeExtensionMetadataKeys.RuntimeExtensionRole,
                 StringComparison.OrdinalIgnoreCase);
         bool moduleInitializer = HasModuleInitializer(metadata);
         bool referencesRawNativeTransport =
@@ -668,18 +726,20 @@ internal static class PackageDiscovery
             FindForbiddenNativeImport(metadata);
 
         List<string> scriptTypes = [];
+        bool hasScript4DerivedType = false;
         foreach (TypeDefinitionHandle handle in metadata.TypeDefinitions)
         {
             TypeDefinition type = metadata.GetTypeDefinition(handle);
             TypeAttributes attributes = type.Attributes;
             if ((attributes & TypeAttributes.Interface) != 0 ||
-                (attributes & TypeAttributes.Abstract) != 0 ||
-                type.GetGenericParameters().Count != 0)
+                !DerivesFromScript4(metadata, handle, []))
             {
                 continue;
             }
 
-            if (DerivesFromScript4(metadata, handle, []))
+            hasScript4DerivedType = true;
+            if ((attributes & TypeAttributes.Abstract) == 0 &&
+                type.GetGenericParameters().Count == 0)
             {
                 scriptTypes.Add(GetTypeName(metadata, handle));
             }
@@ -707,6 +767,7 @@ internal static class PackageDiscovery
             moduleInitializer,
             referencesRawNativeTransport,
             forbiddenNativeImport,
+            hasScript4DerivedType,
             scriptTypes,
             Array.AsReadOnly(
                 [.. referencedAssemblies.OrderBy(
@@ -877,6 +938,7 @@ internal static class PackageDiscovery
         bool HasModuleInitializer,
         bool ReferencesRawNativeTransport,
         string? ForbiddenNativeImport,
+        bool HasScript4DerivedType,
         IReadOnlyList<string> ScriptTypeNames,
         IReadOnlyList<string> ReferencedAssemblyNames)
     {
@@ -891,6 +953,7 @@ internal static class PackageDiscovery
                 false,
                 false,
                 null,
+                false,
                 [],
                 []);
     }
