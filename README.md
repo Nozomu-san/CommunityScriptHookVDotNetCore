@@ -35,9 +35,18 @@
 - No more game freeze, since reload is now moved to asynchronous type.
 - No more brute-force and all-at-once reload. For modders, having less reload workloads will have the game last longer instead of crash randomly early.
 
-### LocalNativeMemories (coming soon)
+### LocalNativeMemories
+- This answers what's in the game, such as how many objects, entities, vehicles & peds.
 
-### StandardGameOperations (coming soon)
+### CEventGenerator
+- Tickrate sync or latency is completely replaced with event-based, driven via machine codes, which helps a lot on removing the performance bottleneck roots.
+- This requires MinHook to interfere, though it still is currently the largest cost on researching and writing.
+
+### LowLevelEvents
+- Extract low level CEvent(s) from machine codes to intermediate standards, which .NET Core projects uses.
+
+### StandardGameOperations
+- The easiest way to write codes, by using this, you will be bypassed lots of writing, such as declaring native calls manually, locally declaring game database and so on, even multiple operations of native calls. It's all here.
 
 ## Requirements
 

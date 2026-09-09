@@ -35,9 +35,18 @@
 - Không còn hiện tượng treo game (game freeze), do việc tải lại giờ đây đã được chuyển sang kiểu bất đồng bộ (asynchronous).
 - Không còn tình trạng vét cạn (brute-force) và tải lại toàn bộ cùng một lúc. Đối với các modder, việc giảm bớt khối lượng công việc tải lại sẽ giúp trò chơi hoạt động bền bỉ hơn thay vì bị văng game ngẫu nhiên từ sớm.
 
-### LocalNativeMemories (sắp tới)
+### LocalNativeMemories
+- Cung cấp thông tin về các đối tượng trong game, chẳng hạn như số lượng object, entity, vehicle & ped.
 
-### StandardGameOperations (sắp tới)
+### CEventGenerator
+- Cơ chế đồng bộ hóa theo tickrate hoặc độ trễ (latency) được thay thế hoàn toàn bằng cơ chế dựa trên sự kiện (event-based) vận hành thông qua mã máy; điều này giúp loại bỏ đáng kể các nguyên nhân gây nghẽn hiệu năng.
+- Quá trình này đòi hỏi sự can thiệp của MinHook, đồng thời cũng là phần tốn nhiều công sức nhất trong khâu nghiên cứu và lập trình.
+
+### LowLevelEvents
+- Trích xuất các CEvent cấp thấp từ mã máy sang các chuẩn trung gian mà các dự án .NET Core có thể sử dụng.
+
+### StandardGameOperations
+- Lối lập trình dễ nhất, giúp bạn lược bỏ nhiều công đoạn như khai báo thủ công các native call, khai báo cục bộ game đang có gì ở LocalNativeMemories, hay xử lý các chuỗi thao tác native call phức tạp. Mọi thứ cần thiết đều đã được tích hợp sẵn tại đây.
 
 ## Yêu cầu
 
