@@ -40,10 +40,10 @@
 
 ### CEventGenerator
 - Cơ chế đồng bộ hóa theo tickrate hoặc độ trễ (latency) được thay thế hoàn toàn bằng cơ chế dựa trên sự kiện (event-based) vận hành thông qua mã máy; điều này giúp loại bỏ đáng kể các nguyên nhân gây nghẽn hiệu năng.
-- Quá trình này đòi hỏi sự can thiệp của MinHook, đồng thời cũng là phần tốn nhiều công sức nhất trong khâu nghiên cứu và lập trình.
+- Quá trình này đòi hỏi sự can thiệp của [MinHook](https://github.com/TsudaKageyu/minhook), đồng thời cũng là phần tốn nhiều công sức nhất trong khâu nghiên cứu và lập trình.
 
 ### LowLevelEvents
-- Trích xuất các CEvent cấp thấp từ mã máy sang các chuẩn trung gian mà các dự án .NET Core có thể sử dụng.
+- Trích xuất và chuyển đổi các CEvent cấp thấp từ mã máy sang các chuẩn trung gian mà các dự án .NET Core có thể sử dụng.
 
 ### StandardGameOperations
 - Lối lập trình dễ nhất, giúp bạn lược bỏ nhiều công đoạn như khai báo thủ công các native call, khai báo cục bộ game đang có gì ở LocalNativeMemories, hay xử lý các chuỗi thao tác native call phức tạp. Mọi thứ cần thiết đều đã được tích hợp sẵn tại đây.
