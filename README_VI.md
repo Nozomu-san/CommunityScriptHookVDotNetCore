@@ -51,13 +51,13 @@
 ## Yêu cầu
 
 ### Dành cho Người dùng cuối
-- [FSharp.Core](https://www.nuget.org/packages/fsharp.core).
-- [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (tùy thuộc vào bản mod, các Targeting Version có thể khác nhau).
+- [FSharp.Core](https://www.nuget.org/packages/fsharp.core) (dành cho Project dùng F#, ở đây có Script4Reload & ScriptHookInput).
+- [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (tùy thuộc vào target version, dựa vào phiên bản Runtime tối thiểu).
+- [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
 
 ### Dành cho Đồng phát triển (Khuyên dùng vì tui luôn bận rộn)
 - [Visual Studio 2026](https://visualstudio.microsoft.com) hoặc [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
 - [.NET Core SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (chỉ dành cho bản Preview, còn bản Release đã được tích hợp sẵn trong trình cài đặt Visual Studio).
-- [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
 
 ## Question: Tôi có khả năng tiếp tục modding ở SHVDN3 hay không?
 - Có, hoàn toàn có thể, nhưng chỉ khi không gặp lỗi IO Exception do trùng lặp nội dung.

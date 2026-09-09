@@ -51,13 +51,13 @@
 ## Requirements
 
 ### As End-user
-- [FSharp.Core](https://www.nuget.org/packages/fsharp.core).
-- [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (mod-driven, targeting versions are vary).
+- [FSharp.Core](https://www.nuget.org/packages/fsharp.core). (for F# project, here has ScriptHookInput & Script4Reload)
+- [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (target-driven, based on requirements).
+- [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
 
 ### As Co-Developers (Recommended since I am busy all the time)
 - [Visual Studio 2026](https://visualstudio.microsoft.com) or [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
 - [.NET Core SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (for Preview only, for Release is already part of Visual Studio Installer).
-- [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
 
 ## Question: Can I remain modding on original SHVDN from either side?
 - Yes. You can, but as long as you don't mess up with IO Exception due to duplications.
