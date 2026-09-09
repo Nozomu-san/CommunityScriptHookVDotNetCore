@@ -30,9 +30,9 @@ using System.Text.RegularExpressions;
 
 namespace Alloc8orStandardNatives.CatalogTool;
 
-public static class CatalogCompilerV7
+public static class CatalogCompiler
 {
-    private const ushort FormatVersion = 2;
+    private const ushort FormatVersion = 3;
     private static readonly UTF8Encoding Utf8 = new(false);
     private static readonly Regex IdentifierRegex = new(
         """^[A-Za-z_][A-Za-z0-9_]*$""",
@@ -127,6 +127,7 @@ public static class CatalogCompilerV7
             ["int"] = new(null, "Int32", false, IsNumeric: true),
             ["float"] = new(null, "Float32", false, IsNumeric: true),
             ["const char*"] = new("string?", "Text", false),
+            ["Any"] = new("NativeAny", "Any", false),
             ["Hash"] = new(null, "Hash32", false, IsNumeric: true),
             ["Blip"] = new("Blip", "Blip", true),
             ["Cam"] = new("Cam", "Cam", true),
@@ -209,7 +210,7 @@ public static class CatalogCompilerV7
                 $"verified: {generated.Records.Count} descriptors, " +
                 $"{generated.PackedLength} packed bytes, " +
                 $"{generated.DecodedLength} decoded bytes; " +
-                "StandardNatives.cs matches the C# 14 generator.");
+                "StandardNatives.cs matches the catalog generator.");
             if (File.Exists(legacyPath) && File.Exists(enhancedPath))
             {
                 List<NativeRecord> sourceRecords = ReadAndMerge(
@@ -255,7 +256,7 @@ public static class CatalogCompilerV7
             $"format {FormatVersion}, {records.Count} descriptors, " +
             $"{catalog.Packed.Length} packed bytes, " +
             $"{catalog.Decoded.Length} decoded bytes, " +
-            $"{CountSafeMethods(records)} safe public methods.");
+            $"{CountGeneratedMethods(records)} generated public methods.");
         PrintProofSamples(records);
         return 0;
     }
@@ -281,14 +282,6 @@ public static class CatalogCompilerV7
             enhancedPath,
             "Enhanced");
         int sharedCount = legacy.Keys.Count(enhanced.ContainsKey);
-        if (sharedCount < 1000)
-        {
-            throw new InvalidDataException(
-                "natives_gen9.json is not a complete Enhanced catalog. " +
-                "Refusing to regenerate because per-native Enhanced data " +
-                "for shared hashes would be lost.");
-        }
-
         SortedSet<ulong> hashes = new(legacy.Keys);
         hashes.UnionWith(enhanced.Keys);
         Console.WriteLine(
@@ -555,15 +548,6 @@ public static class CatalogCompilerV7
             RequireKnownType(parameter.Type, context);
         }
 
-        Exposure expected = ClassifyExposure(
-            variant.ReturnType,
-            variant.Parameters);
-        if (variant.Exposure != expected)
-        {
-            throw new InvalidDataException(
-                $"{context}: stored exposure {variant.Exposure} does not match " +
-                $"the ABI-derived exposure {expected}.");
-        }
     }
 
     private static void RequireKnownType(string type, string context)
@@ -715,7 +699,6 @@ public static class CatalogCompilerV7
     {
         WriteVarUInt32(writer, EncodeBuild(variant.MinimumBuild));
         writer.Write((byte)NativeTypes[variant.ReturnType]);
-        writer.Write((byte)variant.Exposure);
         WriteVarUInt32(writer, checked((uint)variant.Parameters.Count));
         foreach (NativeParameter parameter in variant.Parameters)
         {
@@ -724,24 +707,6 @@ public static class CatalogCompilerV7
                 writer,
                 checked((uint)pool.GetIndex(parameter.Name)));
         }
-    }
-
-    private static Exposure ClassifyExposure(
-        string returnType,
-        IReadOnlyList<NativeParameter> parameters)
-    {
-        if (parameters.Any(static parameter => parameter.Type == "Any"))
-        {
-            return Exposure.CatalogOnly;
-        }
-        if ((returnType.Contains('*') && returnType != "const char*") ||
-            parameters.Any(static parameter =>
-                parameter.Type.Contains('*') &&
-                parameter.Type != "const char*"))
-        {
-            return Exposure.ManualContractRequired;
-        }
-        return Exposure.SafePublic;
     }
 
     private static uint EncodeBuild(int build) =>
@@ -879,7 +844,7 @@ public static class CatalogCompilerV7
             throw new InvalidDataException("Catalog magic is invalid.");
         }
         ushort format = reader.ReadUInt16();
-        if (format is not 1 and not 2)
+        if (format is not 1 and not 2 and not 3)
         {
             throw new InvalidDataException($"Unsupported catalog format {format}.");
         }
@@ -905,9 +870,12 @@ public static class CatalogCompilerV7
         List<NativeRecord> records = new(descriptorCount);
         for (int index = 0; index < descriptorCount; ++index)
         {
-            NativeRecord record = format == 1
-                ? ReadVersion1Record(reader, strings)
-                : ReadVersion2Record(reader, strings);
+            NativeRecord record = format switch
+            {
+                1 => ReadVersion1Record(reader, strings),
+                2 => ReadVersion2Record(reader, strings),
+                _ => ReadVersion3Record(reader, strings)
+            };
             record.Index = index;
             records.Add(record);
         }
@@ -933,26 +901,45 @@ public static class CatalogCompilerV7
         int legacyBuild = DecodeBuild(ReadVarUInt32(reader));
         int enhancedBuild = DecodeBuild(ReadVarUInt32(reader));
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
-        Exposure exposure = ReadExposure(reader);
+        _ = ReadLegacyExposure(reader);
         List<NativeParameter> parameters = ReadParameters(reader, strings);
         NativeVariant? legacy = legacyBuild < 0
             ? null
             : new NativeVariant(
                 legacyBuild,
                 returnType,
-                CloneParameters(parameters),
-                exposure);
+                CloneParameters(parameters));
         NativeVariant? enhanced = enhancedBuild < 0
             ? null
             : new NativeVariant(
                 enhancedBuild,
                 returnType,
-                CloneParameters(parameters),
-                exposure);
+                CloneParameters(parameters));
         return new NativeRecord(hash, name, legacy, enhanced);
     }
 
     private static NativeRecord ReadVersion2Record(
+        BinaryReader reader,
+        string[] strings)
+    {
+        ulong hash = reader.ReadUInt64();
+        string name = GetString(strings, ReadVarUInt32(reader));
+        byte editions = reader.ReadByte();
+        if (editions == 0 || (editions & ~0x03) != 0)
+        {
+            throw new InvalidDataException(
+                $"Native 0x{hash:X16} has invalid edition flags 0x{editions:X2}.");
+        }
+        NativeVariant? legacy = (editions & 0x01) != 0
+            ? ReadVersion2Variant(reader, strings)
+            : null;
+        NativeVariant? enhanced = (editions & 0x02) != 0
+            ? ReadVersion2Variant(reader, strings)
+            : null;
+        return new NativeRecord(hash, name, legacy, enhanced);
+    }
+
+    private static NativeRecord ReadVersion3Record(
         BinaryReader reader,
         string[] strings)
     {
@@ -973,6 +960,25 @@ public static class CatalogCompilerV7
         return new NativeRecord(hash, name, legacy, enhanced);
     }
 
+    private static NativeVariant ReadVersion2Variant(
+        BinaryReader reader,
+        string[] strings)
+    {
+        int minimumBuild = DecodeBuild(ReadVarUInt32(reader));
+        if (minimumBuild < 0)
+        {
+            throw new InvalidDataException(
+                "A present native edition variant cannot be unsupported.");
+        }
+        string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
+        _ = ReadLegacyExposure(reader);
+        List<NativeParameter> parameters = ReadParameters(reader, strings);
+        return new NativeVariant(
+            minimumBuild,
+            returnType,
+            parameters);
+    }
+
     private static NativeVariant ReadVariant(
         BinaryReader reader,
         string[] strings)
@@ -984,13 +990,11 @@ public static class CatalogCompilerV7
                 "A present native edition variant cannot be unsupported.");
         }
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
-        Exposure exposure = ReadExposure(reader);
         List<NativeParameter> parameters = ReadParameters(reader, strings);
         return new NativeVariant(
             minimumBuild,
             returnType,
-            parameters,
-            exposure);
+            parameters);
     }
 
     private static List<NativeParameter> ReadParameters(
@@ -1025,14 +1029,14 @@ public static class CatalogCompilerV7
         return (AbiType)value;
     }
 
-    private static Exposure ReadExposure(BinaryReader reader)
+    private static byte ReadLegacyExposure(BinaryReader reader)
     {
         byte value = reader.ReadByte();
-        if (value > (byte)Exposure.CatalogOnly)
+        if (value > 2)
         {
-            throw new InvalidDataException($"Unknown exposure {value}.");
+            throw new InvalidDataException($"Unknown legacy exposure {value}.");
         }
-        return (Exposure)value;
+        return value;
     }
 
     private static string GetString(string[] values, uint index) =>
@@ -1077,7 +1081,6 @@ public static class CatalogCompilerV7
         }
         if (left is null || right is null ||
             left.MinimumBuild != right.MinimumBuild ||
-            left.Exposure != right.Exposure ||
             !left.ReturnType.Equals(right.ReturnType, StringComparison.Ordinal) ||
             left.Parameters.Count != right.Parameters.Count)
         {
@@ -1101,9 +1104,7 @@ public static class CatalogCompilerV7
     private static string RenderCatalogData(CatalogBuild catalog)
     {
         StringBuilder builder = new();
-        builder.AppendLine("// <auto-generated />")
-            .AppendLine("// Run UpdateNativeCatalog.ps1 -VerifyOnly to validate this payload.")
-            .AppendLine("// Run UpdateNativeCatalog.ps1 -InspectName <NAME> for a readable record.")
+        builder.
             .AppendLine("using System;")
             .AppendLine()
             .AppendLine("namespace Alloc8orStandardNatives.Source;")
@@ -1151,14 +1152,10 @@ public static class CatalogCompilerV7
 
     private static string RenderStandardNatives(List<NativeRecord> records)
     {
-        int safeCount = CountSafeMethods(records);
         StringBuilder builder = new();
-        builder.AppendLine("// <auto-generated />")
-            .Append("// Safe generated methods: ")
-            .Append(safeCount.ToString(CultureInfo.InvariantCulture))
-            .Append("; catalog descriptors: ")
-            .Append(records.Count.ToString(CultureInfo.InvariantCulture))
-            .AppendLine(".")
+        builder.
+            .AppendLine("#pragma warning disable IDE1006")
+            .AppendLine()
             .AppendLine("using System.Numerics;")
             .AppendLine()
             .AppendLine("namespace Alloc8orStandardNatives.Source;")
@@ -1173,7 +1170,9 @@ public static class CatalogCompilerV7
                 RenderGeneratedMethod(builder, record, method);
             }
         }
-        builder.AppendLine("}");
+        builder.AppendLine("}")
+            .AppendLine()
+            .AppendLine("#pragma warning restore IDE1006");
         return builder.ToString();
     }
 
@@ -1277,8 +1276,8 @@ public static class CatalogCompilerV7
         NativeRecord record)
     {
         List<NativeVariant> candidates = [];
-        AddSafeVariant(candidates, record.Legacy);
-        AddSafeVariant(candidates, record.Enhanced);
+        AddProjectableVariant(candidates, record.Legacy);
+        AddProjectableVariant(candidates, record.Enhanced);
         if (candidates.Count == 0)
         {
             return [];
@@ -1319,12 +1318,11 @@ public static class CatalogCompilerV7
         return [.. methods.Values];
     }
 
-    private static void AddSafeVariant(
+    private static void AddProjectableVariant(
         List<NativeVariant> values,
         NativeVariant? variant)
     {
         if (variant is null ||
-            variant.Exposure != Exposure.SafePublic ||
             !Returns.ContainsKey(variant.ReturnType) ||
             variant.Parameters.Any(static parameter =>
                 !Parameters.ContainsKey(parameter.Type)))
@@ -1334,7 +1332,7 @@ public static class CatalogCompilerV7
         values.Add(variant);
     }
 
-    private static int CountSafeMethods(IReadOnlyList<NativeRecord> records) =>
+    private static int CountGeneratedMethods(IReadOnlyList<NativeRecord> records) =>
         records.Sum(static record => GetGeneratedMethods(record).Count);
 
     private static string EscapeIdentifier(string value) =>
@@ -1348,7 +1346,7 @@ public static class CatalogCompilerV7
                 StringComparison.Ordinal))
         {
             throw new InvalidDataException(
-                $"{Path.GetFileName(path)} is stale relative to the C# 14 generator. " +
+                $"{Path.GetFileName(path)} is stale relative to the catalog generator. " +
                 "Regenerate before freezing Alloc8orStandardNatives.");
         }
     }
@@ -1423,7 +1421,7 @@ public static class CatalogCompilerV7
 
         Console.WriteLine(
             $"{edition}: minimum build {variant.MinimumBuild}; " +
-            $"exposure {variant.Exposure}; return {variant.ReturnType}; " +
+            $"return {variant.ReturnType}; " +
             $"{variant.Parameters.Count} argument(s)");
         for (int index = 0; index < variant.Parameters.Count; ++index)
         {
@@ -1448,7 +1446,7 @@ public static class CatalogCompilerV7
             ", ",
             variant.Parameters.Select(parameter =>
                 parameter.Type + " " + parameter.Name));
-        return $"build {variant.MinimumBuild}; exposure {variant.Exposure}; " +
+        return $"build {variant.MinimumBuild}; " +
             $"{variant.ReturnType} ({parameters})";
     }
 
@@ -1489,13 +1487,6 @@ public static class CatalogCompilerV7
         BlipPointer = 32
     }
 
-    private enum Exposure : byte
-    {
-        SafePublic = 0,
-        ManualContractRequired = 1,
-        CatalogOnly = 2
-    }
-
     private sealed class SourceEntry(
         string name,
         int build,
@@ -1513,13 +1504,11 @@ public static class CatalogCompilerV7
     private sealed class NativeVariant(
         int minimumBuild,
         string returnType,
-        List<NativeParameter> parameters,
-        Exposure exposure)
+        List<NativeParameter> parameters)
     {
         internal int MinimumBuild { get; } = minimumBuild;
         internal string ReturnType { get; } = returnType;
         internal List<NativeParameter> Parameters { get; } = parameters;
-        internal Exposure Exposure { get; } = exposure;
 
         internal static NativeVariant From(SourceEntry source)
         {
@@ -1527,14 +1516,12 @@ public static class CatalogCompilerV7
             return new(
                 source.Build,
                 source.ReturnType,
-                parameters,
-                ClassifyExposure(source.ReturnType, parameters));
+                parameters);
         }
 
         internal bool HasSameWireContract(NativeVariant other)
         {
-            if (Exposure != other.Exposure ||
-                !ReturnType.Equals(other.ReturnType, StringComparison.Ordinal) ||
+            if (!ReturnType.Equals(other.ReturnType, StringComparison.Ordinal) ||
                 Parameters.Count != other.Parameters.Count)
             {
                 return false;
@@ -1576,7 +1563,7 @@ public static class CatalogCompilerV7
         string ClrType,
         string Invoker);
 
-    private readonly record struct ParameterProjection(
+    private readonly record struct ParameterProjection( 
         string? ClrType,
         string Factory,
         bool UseValueProperty,
@@ -1619,10 +1606,9 @@ public static class CatalogCompilerV7
         }
     }
 }
-
 '@
 
-$typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompilerV7'
+$typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompiler'
 if ($null -eq ($typeName -as [type])) {
     $compilerOptions = @(
         '/langversion:14',
@@ -1649,11 +1635,10 @@ if ($null -eq ($typeName -as [type])) {
             $arguments.ReferencedAssemblies = $references
         }
     }
-
     Add-Type @arguments
 }
 
-[Alloc8orStandardNatives.CatalogTool.CatalogCompilerV7]::Run(
+[Alloc8orStandardNatives.CatalogTool.CatalogCompiler]::Run(
     $PSScriptRoot,
     $InspectName,
     $InspectHash,

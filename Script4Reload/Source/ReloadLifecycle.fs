@@ -3,7 +3,20 @@ namespace Script4Reload.Source
 open System
 open System.Diagnostics
 open CommunityScriptHookVDotNetCore.Source
-open ScriptHookInput.Source
+
+type internal IManualReloadInput =
+    inherit IDisposable
+    abstract WasPressed: bool
+
+[<Sealed>]
+type internal ManualReloadInput(context: RuntimeExtensionContext, inputText: string) =
+    let actions =
+        context.Services.GetRequired<ScriptHookInput.Source.IInputActions>()
+    let action = actions.CreateSingle("Script4Reload.Manual", inputText)
+
+    interface IManualReloadInput with
+        member _.WasPressed = action.State.WasPressed
+        member _.Dispose() = action.Dispose()
 
 [<Sealed>]
 type Scripts4Lifecycle
@@ -16,10 +29,10 @@ type Scripts4Lifecycle
 
     let settleWindow = TimeSpan.FromMilliseconds 150.0
     let mutable watcher: Scripts4Watcher option = None
-    let mutable reloadAction: IInputAction option = None
+    let mutable manualInput: IManualReloadInput option = None
     let mutable activeOperation: ScriptLifecycleTransitionOperationId option = None
     let mutable lastOperationState: ScriptLifecycleTransitionOperationState option = None
-    let mutable synchronizedDirty = false
+    let mutable automaticDirty = false
     let mutable lastDirtyTimestamp = 0L
     let mutable explicitReloadPending = false
     let mutable shutdown = false
@@ -33,19 +46,19 @@ type Scripts4Lifecycle
         |> String.concat ", "
 
     let acquireManualInput() =
-        if config.Mode = ReloadMode.Manual && reloadAction.IsNone && not shutdown then
-            let inputActions = context.Services.GetRequired<IInputActions>()
-            let action = inputActions.Create("Script4Reload.Manual", config.ReloadInputs)
-            reloadAction <- Some action
-            log.Information($"Manual reload input is active: {config.ReloadInputs}.")
+        if config.Mode = ReloadMode.Manual && manualInput.IsNone && not shutdown then
+            context.Dependencies.Require("input.actions")
+            let input = new ManualReloadInput(context, config.ReloadInput)
+            manualInput <- Some(input :> IManualReloadInput)
+            log.Information($"Manual reload input is active: {config.ReloadInput}.")
 
     let releaseManualInput() =
-        reloadAction
+        manualInput
         |> Option.iter (fun value ->
             try
                 value.Dispose()
             with _ -> ())
-        reloadAction <- None
+        manualInput <- None
 
     let request reason =
         if activeOperation.IsSome || shutdown then
@@ -122,7 +135,7 @@ type Scripts4Lifecycle
                 log.Warning(
                     "The scripts4 watcher lost reliable event history: " + message)
                 if value.Recover() then
-                    synchronizedDirty <- true
+                    automaticDirty <- true
                     lastDirtyTimestamp <- Stopwatch.GetTimestamp()
                     log.Information(
                         "The scripts4 watcher was recreated; a full CSHVDNC " +
@@ -132,25 +145,25 @@ type Scripts4Lifecycle
             | None -> ()
 
             if value.ConsumeSignal() then
-                synchronizedDirty <- true
+                automaticDirty <- true
                 lastDirtyTimestamp <- Stopwatch.GetTimestamp()
 
-    let advanceSynchronized() =
-        if config.Mode = ReloadMode.Synchronized &&
-           synchronizedDirty &&
+    let advanceAutomatic() =
+        if config.Mode = ReloadMode.Automatic &&
+           automaticDirty &&
            activeOperation.IsNone &&
            lastDirtyTimestamp <> 0L &&
            Stopwatch.GetElapsedTime(lastDirtyTimestamp) >= settleWindow then
-            if request ScriptLifecycleTransitionReason.SynchronizedReload then
-                synchronizedDirty <- false
+            if request ScriptLifecycleTransitionReason.AutomaticReload then
+                automaticDirty <- false
 
-    let advanceManual() =
+    let advanceManualInput() =
         if config.Mode = ReloadMode.Manual then
             acquireManualInput()
-            match reloadAction with
-            | Some action ->
+            match manualInput with
+            | Some input ->
                 try
-                    if action.State.WasPressed then
+                    if input.WasPressed then
                         explicitReloadPending <- true
                 with exceptionValue ->
                     log.Warning(
@@ -159,9 +172,11 @@ type Scripts4Lifecycle
                     releaseManualInput()
             | None -> ()
 
-            if explicitReloadPending && activeOperation.IsNone then
-                if request ScriptLifecycleTransitionReason.ManualReload then
-                    explicitReloadPending <- false
+    let advanceExplicitReload() =
+        if explicitReloadPending && activeOperation.IsNone then
+            if request ScriptLifecycleTransitionReason.ManualReload then
+                explicitReloadPending <- false
+                automaticDirty <- false
 
     member _.Initialize() =
         if shutdown then
@@ -169,15 +184,13 @@ type Scripts4Lifecycle
 
         match config.Mode with
         | ReloadMode.Manual ->
-            acquireManualInput()
             log.Information(
                 $"Script4Reload Manual mode is active with input " +
-                $"'{config.ReloadInputs}'. A trigger requests a global lifecycle " +
-                "reload even when no DLL binary changed.")
-        | ReloadMode.Synchronized ->
+                $"'{config.ReloadInput}'.")
+        | ReloadMode.Automatic ->
             watcher <- Some(new Scripts4Watcher(context.ScriptsDirectory))
             log.Information(
-                "Script4Reload Synchronized mode is active. Filesystem events " +
+                "Script4Reload Automatic mode is active. Filesystem events " +
                 "only mark disk state dirty; CSHVDNC owns capture, validation, " +
                 "RAM staging, diffing, and the global lifecycle barrier.")
 
@@ -198,10 +211,13 @@ type Scripts4Lifecycle
             advanceOperation()
             if activeOperation.IsNone then
                 match config.Mode with
-                | ReloadMode.Manual -> advanceManual()
-                | ReloadMode.Synchronized ->
-                    advanceWatcher()
-                    advanceSynchronized()
+                | ReloadMode.Manual -> advanceManualInput()
+                | ReloadMode.Automatic -> advanceWatcher()
+
+                advanceExplicitReload()
+
+                if activeOperation.IsNone && config.Mode = ReloadMode.Automatic then
+                    advanceAutomatic()
 
     member _.Shutdown() =
         if not shutdown then
@@ -210,5 +226,5 @@ type Scripts4Lifecycle
             watcher
             |> Option.iter (fun value -> (value :> IDisposable).Dispose())
             watcher <- None
-            synchronizedDirty <- false
+            automaticDirty <- false
             explicitReloadPending <- false

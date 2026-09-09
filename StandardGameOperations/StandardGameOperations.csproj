@@ -4,25 +4,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
+    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
+    <FileVersion>09.09.2026.0</FileVersion>
+    <AssemblyTitle>Standard Game Operations</AssemblyTitle>
+    <Authors>Nozomu-san</Authors>
   </PropertyGroup>
   <ItemGroup>
     <Folder Include="Source\" />
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="Alloc8orStandardNatives">
-      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net10.0\Alloc8orStandardNatives.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="CommunityScriptHookVDotNetCore">
-      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net10.0\CommunityScriptHookVDotNetCore.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="LocalNativeMemories">
-      <HintPath>..\LocalNativeMemories\bin\x64\Release\net10.0\LocalNativeMemories.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <ProjectReference Include="..\Alloc8orStandardNatives\Alloc8orStandardNatives.csproj" />
+    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
+    <ProjectReference Include="..\LocalNativeMemories\LocalNativeMemories.csproj" />
   </ItemGroup>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="xcopy &quot;$(TargetDir)&quot; &quot;C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V&quot; /Y /I" />
-  </Target>
 </Project>

@@ -6,10 +6,9 @@ internal enum BrainRunResult
 {
     Success = 0,
     InvalidArgument = 1,
-    IncompatibleAbi = 2,
-    AlreadyRunning = 3,
-    InternalFailure = 4,
-    MissingCapability = 5
+    AlreadyRunning = 2,
+    InternalFailure = 3,
+    MissingCapability = 4
 }
 
 internal enum NativeCallStatus
@@ -20,7 +19,16 @@ internal enum NativeCallStatus
     TooManyArguments = 2,
     TooManyResults = 3,
     NativeReturnedNull = 4,
-    SessionStopping = 5
+    SessionStopping = 5,
+    FunctionFault = 6,
+    GuardRejected = 7
+}
+
+internal enum HostCallOperation : ushort
+{
+    ScriptNative = 0,
+    Int32FunctionOnePointer = 1,
+    Int32FunctionOneGuardedObjectPointer = 2
 }
 
 [Flags]
@@ -29,15 +37,15 @@ internal enum HostCapability : ulong
     None = 0,
     FrameBridge = 1UL << 0,
     NativeBridge = 1UL << 1,
-    CooperativeShutdown = 1UL << 2
+    CooperativeShutdown = 1UL << 2,
+    GameThreadFunctionBridge = 1UL << 3,
+    GameThreadGuardedFunctionBridge = 1UL << 4
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal readonly struct HostRunRequest
 {
     public readonly uint Size;
-    public readonly ushort AbiMajor;
-    public readonly ushort AbiMinor;
     public readonly HostCapability Capabilities;
     public readonly nint ReadyEvent;
     public readonly nint FrameRequestedEvent;
@@ -61,8 +69,6 @@ internal readonly struct HostFrameMailbox
 
 internal static class HostContract
 {
-    public const ushort AbiMajor = 1;
-    public const ushort AbiMinor = 0;
     public const int RunRequestSize = 88;
     public const int FrameMailboxSize = 24;
     public const int NativeMailboxSize = 320;
@@ -71,6 +77,7 @@ internal static class HostContract
 
     public const int NativeSizeOffset = 0;
     public const int NativeArgumentCountOffset = 4;
+    public const int NativeOperationOffset = 6;
     public const int NativeRequestedResultCountOffset = 8;
     public const int NativeStatusOffset = 12;
     public const int NativeRequestIdOffset = 16;
@@ -81,7 +88,9 @@ internal static class HostContract
     private const HostCapability RequiredCapabilities =
         HostCapability.FrameBridge |
         HostCapability.NativeBridge |
-        HostCapability.CooperativeShutdown;
+        HostCapability.CooperativeShutdown |
+        HostCapability.GameThreadFunctionBridge |
+        HostCapability.GameThreadGuardedFunctionBridge;
 
     public static BrainRunResult Validate(
         nint request,
@@ -98,11 +107,9 @@ internal static class HostContract
         }
 
         value = Marshal.PtrToStructure<HostRunRequest>(request);
-        if (value.Size < RunRequestSize ||
-            value.AbiMajor != AbiMajor ||
-            value.AbiMinor > AbiMinor)
+        if (value.Size < RunRequestSize)
         {
-            return BrainRunResult.IncompatibleAbi;
+            return BrainRunResult.InvalidArgument;
         }
 
         if ((value.Capabilities & RequiredCapabilities) != RequiredCapabilities)

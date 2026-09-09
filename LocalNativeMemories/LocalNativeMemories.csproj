@@ -4,18 +4,12 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
+    <FileVersion>09.09.2026.0</FileVersion>
+    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
+    <AssemblyTitle>Native Memory Administrator</AssemblyTitle>
+    <Authors>Nozomu-san</Authors>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="Alloc8orStandardNatives">
-      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net10.0\Alloc8orStandardNatives.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
-    <Reference Include="CommunityScriptHookVDotNetCore">
-      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net10.0\CommunityScriptHookVDotNetCore.dll</HintPath>
-      <Private>false</Private>
-    </Reference>
+    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
   </ItemGroup>
-  <Target Name="PostBuild" AfterTargets="PostBuildEvent">
-    <Exec Command="xcopy &quot;$(TargetDir)&quot; &quot;C:\Program Files (x86)\Steam\steamapps\common\Grand Theft Auto V&quot; /Y /I" />
-  </Target>
 </Project>

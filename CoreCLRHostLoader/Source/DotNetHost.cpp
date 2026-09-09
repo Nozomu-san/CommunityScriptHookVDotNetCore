@@ -1,7 +1,11 @@
 #include "CoreCLRHostLoader.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <cwctype>
 #include <exception>
+#include <limits>
+#include <optional>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -221,7 +225,200 @@ namespace CoreCLRHostLoader
             return output.str();
         }
 
-        [[nodiscard]] HostResult<std::filesystem::path> ResolveHostFxr(
+        struct HostFxrVersion final
+        {
+            std::uint64_t Major = 0;
+            std::uint64_t Minor = 0;
+            std::uint64_t Patch = 0;
+            std::vector<std::wstring> Prerelease;
+        };
+
+        [[nodiscard]]
+        bool ReadVersionNumber(
+            std::wstring_view text,
+            std::size_t& offset,
+            std::uint64_t& value) noexcept
+        {
+            if (offset >= text.size() || !std::iswdigit(text[offset]))
+            {
+                return false;
+            }
+
+            value = 0;
+            while (offset < text.size() && std::iswdigit(text[offset]))
+            {
+                const std::uint64_t digit =
+                    static_cast<std::uint64_t>(text[offset] - L'0');
+                if (value > ((std::numeric_limits<std::uint64_t>::max)() - digit) / 10)
+                {
+                    return false;
+                }
+                value = value * 10 + digit;
+                ++offset;
+            }
+            return true;
+        }
+
+        [[nodiscard]]
+        std::optional<HostFxrVersion> ParseHostFxrVersion(
+            std::wstring_view text)
+        {
+            HostFxrVersion version{};
+            std::size_t offset = 0;
+            if (!ReadVersionNumber(text, offset, version.Major) ||
+                offset >= text.size() || text[offset++] != L'.' ||
+                !ReadVersionNumber(text, offset, version.Minor) ||
+                offset >= text.size() || text[offset++] != L'.' ||
+                !ReadVersionNumber(text, offset, version.Patch))
+            {
+                return std::nullopt;
+            }
+
+            if (offset == text.size())
+            {
+                return version;
+            }
+            if (text[offset++] != L'-' || offset == text.size())
+            {
+                return std::nullopt;
+            }
+
+            while (offset < text.size())
+            {
+                const std::size_t next = text.find(L'.', offset);
+                const std::size_t end =
+                    next == std::wstring_view::npos ? text.size() : next;
+                if (end == offset)
+                {
+                    return std::nullopt;
+                }
+
+                std::wstring identifier(text.substr(offset, end - offset));
+                if (!std::ranges::all_of(
+                        identifier,
+                        [](wchar_t character)
+                        {
+                            return std::iswalnum(character) || character == L'-';
+                        }))
+                {
+                    return std::nullopt;
+                }
+
+                version.Prerelease.push_back(std::move(identifier));
+                if (next == std::wstring_view::npos)
+                {
+                    break;
+                }
+                offset = next + 1;
+            }
+
+            return version;
+        }
+
+        [[nodiscard]]
+        bool IsNumericIdentifier(std::wstring_view value) noexcept
+        {
+            return !value.empty() &&
+                std::ranges::all_of(
+                    value,
+                    [](wchar_t character)
+                    {
+                        return std::iswdigit(character);
+                    });
+        }
+
+        [[nodiscard]]
+        int CompareNumericIdentifier(
+            std::wstring_view left,
+            std::wstring_view right) noexcept
+        {
+            while (left.size() > 1 && left.front() == L'0')
+            {
+                left.remove_prefix(1);
+            }
+            while (right.size() > 1 && right.front() == L'0')
+            {
+                right.remove_prefix(1);
+            }
+
+            if (left.size() != right.size())
+            {
+                return left.size() < right.size() ? -1 : 1;
+            }
+            if (left == right)
+            {
+                return 0;
+            }
+            return left < right ? -1 : 1;
+        }
+
+        [[nodiscard]]
+        int CompareHostFxrVersion(
+            const HostFxrVersion& left,
+            const HostFxrVersion& right) noexcept
+        {
+            if (left.Major != right.Major)
+            {
+                return left.Major < right.Major ? -1 : 1;
+            }
+            if (left.Minor != right.Minor)
+            {
+                return left.Minor < right.Minor ? -1 : 1;
+            }
+            if (left.Patch != right.Patch)
+            {
+                return left.Patch < right.Patch ? -1 : 1;
+            }
+
+            const bool leftPrerelease = !left.Prerelease.empty();
+            const bool rightPrerelease = !right.Prerelease.empty();
+            if (leftPrerelease != rightPrerelease)
+            {
+                return leftPrerelease ? -1 : 1;
+            }
+            if (!leftPrerelease)
+            {
+                return 0;
+            }
+
+            const std::size_t count =
+                (std::min)(left.Prerelease.size(), right.Prerelease.size());
+            for (std::size_t index = 0; index < count; ++index)
+            {
+                const std::wstring_view leftPart = left.Prerelease[index];
+                const std::wstring_view rightPart = right.Prerelease[index];
+                const bool leftNumeric = IsNumericIdentifier(leftPart);
+                const bool rightNumeric = IsNumericIdentifier(rightPart);
+
+                if (leftNumeric && rightNumeric)
+                {
+                    const int numeric =
+                        CompareNumericIdentifier(leftPart, rightPart);
+                    if (numeric != 0)
+                    {
+                        return numeric;
+                    }
+                    continue;
+                }
+                if (leftNumeric != rightNumeric)
+                {
+                    return leftNumeric ? -1 : 1;
+                }
+                if (leftPart != rightPart)
+                {
+                    return leftPart < rightPart ? -1 : 1;
+                }
+            }
+
+            if (left.Prerelease.size() == right.Prerelease.size())
+            {
+                return 0;
+            }
+            return left.Prerelease.size() < right.Prerelease.size() ? -1 : 1;
+        }
+
+        [[nodiscard]]
+        HostResult<std::filesystem::path> LocateDefaultHostFxr(
             const ManagedBrain& brain)
         {
             LoadedLibrary nethost(LoadLibraryExW(
@@ -267,6 +464,88 @@ namespace CoreCLRHostLoader
 
             return std::filesystem::path(buffer.data());
         }
+
+        [[nodiscard]]
+        HostResult<std::filesystem::path> ResolveHostFxr(
+            const ManagedBrain& brain,
+            RuntimeChannel channel)
+        {
+            auto located = LocateDefaultHostFxr(brain);
+            if (!located)
+            {
+                return std::unexpected(located.error());
+            }
+
+            const std::filesystem::path versionDirectory =
+                located->parent_path();
+            const std::filesystem::path fxrDirectory =
+                versionDirectory.parent_path();
+            if (!std::filesystem::is_directory(fxrDirectory))
+            {
+                return std::unexpected(
+                    L"The resolved .NET host/fxr directory is unavailable.");
+            }
+
+            std::optional<HostFxrVersion> selectedVersion;
+            std::filesystem::path selectedPath;
+            std::error_code error;
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     fxrDirectory,
+                     std::filesystem::directory_options::skip_permission_denied,
+                     error))
+            {
+                if (error)
+                {
+                    break;
+                }
+                if (!entry.is_directory(error))
+                {
+                    continue;
+                }
+
+                auto version =
+                    ParseHostFxrVersion(entry.path().filename().wstring());
+                if (!version)
+                {
+                    continue;
+                }
+                if (channel == RuntimeChannel::Release &&
+                    !version->Prerelease.empty())
+                {
+                    continue;
+                }
+
+                const std::filesystem::path candidate =
+                    entry.path() / L"hostfxr.dll";
+                if (!std::filesystem::is_regular_file(candidate, error))
+                {
+                    error.clear();
+                    continue;
+                }
+
+                if (!selectedVersion ||
+                    CompareHostFxrVersion(*version, *selectedVersion) > 0)
+                {
+                    selectedVersion = std::move(version);
+                    selectedPath = candidate;
+                }
+            }
+
+            if (error)
+            {
+                return std::unexpected(
+                    L"The .NET host/fxr directory could not be enumerated.");
+            }
+            if (selectedPath.empty())
+            {
+                return std::unexpected(
+                    channel == RuntimeChannel::Release
+                        ? L"No release hostfxr installation is available."
+                        : L"No hostfxr installation is available.");
+            }
+
+            return selectedPath;
+        }
     }
 
     HostResult<void> RunManagedBrain(
@@ -290,14 +569,17 @@ namespace CoreCLRHostLoader
                     brain.RuntimeConfiguration.wstring());
             }
 
-            auto hostFxrPath = ResolveHostFxr(brain);
+            auto hostFxrPath = ResolveHostFxr(brain, configuration.Channel);
             if (!hostFxrPath)
             {
                 return std::unexpected(hostFxrPath.error());
             }
 
-            WriteLog(LogLevel::Information, L"hostfxr resolved by nethost: " +
-                hostFxrPath->wstring());
+            WriteLog(
+                LogLevel::Information,
+                configuration.Channel == RuntimeChannel::Preview
+                    ? L"Preview hostfxr selected: " + hostFxrPath->wstring()
+                    : L"Release hostfxr selected: " + hostFxrPath->wstring());
 
             LoadedLibrary hostFxr(LoadLibraryExW(
                 hostFxrPath->c_str(),
@@ -328,13 +610,29 @@ namespace CoreCLRHostLoader
             }
 
             HostFxrErrorWriter errorWriter(setErrorWriter);
+            const bool previewRuntime =
+                configuration.Channel == RuntimeChannel::Preview;
+
             EnvironmentVariableOverride prereleasePolicy(
                 L"DOTNET_ROLL_FORWARD_TO_PRERELEASE",
-                configuration.AllowPrereleaseRuntime ? L"1" : L"0");
+                previewRuntime ? L"1" : L"0");
             if (!prereleasePolicy.Applied())
             {
                 return std::unexpected(
                     L"The prerelease runtime policy could not be applied.");
+            }
+
+            std::optional<EnvironmentVariableOverride> rollForwardPolicy;
+            if (previewRuntime)
+            {
+                rollForwardPolicy.emplace(
+                    L"DOTNET_ROLL_FORWARD",
+                    L"LatestMajor");
+                if (!rollForwardPolicy->Applied())
+                {
+                    return std::unexpected(
+                        L"The Preview runtime roll-forward policy could not be applied.");
+                }
             }
 
             hostfxr_handle context = nullptr;

@@ -1,5 +1,6 @@
 using System.Numerics;
 using Alloc8orStandardNatives.Source;
+using LocalNativeMemories.Source;
 using NativeEntity = Alloc8orStandardNatives.Source.Entity;
 using NativeObject = Alloc8orStandardNatives.Source.GameObject;
 using NativePed = Alloc8orStandardNatives.Source.Ped;
@@ -12,6 +13,15 @@ public readonly record struct Ped(int Value);
 public readonly record struct Vehicle(int Value);
 public readonly record struct GameObject(int Value);
 
+public readonly record struct EntityPopulationCounts(
+    bool Available,
+    int Peds,
+    int Vehicles,
+    int Objects)
+{
+    public int Total => checked(Peds + Vehicles + Objects);
+}
+
 public interface IEntityOperations
 {
     bool IsValid(Entity entity);
@@ -21,8 +31,10 @@ public interface IEntityOperations
     Entity AsEntity(Ped ped);
     Entity AsEntity(Vehicle vehicle);
     Entity AsEntity(GameObject gameObject);
+    Vector3 GetPosition(Entity entity);
     Vector3 GetPosition(Ped ped);
     Vector3 GetPosition(Vehicle vehicle);
+    EntityPopulationCounts GetPopulationCounts();
 }
 
 internal static class NativeHandles
@@ -71,11 +83,15 @@ internal static class NativeHandles
     }
 }
 
-internal sealed class EntityOperations : IEntityOperations
+internal sealed class EntityOperations(ILocalEntityPools pools) :
+    IEntityOperations
 {
+    private readonly ILocalEntityPools _pools =
+        pools ?? throw new ArgumentNullException(nameof(pools));
+
     public bool IsValid(Entity entity) =>
         entity.Value != 0 &&
-        StandardNatives.DOES_ENTITY_EXIST(NativeHandles.ToNative(entity));
+        StandardNatives.DOES_ENTITY_EXIST(entity.ToNative());
 
     public bool IsValid(Ped ped)
     {
@@ -117,17 +133,32 @@ internal sealed class EntityOperations : IEntityOperations
     public Entity AsEntity(Vehicle vehicle) => new(vehicle.Value);
     public Entity AsEntity(GameObject gameObject) => new(gameObject.Value);
 
-    public Vector3 GetPosition(Ped ped) =>
-        !IsValid(ped)
+    public Vector3 GetPosition(Entity entity) =>
+        !IsValid(entity)
             ? default
-            : StandardNatives.GET_ENTITY_COORDS(
-                NativeHandles.ToNativeEntity(ped),
-                true);
+            : StandardNatives.GET_ENTITY_COORDS(entity.ToNative(), true);
 
-    public Vector3 GetPosition(Vehicle vehicle) =>
-        !IsValid(vehicle)
-            ? default
-            : StandardNatives.GET_ENTITY_COORDS(
-                NativeHandles.ToNativeEntity(vehicle),
-                true);
+    public Vector3 GetPosition(Ped ped) => GetPosition(AsEntity(ped));
+    public Vector3 GetPosition(Vehicle vehicle) => GetPosition(AsEntity(vehicle));
+
+    public EntityPopulationCounts GetPopulationCounts()
+    {
+        LocalDataResult<LocalPoolStatistics> peds =
+            _pools.GetStatistics(LocalPoolKinds.Peds);
+        LocalDataResult<LocalPoolStatistics> vehicles =
+            _pools.GetStatistics(LocalPoolKinds.Vehicles);
+        LocalDataResult<LocalPoolStatistics> objects =
+            _pools.GetStatistics(LocalPoolKinds.Objects);
+
+        if (!peds.IsSuccess || !vehicles.IsSuccess || !objects.IsSuccess)
+        {
+            return default;
+        }
+
+        return new(
+            true,
+            peds.Value.ActiveCount,
+            vehicles.Value.ActiveCount,
+            objects.Value.ActiveCount);
+    }
 }

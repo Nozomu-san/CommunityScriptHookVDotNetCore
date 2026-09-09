@@ -70,12 +70,11 @@ type Script4ReloadExtension() =
         member this.InitializeAsync(context, cancellationToken) =
             cancellationToken.ThrowIfCancellationRequested()
             this.InitializeCore(context)
-            ValueTask.CompletedTask
+            Task.CompletedTask
 
         member this.AdvanceHostFrame(context) =
             this.AdvanceCore(context)
 
-        member this.ShutdownAsync(cancellationToken) =
-            cancellationToken.ThrowIfCancellationRequested()
+        member this.ShutdownAsync() =
             this.ShutdownCore()
-            ValueTask.CompletedTask
+            Task.CompletedTask

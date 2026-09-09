@@ -1,4 +1,5 @@
 using CommunityScriptHookVDotNetCore.Source;
+using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -48,13 +49,6 @@ public interface IGameBuildService
     GameBuildInfo Current { get; }
 }
 
-public enum NativeExposure : byte
-{
-    SafePublic = 0,
-    ManualContractRequired = 1,
-    CatalogOnly = 2
-}
-
 public enum NativeAbiType : byte
 {
     Void = 0,
@@ -93,6 +87,7 @@ public enum NativeAbiType : byte
 }
 
 public readonly record struct NativeAny(ulong Value);
+public readonly record struct NativeAddress(nuint Value);
 
 public readonly record struct Blip(int Value);
 public readonly record struct Cam(int Value);
@@ -116,41 +111,19 @@ public sealed class NativeSignatureVariant
     internal NativeSignatureVariant(
         int minimumBuild,
         NativeAbiType returnType,
-        NativeParameterDescriptor[] parameters,
-        NativeExposure exposure)
+        NativeParameterDescriptor[] parameters)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(minimumBuild);
         MinimumBuild = minimumBuild;
         ReturnType = returnType;
         Parameters = parameters ?? throw new ArgumentNullException(
             nameof(parameters));
-        Exposure = exposure;
     }
 
     public int MinimumBuild { get; }
     public NativeAbiType ReturnType { get; }
     public IReadOnlyList<NativeParameterDescriptor> Parameters { get; }
-    public NativeExposure Exposure { get; }
 
-    internal bool HasSameWireContract(NativeSignatureVariant other)
-    {
-        ArgumentNullException.ThrowIfNull(other);
-        if (ReturnType != other.ReturnType ||
-            Parameters.Count != other.Parameters.Count)
-        {
-            return false;
-        }
-
-        for (int index = 0; index < Parameters.Count; ++index)
-        {
-            if (Parameters[index].Type != other.Parameters[index].Type)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
 }
 
 public sealed class NativeDescriptor
@@ -414,6 +387,7 @@ public readonly struct KnownNativeArgument
 public sealed class KnownNativeResult
 {
     private readonly ulong[] _results;
+    private readonly string? _text;
 
     internal KnownNativeResult(
         NativeDescriptor descriptor,
@@ -423,6 +397,13 @@ public sealed class KnownNativeResult
         Descriptor = descriptor;
         Variant = variant;
         _results = results;
+        if (variant.ReturnType is NativeAbiType.ConstCharPointer &&
+            results.Length != 0 &&
+            results[0] != 0)
+        {
+            _text = Marshal.PtrToStringUTF8(
+                unchecked((nint)(nuint)results[0]));
+        }
     }
 
     public NativeDescriptor Descriptor { get; }
@@ -441,14 +422,28 @@ public sealed class KnownNativeResult
 
     public string? AsText()
     {
-        ulong value = RequireScalar(NativeAbiType.ConstCharPointer);
-        return value == 0
-            ? null
-            : Marshal.PtrToStringUTF8(unchecked((nint)(nuint)value));
+        RequireReturnType(NativeAbiType.ConstCharPointer);
+        return _text;
     }
 
     public NativeAny AsAny() =>
         new(RequireScalar(NativeAbiType.Any));
+
+    public NativeAddress AsAddress()
+    {
+        NativeAbiType type = Variant.ReturnType;
+        if (!IsPointer(type))
+        {
+            throw new InvalidOperationException(
+                $"Native '{Descriptor.Name}' does not return a pointer.");
+        }
+        if (_results.Length == 0)
+        {
+            throw new InvalidDataException(
+                "The native result does not contain a pointer payload.");
+        }
+        return new(unchecked((nuint)_results[0]));
+    }
 
     public uint AsHash32() =>
         unchecked((uint)RequireScalar(NativeAbiType.Hash32));
@@ -526,6 +521,21 @@ public sealed class KnownNativeResult
                 $"{NativeDescriptor.NativeSyntax(expected)}.");
         }
     }
+
+    private static bool IsPointer(NativeAbiType type) => type is
+        NativeAbiType.AnyPointer or
+        NativeAbiType.Int32Pointer or
+        NativeAbiType.Float32Pointer or
+        NativeAbiType.Vector3Pointer or
+        NativeAbiType.Boolean32Pointer or
+        NativeAbiType.Hash32Pointer or
+        NativeAbiType.CharPointer or
+        NativeAbiType.EntityPointer or
+        NativeAbiType.VehiclePointer or
+        NativeAbiType.PedPointer or
+        NativeAbiType.ObjectPointer or
+        NativeAbiType.ScrHandlePointer or
+        NativeAbiType.BlipPointer;
 }
 
 public interface IStandardNatives
@@ -537,9 +547,11 @@ public interface IStandardNatives
 
 public interface IKnownNativeInvoker
 {
+    void Validate(ulong hash);
+
     KnownNativeResult Invoke(
         ulong hash,
-        ReadOnlySpan<KnownNativeArgument> arguments);
+        IReadOnlyList<KnownNativeArgument> arguments);
 }
 
 internal sealed class StandardNativeServices(
@@ -639,8 +651,6 @@ internal sealed class GameBuildService(GameBuildInfo current) :
 
 internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
 {
-    private const ushort MinimumSupportedFormatVersion = 1;
-    private const ushort MaximumSupportedFormatVersion = 2;
     private readonly NativeDescriptor[] _entries;
     private readonly Dictionary<string, NativeDescriptor> _byName;
     private readonly Dictionary<ulong, NativeDescriptor> _byHash;
@@ -739,13 +749,11 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         }
 
         ushort format = reader.ReadUInt16();
-        if (format < MinimumSupportedFormatVersion ||
-            format > MaximumSupportedFormatVersion ||
-            format != NativeCatalogData.FormatVersion)
+        if (format != NativeCatalogData.FormatVersion)
         {
             throw new InvalidDataException(
-                $"ASN catalog format {format} is unsupported or does not " +
-                "match NativeCatalogData.cs.");
+                $"ASN catalog format {format} does not match " +
+                $"NativeCatalogData.cs format {NativeCatalogData.FormatVersion}.");
         }
 
         byte[] sourceFingerprint = reader.ReadBytes(32);
@@ -774,19 +782,10 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         NativeDescriptor[] entries = new NativeDescriptor[descriptorCount];
         for (int index = 0; index < entries.Length; ++index)
         {
-            entries[index] = format switch
-            {
-                1 => ReadVersion1Descriptor(
-                    reader,
-                    strings,
-                    index),
-                2 => ReadVersion2Descriptor(
-                    reader,
-                    strings,
-                    index),
-                _ => throw new InvalidDataException(
-                    $"ASN catalog format {format} is unsupported.")
-            };
+            entries[index] = ReadDescriptor(
+                reader,
+                strings,
+                index);
         }
 
         if (stream.Position != stream.Length)
@@ -810,43 +809,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         return new(entries, identity);
     }
 
-    private static NativeDescriptor ReadVersion1Descriptor(
-        BinaryReader reader,
-        string[] strings,
-        int index)
-    {
-        ulong hash = reader.ReadUInt64();
-        string name = GetString(strings, ReadVarUInt32(reader));
-        int legacyBuild = DecodeBuild(ReadVarUInt32(reader));
-        int enhancedBuild = DecodeBuild(ReadVarUInt32(reader));
-        NativeAbiType returnType = ReadAbiType(reader);
-        NativeExposure exposure = ReadExposure(reader);
-        NativeParameterDescriptor[] parameters =
-            ReadParameters(reader, strings);
-
-        NativeSignatureVariant? legacy = legacyBuild < 0
-            ? null
-            : new(
-                legacyBuild,
-                returnType,
-                parameters,
-                exposure);
-        NativeSignatureVariant? enhanced = enhancedBuild < 0
-            ? null
-            : new(
-                enhancedBuild,
-                returnType,
-                CloneParameters(parameters),
-                exposure);
-        return new(
-            index,
-            hash,
-            name,
-            legacy,
-            enhanced);
-    }
-
-    private static NativeDescriptor ReadVersion2Descriptor(
+    private static NativeDescriptor ReadDescriptor(
         BinaryReader reader,
         string[] strings,
         int index)
@@ -886,14 +849,12 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         }
 
         NativeAbiType returnType = ReadAbiType(reader);
-        NativeExposure exposure = ReadExposure(reader);
         NativeParameterDescriptor[] parameters =
             ReadParameters(reader, strings);
         return new(
             minimumBuild,
             returnType,
-            parameters,
-            exposure);
+            parameters);
     }
 
     private static NativeParameterDescriptor[] ReadParameters(
@@ -913,11 +874,6 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         return parameters;
     }
 
-    private static NativeParameterDescriptor[] CloneParameters(
-        NativeParameterDescriptor[] parameters) =>
-        [.. parameters.Select(static parameter =>
-            new NativeParameterDescriptor(parameter.Name, parameter.Type))];
-
     private static NativeAbiType ReadAbiType(BinaryReader reader)
     {
         byte value = reader.ReadByte();
@@ -926,15 +882,6 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
             ? type
             : throw new InvalidDataException(
                 $"The ASN catalog contains unknown ABI type {value}.");
-    }
-
-    private static NativeExposure ReadExposure(BinaryReader reader)
-    {
-        byte value = reader.ReadByte();
-        return value <= (byte)NativeExposure.CatalogOnly
-            ? (NativeExposure)value
-            : throw new InvalidDataException(
-                $"The ASN catalog contains unknown exposure value {value}.");
     }
 
     private static string GetString(string[] strings, uint index) =>
@@ -1126,6 +1073,9 @@ internal readonly struct NativeArgument
         return new(NativeAbiType.Hash32, normalized, null);
     }
 
+    internal static NativeArgument Any(NativeAny value) =>
+        new(NativeAbiType.Any, value.Value, null);
+
     internal static NativeArgument Any(ulong value) =>
         new(NativeAbiType.Any, value, null);
 
@@ -1215,11 +1165,6 @@ internal sealed class CatalogNativeCallAdmissionPolicy(
         {
             return new(NativeCallAdmissionStatus.UnsupportedTarget);
         }
-        if (variant.Exposure is NativeExposure.CatalogOnly)
-        {
-            return new(NativeCallAdmissionStatus.ExposureRejected);
-        }
-
         if (argumentCount != variant.Parameters.Count)
         {
             return new(NativeCallAdmissionStatus.ArgumentCountMismatch);
@@ -1244,19 +1189,19 @@ internal enum NativeExecutionStatus
 {
     Success = 0,
     UnknownDescriptor = 1,
-    CatalogOnly = 2,
     UnsupportedGame = 3,
     UnsupportedEdition = 4,
     UnsupportedBuild = 5,
     ArgumentCountMismatch = 6,
     ArgumentTypeMismatch = 7,
-    TransportInvalidRequest = 8,
-    TransportLimitExceeded = 9,
-    NativeReturnedNull = 10,
-    SessionStopping = 11,
-    NativeAdmissionUnavailable = 12,
-    NativeAdmissionRejected = 13,
-    TransportFailure = 14
+    ReturnTypeMismatch = 8,
+    TransportInvalidRequest = 9,
+    TransportLimitExceeded = 10,
+    NativeReturnedNull = 11,
+    SessionStopping = 12,
+    NativeAdmissionUnavailable = 13,
+    NativeAdmissionRejected = 14,
+    TransportFailure = 15
 }
 
 internal readonly record struct NativeExecutionResult(
@@ -1306,47 +1251,37 @@ internal sealed class NativeGateway(
 {
     internal NativeExecutionResult InvokeGenerated(
         NativeDescriptor descriptor,
+        NativeAbiType expectedReturnType,
         ReadOnlySpan<NativeArgument> arguments) =>
-        Invoke(descriptor, arguments, NativeExposure.SafePublic);
+        Invoke(descriptor, arguments, expectedReturnType);
+
+    internal NativeExecutionStatus ValidateKnownHash(
+        NativeDescriptor descriptor) =>
+        ValidateDescriptor(descriptor, out _);
 
     internal NativeExecutionResult InvokeKnownHash(
         NativeDescriptor descriptor,
         ReadOnlySpan<NativeArgument> arguments) =>
-        Invoke(descriptor, arguments, NativeExposure.ManualContractRequired);
+        Invoke(descriptor, arguments, expectedReturnType: null);
 
     private NativeExecutionResult Invoke(
         NativeDescriptor descriptor,
         ReadOnlySpan<NativeArgument> arguments,
-        NativeExposure requiredExposure)
+        NativeAbiType? expectedReturnType)
     {
-        ArgumentNullException.ThrowIfNull(descriptor);
-
-        if (!ReferenceEquals(catalog.GetByIndex(descriptor.Index), descriptor))
+        NativeExecutionStatus validation = ValidateDescriptor(
+            descriptor,
+            out NativeSignatureVariant? variant);
+        if (validation is not NativeExecutionStatus.Success ||
+            variant is null)
         {
-            return Failure(NativeExecutionStatus.UnknownDescriptor);
+            return Failure(validation);
         }
 
-        GameBuildInfo game = gameBuild.Current;
-        if (!game.Edition.IsSupported())
+        if (expectedReturnType is NativeAbiType expectedReturn &&
+            variant.ReturnType != expectedReturn)
         {
-            return Failure(NativeExecutionStatus.UnsupportedGame);
-        }
-
-        NativeSignatureVariant? variant =
-            descriptor.GetVariant(game.Edition);
-        if (variant is null)
-        {
-            return Failure(NativeExecutionStatus.UnsupportedEdition);
-        }
-
-        if (game.Build < variant.MinimumBuild)
-        {
-            return Failure(NativeExecutionStatus.UnsupportedBuild);
-        }
-
-        if (variant.Exposure != requiredExposure)
-        {
-            return Failure(NativeExecutionStatus.CatalogOnly);
+            return Failure(NativeExecutionStatus.ReturnTypeMismatch);
         }
 
         if (arguments.Length != variant.Parameters.Count)
@@ -1354,7 +1289,15 @@ internal sealed class NativeGateway(
             return Failure(NativeExecutionStatus.ArgumentCountMismatch);
         }
 
-        Span<ulong> rawArguments = stackalloc ulong[arguments.Length];
+        ulong[]? rawArgumentBuffer = arguments.Length == 0
+            ? null
+            : ArrayPool<ulong>.Shared.Rent(arguments.Length);
+        IReadOnlyList<ulong> rawArguments = rawArgumentBuffer is null
+            ? Array.Empty<ulong>()
+            : new ArraySegment<ulong>(
+                rawArgumentBuffer,
+                0,
+                arguments.Length);
         List<nint>? textAllocations = null;
         List<NativeOutputAllocation>? outputAllocations = null;
         try
@@ -1377,7 +1320,7 @@ internal sealed class NativeGateway(
                     outputAllocations.Add(
                         new(pointer, argument.Output));
                     argument.Output.Initialize(pointer);
-                    rawArguments[index] =
+                    rawArgumentBuffer![index] =
                         unchecked((ulong)(nuint)pointer);
                     continue;
                 }
@@ -1386,7 +1329,7 @@ internal sealed class NativeGateway(
                 {
                     if (argument.TextValue is null)
                     {
-                        rawArguments[index] = 0;
+                        rawArgumentBuffer![index] = 0;
                     }
                     else
                     {
@@ -1394,13 +1337,13 @@ internal sealed class NativeGateway(
                             argument.TextValue);
                         textAllocations ??= [];
                         textAllocations.Add(pointer);
-                        rawArguments[index] =
+                        rawArgumentBuffer![index] =
                             unchecked((ulong)(nuint)pointer);
                     }
                 }
                 else
                 {
-                    rawArguments[index] = argument.RawValue;
+                    rawArgumentBuffer![index] = argument.RawValue;
                 }
             }
 
@@ -1451,7 +1394,44 @@ internal sealed class NativeGateway(
                     Marshal.FreeHGlobal(allocation.Address);
                 }
             }
+
+            if (rawArgumentBuffer is not null)
+            {
+                ArrayPool<ulong>.Shared.Return(rawArgumentBuffer);
+            }
         }
+    }
+
+    private NativeExecutionStatus ValidateDescriptor(
+        NativeDescriptor descriptor,
+        out NativeSignatureVariant? variant)
+    {
+        ArgumentNullException.ThrowIfNull(descriptor);
+        variant = null;
+
+        if (!ReferenceEquals(catalog.GetByIndex(descriptor.Index), descriptor))
+        {
+            return NativeExecutionStatus.UnknownDescriptor;
+        }
+
+        GameBuildInfo game = gameBuild.Current;
+        if (!game.Edition.IsSupported())
+        {
+            return NativeExecutionStatus.UnsupportedGame;
+        }
+
+        variant = descriptor.GetVariant(game.Edition);
+        if (variant is null)
+        {
+            return NativeExecutionStatus.UnsupportedEdition;
+        }
+
+        if (game.Build < variant.MinimumBuild)
+        {
+            return NativeExecutionStatus.UnsupportedBuild;
+        }
+
+        return NativeExecutionStatus.Success;
     }
 
     private readonly record struct NativeOutputAllocation(
@@ -1495,16 +1475,31 @@ internal sealed class KnownNativeInvoker(
     NativeCatalog catalog,
     NativeGateway gateway) : IKnownNativeInvoker
 {
-    public KnownNativeResult Invoke(
-        ulong hash,
-        ReadOnlySpan<KnownNativeArgument> arguments)
+    public void Validate(ulong hash)
     {
         if (!catalog.TryGet(hash, out NativeDescriptor? descriptor))
         {
             throw new UnknownNativeHashException(hash);
         }
 
-        NativeArgument[] values = new NativeArgument[arguments.Length];
+        NativeExecutionStatus status = gateway.ValidateKnownHash(descriptor);
+        if (status is not NativeExecutionStatus.Success)
+        {
+            throw new NativeExecutionException(descriptor, status);
+        }
+    }
+
+    public KnownNativeResult Invoke(
+        ulong hash,
+        IReadOnlyList<KnownNativeArgument> arguments)
+    {
+        ArgumentNullException.ThrowIfNull(arguments);
+        if (!catalog.TryGet(hash, out NativeDescriptor? descriptor))
+        {
+            throw new UnknownNativeHashException(hash);
+        }
+
+        NativeArgument[] values = new NativeArgument[arguments.Count];
         for (int index = 0; index < values.Length; ++index)
         {
             values[index] = arguments[index].Value;
@@ -1575,19 +1570,15 @@ public static partial class StandardNatives
 
         NativeDescriptor descriptor = catalog.GetByIndex(descriptorIndex);
         NativeExecutionResult result =
-            gateway.InvokeGenerated(descriptor, arguments);
+            gateway.InvokeGenerated(
+                descriptor,
+                expectedReturnType,
+                arguments);
         if (!result.Succeeded || result.Variant is null)
         {
             throw new NativeExecutionException(
                 descriptor,
                 result.Status);
-        }
-
-        if (result.Variant.ReturnType != expectedReturnType)
-        {
-            throw new InvalidDataException(
-                $"Native '{descriptor.Name}' has active catalog return type " +
-                $"{result.Variant.ReturnType}, not {expectedReturnType}.");
         }
 
         return (descriptor, result.Results);

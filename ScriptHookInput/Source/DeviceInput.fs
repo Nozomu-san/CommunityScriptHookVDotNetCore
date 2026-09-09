@@ -108,9 +108,12 @@ module private NativeDeviceInput =
 [<Sealed>]
 type internal DeviceInputReader() =
     let gate = obj()
+    let reconnectProbeIntervalMilliseconds = 2000L
     let controllerStates = Array.zeroCreate<XInputState> 4
     let controllerAvailable = Array.zeroCreate<bool> 4
+    let controllerNextProbe = Array.zeroCreate<int64> 4
     let mutable capturedFrame = UInt64.MaxValue
+    let mutable controllersCaptured = false
     let mutable foreground = false
     let mutable cursorBaseline = false
     let mutable cursorX = 0
@@ -169,10 +172,28 @@ type internal DeviceInputReader() =
         | ControllerButton.North -> 0x8000us
         | _ -> 0us
 
-    let captureFrame (frame: DeviceInputFrameContext) =
+    let captureControllers() =
+        let now = Environment.TickCount64
+        for index = 0 to controllerStates.Length - 1 do
+            if controllerAvailable[index] || now >= controllerNextProbe[index] then
+                match NativeDeviceInput.tryGetControllerState index with
+                | ValueSome state ->
+                    controllerStates[index] <- state
+                    controllerAvailable[index] <- true
+                    controllerNextProbe[index] <- 0L
+                | ValueNone ->
+                    controllerStates[index] <- XInputState()
+                    controllerAvailable[index] <- false
+                    controllerNextProbe[index] <- now + reconnectProbeIntervalMilliseconds
+
+    let captureFrame
+        (frame: DeviceInputFrameContext)
+        controllerDemand =
+
         if capturedFrame <> frame.FrameIndex then
             capturedFrame <- frame.FrameIndex
             foreground <- frame.IsForeground
+            controllersCaptured <- false
             cursorDeltaX <- 0
             cursorDeltaY <- 0
 
@@ -212,14 +233,12 @@ type internal DeviceInputReader() =
                     cursorBaseline <- false
                     pointerState <- PointerState.Unavailable frame.FrameIndex
 
-                for index = 0 to controllerStates.Length - 1 do
-                    match NativeDeviceInput.tryGetControllerState index with
-                    | ValueSome state ->
-                        controllerStates[index] <- state
-                        controllerAvailable[index] <- true
-                    | ValueNone ->
-                        controllerStates[index] <- XInputState()
-                        controllerAvailable[index] <- false
+        if foreground && controllerDemand && not controllersCaptured then
+            captureControllers()
+            controllersCaptured <- true
+        elif not controllerDemand then
+            Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
+            Array.Clear(controllerNextProbe, 0, controllerNextProbe.Length)
 
     let readControllerButton (control: DeviceControl) =
         let mask = controllerMask control.Code
@@ -267,10 +286,13 @@ type internal DeviceInputReader() =
         else
             ValueNone
 
-    member _.Capture(frame: DeviceInputFrameContext) =
+    member _.Capture(
+        frame: DeviceInputFrameContext,
+        controllerDemand: bool) =
+
         lock gate (fun () ->
             throwIfDisposed()
-            captureFrame frame)
+            captureFrame frame controllerDemand)
 
     member _.Pointer =
         lock gate (fun () ->
@@ -283,7 +305,9 @@ type internal DeviceInputReader() =
 
         lock gate (fun () ->
             throwIfDisposed()
-            captureFrame frame
+            captureFrame
+                frame
+                (control.DeviceKind = InputDeviceKind.Controller)
 
             if not foreground then
                 ValueNone
@@ -323,7 +347,8 @@ type internal DeviceInputReader() =
                 if not disposed then
                     disposed <- true
                     pointerState <- PointerState.Unavailable capturedFrame
-                    Array.Clear(controllerAvailable, 0, controllerAvailable.Length))
+                    Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
+                    Array.Clear(controllerNextProbe, 0, controllerNextProbe.Length))
 
     static member IsCurrentProcessForeground() =
         NativeDeviceInput.isCurrentProcessForeground()

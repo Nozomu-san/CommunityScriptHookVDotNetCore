@@ -6,8 +6,6 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyMetadata(
     "CCHL.ContractId",
     "7C8E18B7-2D11-4D1E-9C53-5E3A0A4A63A1")]
-[assembly: AssemblyMetadata("CCHL.AbiMajor", "1")]
-[assembly: AssemblyMetadata("CCHL.AbiMinor", "0")]
 [assembly: AssemblyMetadata(
     "CCHL.EntryType",
     "CommunityScriptHookVDotNetCore.Source.Brain, " +

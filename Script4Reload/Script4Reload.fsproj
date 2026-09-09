@@ -6,6 +6,8 @@
     <Platforms>x64</Platforms>
     <AssemblyTitle>Script4 Reload Tool</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
+    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
+    <FileVersion>09.09.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Source\AssemblyMetadata.fs" />

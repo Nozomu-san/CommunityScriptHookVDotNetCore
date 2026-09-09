@@ -6,11 +6,9 @@ using System.Reflection;
 [assembly: AssemblyMetadata(
     "CSHVDNC.EntryType",
     "Alloc8orStandardNatives.Source.NativeExtension")]
-[assembly: AssemblyMetadata("CSHVDNC.ContractMajor", "1")]
-[assembly: AssemblyMetadata("CSHVDNC.ContractMinor", "0")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Provides",
-    "native.call.admission;native.standard;game.build")]
+    "native.call.admission;native.standard")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Requires",
     "host.native.raw;host.native.admission")]
@@ -22,7 +20,7 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
     private IDisposable? _admissionLease;
     private bool _initialized;
 
-    public async ValueTask InitializeAsync(
+    public async Task InitializeAsync(
         RuntimeExtensionContext context,
         CancellationToken cancellationToken)
     {
@@ -57,7 +55,6 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
         {
             admissionLease = admission.Install(admissionPolicy);
             StandardNatives.Bind(catalog, gateway);
-            context.Services.Register<IGameBuildService>(gameBuild);
             context.Services.Register<INativeCatalog>(catalog);
             context.Services.Register<INativeDatabaseInfo>(catalog);
             context.Services.RegisterRuntimeOnly<IKnownNativeInvoker>(known);
@@ -78,7 +75,7 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
     {
     }
 
-    public ValueTask ShutdownAsync(CancellationToken cancellationToken)
+    public Task ShutdownAsync()
     {
         if (_initialized)
         {
@@ -88,7 +85,6 @@ internal sealed class NativeExtension : IScript4RuntimeExtension
             _initialized = false;
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValueTask.CompletedTask;
+        return Task.CompletedTask;
     }
 }

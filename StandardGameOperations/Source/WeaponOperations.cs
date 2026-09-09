@@ -11,6 +11,7 @@ public interface IWeaponOperations
     bool HasComponent(Ped ped, uint weaponHash, uint componentHash);
     bool IsComponentActive(Ped ped, uint weaponHash, uint componentHash);
     bool TryGetAmmoInClip(Ped ped, uint weaponHash, out int ammo);
+    int GetMaxAmmoInClip(Ped ped, uint weaponHash);
     bool TryGetLastImpact(Ped ped, out Vector3 position);
     bool TryGetDamage(
         uint weaponHash,
@@ -24,21 +25,19 @@ internal sealed class WeaponOperations(
 {
     private readonly IEntityOperations _entities =
         entities ?? throw new ArgumentNullException(nameof(entities));
-
     private readonly NativeBindings _known =
         known ?? throw new ArgumentNullException(nameof(known));
 
     public uint GetSelectedWeapon(Ped ped) =>
         !_entities.IsValid(ped)
             ? 0
-            : StandardNatives.GET_SELECTED_PED_WEAPON(
-                NativeHandles.ToNative(ped));
+            : StandardNatives.GET_SELECTED_PED_WEAPON(ped.ToNative());
 
     public bool HasWeapon(Ped ped, uint weaponHash) =>
         weaponHash != 0 &&
         _entities.IsValid(ped) &&
         StandardNatives.HAS_PED_GOT_WEAPON(
-            NativeHandles.ToNative(ped),
+            ped.ToNative(),
             weaponHash,
             false);
 
@@ -46,7 +45,7 @@ internal sealed class WeaponOperations(
         weaponHash == 0 || !_entities.IsValid(ped)
             ? 0
             : StandardNatives.GET_PED_AMMO_TYPE_FROM_WEAPON(
-                NativeHandles.ToNative(ped),
+                ped.ToNative(),
                 weaponHash);
 
     public bool HasComponent(
@@ -57,7 +56,7 @@ internal sealed class WeaponOperations(
         componentHash != 0 &&
         _entities.IsValid(ped) &&
         StandardNatives.HAS_PED_GOT_WEAPON_COMPONENT(
-            NativeHandles.ToNative(ped),
+            ped.ToNative(),
             weaponHash,
             componentHash);
 
@@ -69,7 +68,7 @@ internal sealed class WeaponOperations(
         componentHash != 0 &&
         _entities.IsValid(ped) &&
         StandardNatives.IS_PED_WEAPON_COMPONENT_ACTIVE(
-            NativeHandles.ToNative(ped),
+            ped.ToNative(),
             weaponHash,
             componentHash);
 
@@ -84,9 +83,17 @@ internal sealed class WeaponOperations(
             _known.TryGetAmmoInClip(ped, weaponHash, out ammo);
     }
 
-    public bool TryGetLastImpact(
-        Ped ped,
-        out Vector3 position)
+    public int GetMaxAmmoInClip(Ped ped, uint weaponHash) =>
+        weaponHash == 0 || !_entities.IsValid(ped)
+            ? 0
+            : Math.Max(
+                0,
+                StandardNatives.GET_MAX_AMMO_IN_CLIP(
+                    ped.ToNative(),
+                    weaponHash,
+                    true));
+
+    public bool TryGetLastImpact(Ped ped, out Vector3 position)
     {
         position = default;
         return _entities.IsValid(ped) &&

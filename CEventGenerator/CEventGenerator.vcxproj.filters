@@ -1,0 +1,60 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source">
+      <UniqueIdentifier>{e258100e-c94c-43c6-8750-90f6343de6fd}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\MinHook">
+      <UniqueIdentifier>{677d5d02-95e5-4387-91dd-3a8135c128c0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\MinHook\src">
+      <UniqueIdentifier>{4a2d715f-60dd-49d7-929f-64b9da567263}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\MinHook\src\hde">
+      <UniqueIdentifier>{6d4fa14a-8b2a-404c-ad12-bead0763ab5c}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="Source\Entry.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\EventHook.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\EventLocator.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\EventQueue.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Exports.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\MinHook\src\buffer.c">
+      <Filter>Source\MinHook\src</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\MinHook\src\hook.c">
+      <Filter>Source\MinHook\src</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\MinHook\src\trampoline.c">
+      <Filter>Source\MinHook\src</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\MinHook\src\hde\hde64.c">
+      <Filter>Source\MinHook\src\hde</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\EventAbi.hpp">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\EventHook.hpp">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\EventLocator.hpp">
+      <Filter>Source</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\EventQueue.hpp">
+      <Filter>Source</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

@@ -19,6 +19,205 @@ namespace
     std::atomic<bool> g_shutdownRequested = false;
     std::atomic<HANDLE> g_stopEvent = nullptr;
 
+    [[nodiscard]]
+    bool IsExecutableAddress(std::uint64_t rawAddress) noexcept
+    {
+        if (rawAddress == 0)
+        {
+            return false;
+        }
+
+        MEMORY_BASIC_INFORMATION information{};
+        if (VirtualQuery(
+                reinterpret_cast<const void*>(
+                    static_cast<std::uintptr_t>(rawAddress)),
+                &information,
+                sizeof(information)) == 0 ||
+            information.State != MEM_COMMIT ||
+            (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
+        {
+            return false;
+        }
+
+        const DWORD protection = information.Protect & 0xFFu;
+        return protection == PAGE_EXECUTE ||
+            protection == PAGE_EXECUTE_READ ||
+            protection == PAGE_EXECUTE_READWRITE ||
+            protection == PAGE_EXECUTE_WRITECOPY;
+    }
+
+    [[nodiscard]]
+    bool TryInvokeInt32FunctionOnePointer(
+        std::uint64_t rawAddress,
+        std::uint64_t rawArgument,
+        std::uint64_t& rawResult) noexcept
+    {
+        if (!IsExecutableAddress(rawAddress))
+        {
+            return false;
+        }
+
+        using function_type =
+            std::int32_t(__stdcall*)(std::uintptr_t);
+        const auto function =
+            reinterpret_cast<function_type>(
+                static_cast<std::uintptr_t>(rawAddress));
+
+        __try
+        {
+            const std::int32_t value = function(
+                static_cast<std::uintptr_t>(rawArgument));
+            rawResult = static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(value));
+            return true;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            rawResult = 0;
+            return false;
+        }
+    }
+
+    enum class GuardedInvokeResult : std::uint8_t
+    {
+        Success,
+        GuardRejected,
+        FunctionFault
+    };
+
+    [[nodiscard]]
+    bool TryReadGuardValue(
+        std::uint64_t rawAddress,
+        std::uint64_t width,
+        std::uint64_t& value) noexcept
+    {
+        value = 0;
+        if (rawAddress == 0)
+        {
+            return false;
+        }
+
+        const auto address = static_cast<std::uintptr_t>(rawAddress);
+        __try
+        {
+            switch (width)
+            {
+            case 1:
+                value = *reinterpret_cast<const std::uint8_t*>(address);
+                return true;
+            case 2:
+                value = *reinterpret_cast<const std::uint16_t*>(address);
+                return true;
+            case 4:
+                value = *reinterpret_cast<const std::uint32_t*>(address);
+                return true;
+            case 8:
+                value = *reinterpret_cast<const std::uint64_t*>(address);
+                return true;
+            default:
+                return false;
+            }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            value = 0;
+            return false;
+        }
+    }
+
+    [[nodiscard]]
+    bool GuardMatches(
+        std::uint64_t rawAddress,
+        std::uint64_t mask,
+        std::uint64_t expected,
+        std::uint64_t width) noexcept
+    {
+        std::uint64_t value = 0;
+        return TryReadGuardValue(rawAddress, width, value) &&
+            (value & mask) == expected;
+    }
+
+    [[nodiscard]]
+    GuardedInvokeResult TryInvokeInt32FunctionOneGuardedObjectPointer(
+        std::uint64_t rawAddress,
+        std::uint64_t rawArgument,
+        std::uint64_t firstGuardAddress,
+        std::uint64_t firstGuardMask,
+        std::uint64_t firstGuardExpected,
+        std::uint64_t firstGuardWidth,
+        std::uint64_t secondGuardAddress,
+        std::uint64_t secondGuardMask,
+        std::uint64_t secondGuardExpected,
+        std::uint64_t secondGuardWidth,
+        std::uint64_t& rawResult) noexcept
+    {
+        rawResult = 0;
+        if (!IsExecutableAddress(rawAddress) ||
+            rawArgument == 0 ||
+            firstGuardAddress == 0)
+        {
+            return GuardedInvokeResult::FunctionFault;
+        }
+
+        if (!GuardMatches(
+                firstGuardAddress,
+                firstGuardMask,
+                firstGuardExpected,
+                firstGuardWidth))
+        {
+            return GuardedInvokeResult::GuardRejected;
+        }
+
+        if (secondGuardAddress != 0 &&
+            !GuardMatches(
+                secondGuardAddress,
+                secondGuardMask,
+                secondGuardExpected,
+                secondGuardWidth))
+        {
+            return GuardedInvokeResult::GuardRejected;
+        }
+
+        std::uintptr_t virtualTable = 0;
+        __try
+        {
+            virtualTable =
+                *reinterpret_cast<const std::uintptr_t*>(
+                    static_cast<std::uintptr_t>(rawArgument));
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return GuardedInvokeResult::GuardRejected;
+        }
+
+        if (!IsExecutableAddress(
+                static_cast<std::uint64_t>(virtualTable)))
+        {
+            return GuardedInvokeResult::GuardRejected;
+        }
+
+        using function_type =
+            std::int32_t(__stdcall*)(std::uintptr_t);
+        const auto function =
+            reinterpret_cast<function_type>(
+                static_cast<std::uintptr_t>(rawAddress));
+
+        __try
+        {
+            const std::int32_t value = function(
+                static_cast<std::uintptr_t>(rawArgument));
+            rawResult = static_cast<std::uint64_t>(
+                static_cast<std::uint32_t>(value));
+            return GuardedInvokeResult::Success;
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            rawResult = 0;
+            return GuardedInvokeResult::FunctionFault;
+        }
+    }
+
+
     class HostSession final
     {
     public:
@@ -403,9 +602,9 @@ namespace
             {
                 status = NativeCallStatus::TooManyResults;
             }
-            else
+            else if (m_nativeCall.Operation == HostCallOperation::ScriptNative)
             {
-                nativeInit(m_nativeCall.Hash);
+                nativeInit(m_nativeCall.Target);
                 for (std::uint32_t index = 0;
                      index < m_nativeCall.ArgumentCount;
                      ++index)
@@ -427,6 +626,67 @@ namespace
                         m_nativeCall.Results[index] = result[index];
                     }
                 }
+            }
+            else if (
+                m_nativeCall.Operation ==
+                    HostCallOperation::Int32FunctionOnePointer)
+            {
+                if (m_nativeCall.ArgumentCount != 1 ||
+                    m_nativeCall.RequestedResultCount != 1 ||
+                    m_nativeCall.Target == 0 ||
+                    m_nativeCall.Arguments[0] == 0)
+                {
+                    status = NativeCallStatus::InvalidRequest;
+                }
+                else if (!TryInvokeInt32FunctionOnePointer(
+                             m_nativeCall.Target,
+                             m_nativeCall.Arguments[0],
+                             m_nativeCall.Results[0]))
+                {
+                    status = NativeCallStatus::FunctionFault;
+                }
+            }
+            else if (
+                m_nativeCall.Operation ==
+                    HostCallOperation::Int32FunctionOneGuardedObjectPointer)
+            {
+                if (m_nativeCall.ArgumentCount != 9 ||
+                    m_nativeCall.RequestedResultCount != 1 ||
+                    m_nativeCall.Target == 0 ||
+                    m_nativeCall.Arguments[0] == 0 ||
+                    m_nativeCall.Arguments[1] == 0)
+                {
+                    status = NativeCallStatus::InvalidRequest;
+                }
+                else
+                {
+                    const GuardedInvokeResult invoke =
+                        TryInvokeInt32FunctionOneGuardedObjectPointer(
+                            m_nativeCall.Target,
+                            m_nativeCall.Arguments[0],
+                            m_nativeCall.Arguments[1],
+                            m_nativeCall.Arguments[2],
+                            m_nativeCall.Arguments[3],
+                            m_nativeCall.Arguments[4],
+                            m_nativeCall.Arguments[5],
+                            m_nativeCall.Arguments[6],
+                            m_nativeCall.Arguments[7],
+                            m_nativeCall.Arguments[8],
+                            m_nativeCall.Results[0]);
+
+                    if (invoke == GuardedInvokeResult::GuardRejected)
+                    {
+                        status = NativeCallStatus::GuardRejected;
+                    }
+                    else if (invoke == GuardedInvokeResult::FunctionFault)
+                    {
+                        status = NativeCallStatus::FunctionFault;
+                    }
+                }
+            }
+            else
+            {
+                status = NativeCallStatus::InvalidRequest;
             }
 
             m_nativeCall.Status = std::to_underlying(status);
@@ -580,9 +840,11 @@ namespace
 
         WriteLog(
             LogLevel::Information,
-            state->Configuration.AllowPrereleaseRuntime
-                ? L"Prerelease .NET runtimes may participate in hostfxr resolution."
-                : L"Prerelease .NET roll-forward is not explicitly enabled by CCHL.");
+            state->Configuration.Channel == RuntimeChannel::Preview
+                ? L"Preview .NET runtime access is enabled. Prerelease runtimes "
+                  L"may participate in LatestMajor hostfxr resolution."
+                : L"Release .NET runtime channel is active. Prerelease runtimes "
+                  L"are excluded from hostfxr resolution.");
 
         auto brain = DiscoverManagedBrain(*state);
         if (!brain)
@@ -603,19 +865,6 @@ namespace
             return;
         }
 
-        const std::wstring discoveredName = (*brain)->AssemblyName;
-        if (state->Configuration.BrainAssembly != discoveredName)
-        {
-            state->Configuration.BrainAssembly = discoveredName;
-            auto saved = SaveHostConfiguration(*state);
-            if (!saved)
-            {
-                WriteLog(LogLevel::Error, saved.error());
-                IdleUntilShutdown();
-                return;
-            }
-        }
-
         WriteLog(
             LogLevel::Information,
             L"Managed brain discovered: " +
@@ -629,6 +878,23 @@ namespace
                     (*brain)->RuntimeConfiguration.wstring());
             IdleUntilShutdown();
             return;
+        }
+
+        auto cachedBrain = CacheManagedBrainSelection(
+            *state,
+            (*brain)->AssemblyName);
+        if (!cachedBrain)
+        {
+            WriteLog(
+                LogLevel::Warning,
+                L"Managed brain selection could not be cached: " +
+                    cachedBrain.error());
+        }
+        else if (*cachedBrain)
+        {
+            WriteLog(
+                LogLevel::Information,
+                L"Managed brain selection was cached in CoreCLRHostLoader.ini.");
         }
 
         WriteLog(

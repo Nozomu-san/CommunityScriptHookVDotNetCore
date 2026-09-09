@@ -9,6 +9,7 @@
 #include <Windows.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -16,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 namespace CoreCLRHostLoader
 {
@@ -23,8 +25,6 @@ namespace CoreCLRHostLoader
 
     inline constexpr std::wstring_view ManagedBrainContractId =
         L"7C8E18B7-2D11-4D1E-9C53-5E3A0A4A63A1";
-    inline constexpr std::uint16_t ManagedBrainAbiMajor = 1;
-    inline constexpr std::uint16_t ManagedBrainAbiMinor = 0;
 
     inline constexpr std::uint32_t MaximumNativeArguments = 32;
     inline constexpr std::uint32_t MaximumNativeResults = 4;
@@ -53,7 +53,9 @@ namespace CoreCLRHostLoader
     {
         FrameBridge = 1ull << 0,
         NativeBridge = 1ull << 1,
-        CooperativeShutdown = 1ull << 2
+        CooperativeShutdown = 1ull << 2,
+        GameThreadFunctionBridge = 1ull << 3,
+        GameThreadGuardedFunctionBridge = 1ull << 4
     };
 
     [[nodiscard]]
@@ -74,7 +76,16 @@ namespace CoreCLRHostLoader
         TooManyArguments = 2,
         TooManyResults = 3,
         NativeReturnedNull = 4,
-        SessionStopping = 5
+        SessionStopping = 5,
+        FunctionFault = 6,
+        GuardRejected = 7
+    };
+
+    enum class HostCallOperation : std::uint16_t
+    {
+        ScriptNative = 0,
+        Int32FunctionOnePointer = 1,
+        Int32FunctionOneGuardedObjectPointer = 2
     };
 
     struct HostPaths final
@@ -85,9 +96,15 @@ namespace CoreCLRHostLoader
         std::filesystem::path Log;
     };
 
+    enum class RuntimeChannel : std::uint8_t
+    {
+        Release,
+        Preview
+    };
+
     struct HostConfiguration final
     {
-        bool AllowPrereleaseRuntime = false;
+        RuntimeChannel Channel = RuntimeChannel::Release;
         std::wstring BrainAssembly;
     };
 
@@ -104,8 +121,6 @@ namespace CoreCLRHostLoader
         std::wstring AssemblyName;
         std::wstring EntryType;
         std::wstring EntryMethod;
-        std::uint16_t AbiMajor = 0;
-        std::uint16_t AbiMinor = 0;
     };
 
 #pragma pack(push, 8)
@@ -120,11 +135,12 @@ namespace CoreCLRHostLoader
     struct NativeCallMailbox final
     {
         std::uint32_t Size = sizeof(NativeCallMailbox);
-        std::uint32_t ArgumentCount = 0;
+        std::uint16_t ArgumentCount = 0;
+        HostCallOperation Operation = HostCallOperation::ScriptNative;
         std::uint32_t RequestedResultCount = 0;
         std::int32_t Status = std::to_underlying(NativeCallStatus::Pending);
         std::uint64_t RequestId = 0;
-        std::uint64_t Hash = 0;
+        std::uint64_t Target = 0;
         std::array<std::uint64_t, MaximumNativeArguments> Arguments{};
         std::array<std::uint64_t, MaximumNativeResults> Results{};
     };
@@ -132,12 +148,12 @@ namespace CoreCLRHostLoader
     struct BrainRunRequest final
     {
         std::uint32_t Size = sizeof(BrainRunRequest);
-        std::uint16_t AbiMajor = ManagedBrainAbiMajor;
-        std::uint16_t AbiMinor = ManagedBrainAbiMinor;
         std::uint64_t Capabilities = std::to_underlying(
             HostCapability::FrameBridge |
             HostCapability::NativeBridge |
-            HostCapability::CooperativeShutdown);
+            HostCapability::CooperativeShutdown |
+            HostCapability::GameThreadFunctionBridge |
+            HostCapability::GameThreadGuardedFunctionBridge);
         HANDLE ReadyEvent = nullptr;
         HANDLE FrameRequestedEvent = nullptr;
         HANDLE FrameCompletedEvent = nullptr;
@@ -154,14 +170,31 @@ namespace CoreCLRHostLoader
     static_assert(alignof(FrameMailbox) == 8);
     static_assert(sizeof(NativeCallMailbox) == 320);
     static_assert(alignof(NativeCallMailbox) == 8);
+    static_assert(offsetof(NativeCallMailbox, ArgumentCount) == 4);
+    static_assert(offsetof(NativeCallMailbox, Operation) == 6);
+    static_assert(offsetof(NativeCallMailbox, RequestedResultCount) == 8);
+    static_assert(offsetof(NativeCallMailbox, Status) == 12);
+    static_assert(offsetof(NativeCallMailbox, RequestId) == 16);
+    static_assert(offsetof(NativeCallMailbox, Target) == 24);
+    static_assert(offsetof(NativeCallMailbox, Arguments) == 32);
+    static_assert(offsetof(NativeCallMailbox, Results) == 288);
     static_assert(sizeof(BrainRunRequest) == 88);
     static_assert(alignof(BrainRunRequest) == 8);
+    static_assert(offsetof(BrainRunRequest, Capabilities) == 8);
+    static_assert(offsetof(BrainRunRequest, Frame) == 64);
+    static_assert(offsetof(BrainRunRequest, NativeCall) == 72);
+    static_assert(offsetof(BrainRunRequest, PerformanceFrequency) == 80);
 
     [[nodiscard]]
     HostResult<HostState> InitializeHostState(HMODULE module) noexcept;
 
     [[nodiscard]]
     HostResult<void> SaveHostConfiguration(const HostState& state) noexcept;
+
+    [[nodiscard]]
+    HostResult<bool> CacheManagedBrainSelection(
+        HostState& state,
+        std::wstring_view assemblyName) noexcept;
 
     void WriteLog(LogLevel level, std::wstring_view message) noexcept;
 

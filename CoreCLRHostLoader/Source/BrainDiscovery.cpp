@@ -13,6 +13,7 @@
 #include <map>
 #include <span>
 #include <utility>
+#include <vector>
 
 #pragma comment(lib, "Rometadata.lib")
 
@@ -25,8 +26,6 @@ namespace CoreCLRHostLoader
 
         constexpr std::wstring_view RoleKey = L"CCHL.Role";
         constexpr std::wstring_view ContractIdKey = L"CCHL.ContractId";
-        constexpr std::wstring_view AbiMajorKey = L"CCHL.AbiMajor";
-        constexpr std::wstring_view AbiMinorKey = L"CCHL.AbiMinor";
         constexpr std::wstring_view EntryTypeKey = L"CCHL.EntryType";
         constexpr std::wstring_view EntryMethodKey =
             L"CCHL.EntryMethod";
@@ -423,38 +422,6 @@ namespace CoreCLRHostLoader
         }
 
         [[nodiscard]]
-        bool ParseUInt16(
-            std::wstring_view text,
-            std::uint16_t& value) noexcept
-        {
-            if (text.empty())
-            {
-                return false;
-            }
-
-            std::uint32_t parsed = 0;
-            for (const wchar_t character : text)
-            {
-                if (character < L'0' || character > L'9')
-                {
-                    return false;
-                }
-                const std::uint32_t digit =
-                    static_cast<std::uint32_t>(character - L'0');
-                if (parsed >
-                    ((std::numeric_limits<std::uint16_t>::max)() - digit) /
-                        10u)
-                {
-                    return false;
-                }
-                parsed = parsed * 10u + digit;
-            }
-
-            value = static_cast<std::uint16_t>(parsed);
-            return true;
-        }
-
-        [[nodiscard]]
         HostResult<std::optional<ManagedBrain>> InspectCandidate(
             const std::filesystem::path& path)
         {
@@ -527,26 +494,15 @@ namespace CoreCLRHostLoader
 
             const std::wstring* contractId =
                 FindValue(*values, ContractIdKey);
-            const std::wstring* abiMajorText =
-                FindValue(*values, AbiMajorKey);
-            const std::wstring* abiMinorText =
-                FindValue(*values, AbiMinorKey);
             const std::wstring* entryType =
                 FindValue(*values, EntryTypeKey);
             const std::wstring* entryMethod =
                 FindValue(*values, EntryMethodKey);
 
-            ManagedBrain brain{};
             if (contractId == nullptr ||
-                abiMajorText == nullptr ||
-                abiMinorText == nullptr ||
                 entryType == nullptr ||
                 entryMethod == nullptr ||
-                *contractId != ManagedBrainContractId ||
-                !ParseUInt16(*abiMajorText, brain.AbiMajor) ||
-                !ParseUInt16(*abiMinorText, brain.AbiMinor) ||
-                brain.AbiMajor != ManagedBrainAbiMajor ||
-                brain.AbiMinor > ManagedBrainAbiMinor)
+                *contractId != ManagedBrainContractId)
             {
                 return std::unexpected(
                     L"The managed-brain contract is missing or incompatible in " +
@@ -561,6 +517,7 @@ namespace CoreCLRHostLoader
                     path.filename().wstring() + L".");
             }
 
+            ManagedBrain brain{};
             brain.Assembly = path;
             brain.RuntimeConfiguration =
                 path.parent_path() /

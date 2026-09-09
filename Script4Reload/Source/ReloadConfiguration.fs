@@ -7,12 +7,12 @@ open System.Text
 [<RequireQualifiedAccess>]
 type ReloadMode =
     | Manual
-    | Synchronized
+    | Automatic
 
 type Script4ReloadConfig =
     {
         Mode: ReloadMode
-        ReloadInputs: string
+        ReloadInput: string
     }
 
 module internal ReloadConfiguration =
@@ -24,18 +24,20 @@ module internal ReloadConfiguration =
     let private defaults =
         {
             Mode = ReloadMode.Manual
-            ReloadInputs = "F11"
+            ReloadInput = "F11"
         }
 
     let private formatMode = function
         | ReloadMode.Manual -> "Manual"
-        | ReloadMode.Synchronized -> "Synchronized"
+        | ReloadMode.Automatic -> "Automatic"
 
     let private parseMode (value: string) =
         if value.Equals("Manual", StringComparison.OrdinalIgnoreCase) then
-            Some ReloadMode.Manual
+            Some(ReloadMode.Manual, false)
+        elif value.Equals("Automatic", StringComparison.OrdinalIgnoreCase) then
+            Some(ReloadMode.Automatic, false)
         elif value.Equals("Synchronized", StringComparison.OrdinalIgnoreCase) then
-            Some ReloadMode.Synchronized
+            Some(ReloadMode.Automatic, true)
         else
             None
 
@@ -44,13 +46,14 @@ module internal ReloadConfiguration =
             Environment.NewLine,
             [|
                 "[Reload]"
-                "; Manual or Synchronized. Take your pick."
+                "; Manual waits for ReloadInput. Automatic watches scripts4 and does not use input."
                 $"Mode={formatMode config.Mode}"
                 ""
-                "; Usable only on Manual mode."
+                "; Used only in Manual mode and kept dormant in Automatic mode."
                 "; Visit docs.fivem.net/docs/game-references/controls for GTA game input."
                 "; Every other token than INPUT_* selects device input."
-                $"ReloadInputs={config.ReloadInputs}"
+                "; Exactly one symbolic input is accepted for this action."
+                $"ReloadInput={config.ReloadInput}"
             |])
 
     let private writeAtomic (path: string) (content: string) =
@@ -104,8 +107,9 @@ module internal ReloadConfiguration =
         else
             try
                 let mutable section = String.Empty
-                let mutable modeText: string option = None
-                let mutable inputsText: string option = None
+                let mutable reloadSections = 0
+                let modeValues = ResizeArray<string>()
+                let inputValues = ResizeArray<string>()
                 let mutable repaired = false
 
                 for originalLine in File.ReadLines path do
@@ -117,7 +121,11 @@ module internal ReloadConfiguration =
                     elif line.StartsWith("[", StringComparison.Ordinal) &&
                          line.EndsWith("]", StringComparison.Ordinal) then
                         section <- line[1 .. line.Length - 2].Trim()
-                        if not (section.Equals("Reload", StringComparison.OrdinalIgnoreCase)) then
+                        if section.Equals("Reload", StringComparison.OrdinalIgnoreCase) then
+                            reloadSections <- reloadSections + 1
+                            if reloadSections > 1 then
+                                repaired <- true
+                        else
                             repaired <- true
                     else
                         let separator = line.IndexOf('=')
@@ -128,48 +136,84 @@ module internal ReloadConfiguration =
                             let key = line[.. separator - 1].Trim()
                             let value = line[separator + 1 ..].Trim()
                             if key.Equals("Mode", StringComparison.OrdinalIgnoreCase) then
-                                if modeText.IsSome then repaired <- true
-                                modeText <- Some value
-                            elif key.Equals("ReloadInputs", StringComparison.OrdinalIgnoreCase) then
-                                if inputsText.IsSome then repaired <- true
-                                inputsText <- Some value
+                                modeValues.Add value
+                            elif key.Equals("ReloadInput", StringComparison.OrdinalIgnoreCase) then
+                                inputValues.Add value
                             else
                                 repaired <- true
 
                 let mode =
-                    match modeText |> Option.bind parseMode with
-                    | Some value -> value
-                    | None ->
+                    if modeValues.Count = 0 then
                         repaired <- true
                         defaults.Mode
+                    else
+                        let parsed = ResizeArray<ReloadMode>()
+                        let mutable invalid = false
+                        for value in modeValues do
+                            match parseMode value with
+                            | Some(mode, legacyName) ->
+                                parsed.Add mode
+                                if legacyName then
+                                    repaired <- true
+                            | None -> invalid <- true
 
-                let reloadInputs =
-                    match inputsText with
-                    | Some value when not (String.IsNullOrWhiteSpace value) -> value.Trim()
-                    | _ ->
+                        if modeValues.Count > 1 then
+                            repaired <- true
+
+                        if invalid || parsed.Count = 0 then
+                            repaired <- true
+                            defaults.Mode
+                        else
+                            let first = parsed[0]
+                            if parsed |> Seq.exists ((<>) first) then
+                                repaired <- true
+                                defaults.Mode
+                            else
+                                first
+
+                let reloadInput =
+                    if inputValues.Count = 0 then
                         repaired <- true
-                        defaults.ReloadInputs
+                        defaults.ReloadInput
+                    else
+                        let normalized =
+                            inputValues
+                            |> Seq.map (fun value -> value.Trim())
+                            |> Seq.toArray
+
+                        if inputValues.Count > 1 then
+                            repaired <- true
+
+                        if normalized |> Array.exists String.IsNullOrWhiteSpace then
+                            repaired <- true
+                            defaults.ReloadInput
+                        else
+                            let first = normalized[0]
+                            if normalized
+                               |> Array.exists (fun value ->
+                                   not (value.Equals(first, StringComparison.OrdinalIgnoreCase))) then
+                                repaired <- true
+                                defaults.ReloadInput
+                            else
+                                first
+
+                if reloadSections = 0 then
+                    repaired <- true
 
                 let config =
                     {
                         Mode = mode
-                        ReloadInputs = reloadInputs
+                        ReloadInput = reloadInput
                     }
 
-                let canonical = serialize config
-                if repaired ||
-                   not (String.Equals(
-                       File.ReadAllText(path),
-                       canonical,
-                       StringComparison.Ordinal)) then
-                    writeAtomic path canonical
+                if repaired then
+                    writeAtomic path (serialize config)
                     config, Some(FileName + " was normalized.")
                 else
                     config, None
             with exceptionValue ->
-                writeAtomic path (serialize defaults)
                 defaults,
                 Some(
                     FileName +
-                    " was invalid and defaults were restored: " +
+                    " could not be read. Session defaults are in use and the file was left unchanged: " +
                     exceptionValue.Message)

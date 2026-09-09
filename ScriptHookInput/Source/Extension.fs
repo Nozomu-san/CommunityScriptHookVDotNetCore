@@ -10,8 +10,6 @@ open CommunityScriptHookVDotNetCore.Source
 [<assembly: AssemblyMetadata("CSHVDNC.Role", "RuntimeExtension")>]
 [<assembly: AssemblyMetadata("CSHVDNC.Id", "ScriptHookInput")>]
 [<assembly: AssemblyMetadata("CSHVDNC.EntryType", "ScriptHookInput.Source.InputExtension")>]
-[<assembly: AssemblyMetadata("CSHVDNC.ContractMajor", "1")>]
-[<assembly: AssemblyMetadata("CSHVDNC.ContractMinor", "0")>]
 [<assembly: AssemblyMetadata("CSHVDNC.Provides", "input.snapshot;input.actions;input.game;input.device")>]
 [<assembly: AssemblyMetadata("CSHVDNC.Requires", "native.standard;host.frame")>]
 do ()
@@ -32,24 +30,22 @@ type InputExtension() =
             | Some _ ->
                 invalidOp "ScriptHookInput is already initialized."
             | None ->
-                let nativeServices =
-                    context.Services.GetRequired<IStandardNatives>()
-                let instance = new InputRuntime(nativeServices)
+                context.Services.GetRequired<IStandardNatives>() |> ignore
+                let instance = new InputRuntime()
                 context.Services.Register<IScriptHookInput>(instance)
                 context.Services.Register<IInputActions>(instance)
                 runtime <- Some instance
-                ValueTask.CompletedTask
+                Task.CompletedTask
 
         member _.AdvanceHostFrame(context: RuntimeExtensionFrameContext) =
             match runtime with
             | Some instance -> instance.AdvanceFrame(context)
             | None -> invalidOp "ScriptHookInput has not been initialized."
 
-        member _.ShutdownAsync(cancellationToken: CancellationToken) =
-            cancellationToken.ThrowIfCancellationRequested()
+        member _.ShutdownAsync() =
             match runtime with
             | Some instance ->
                 (instance :> IDisposable).Dispose()
                 runtime <- None
             | None -> ()
-            ValueTask.CompletedTask
+            Task.CompletedTask

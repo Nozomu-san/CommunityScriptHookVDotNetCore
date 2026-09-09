@@ -3,10 +3,7 @@ namespace ScriptHookInput.Source
 open Alloc8orStandardNatives.Source
 
 [<Sealed>]
-type internal GameInputReader(nativeServices: IStandardNatives) =
-    do
-        System.ArgumentNullException.ThrowIfNull(nativeServices)
-        nativeServices.GameBuild |> ignore
+type internal GameInputReader() =
 
     member _.Read(
         control: GameControl,

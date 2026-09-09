@@ -12,7 +12,10 @@ internal sealed class RuntimeExtensionManager(
     RuntimeServiceRegistry services,
     RuntimeLog log) : IDisposable
 {
-    private static readonly TimeSpan RootLifecycleTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan RootInitializationTimeout =
+        TimeSpan.FromSeconds(5);
+    private static readonly int MaximumConcurrentInitializations =
+        Math.Clamp(Environment.ProcessorCount, 2, 8);
     private static readonly Assembly ContractAssembly =
         typeof(IScript4RuntimeExtension).Assembly;
     private static readonly string ContractAssemblyName =
@@ -30,24 +33,42 @@ internal sealed class RuntimeExtensionManager(
         RuntimeCapabilities.HostFrame,
         RuntimeCapabilities.RawNative,
         RuntimeCapabilities.NativeAdmissionControl,
+        RuntimeCapabilities.GameThreadFunctions,
+        RuntimeCapabilities.GuardedGameThreadFunctions,
         RuntimeCapabilities.CooperativeShutdown,
         RuntimeCapabilities.PackageLifecycle,
         RuntimeCapabilities.PackageTransitionHost,
         RuntimeCapabilities.ScriptScheduler
     ];
 
+    private readonly int _runtimeThreadId = Environment.CurrentManagedThreadId;
     private readonly List<ActiveRuntimeExtension> _active = [];
+    private readonly List<RetiringRuntimeExtension> _retiring = [];
+    private readonly List<PendingRuntimeExtension> _initializing = [];
+    private readonly List<RuntimeExtensionDescriptor> _pendingInitialization = [];
+    private readonly HashSet<string> _availableCapabilities =
+        new(CoreCapabilities, StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _unavailableAssemblies =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Queue<string> _newlyUnavailableAssemblies = [];
     private RootAssemblyResolver? _resolver;
+    private bool _initializationPrepared;
+    private bool _initializationCompleted;
     private bool _shutdown;
 
     internal IReadOnlyCollection<string> UnavailableAssemblyNames =>
         _unavailableAssemblies;
 
-    public void LoadAndInitialize()
+    internal bool InitializationCompleted => _initializationCompleted;
+
+    public void PrepareInitialization()
     {
+        if (_initializationPrepared)
+        {
+            throw new InvalidOperationException(
+                "Runtime-extension initialization was already prepared.");
+        }
+
         RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
             rootDirectory,
             ContractAssemblyName,
@@ -103,66 +124,230 @@ internal sealed class RuntimeExtensionManager(
             }
         }
 
-        HashSet<string> available = new(
-            CoreCapabilities,
-            StringComparer.OrdinalIgnoreCase);
-        List<RuntimeExtensionDescriptor> pending =
-        [.. discovered
-            .Where(value => !rejected.Contains(value.Id))
-            .OrderBy(value => value.Id, StringComparer.OrdinalIgnoreCase)];
+        _pendingInitialization.AddRange(
+            discovered
+                .Where(value => !rejected.Contains(value.Id))
+                .OrderBy(value => value.Id, StringComparer.OrdinalIgnoreCase));
 
-        while (pending.Count != 0)
+        _initializationPrepared = true;
+        log.Information(
+            $"Prepared {_pendingInitialization.Count} root runtime extension(s) " +
+            $"for frame-driven initialization with at most " +
+            $"{MaximumConcurrentInitializations} concurrent lifecycle operation(s).");
+    }
+
+    public void AdvanceInitialization()
+    {
+        ObserveRetirements();
+        if (_shutdown || _initializationCompleted)
         {
-            bool progressed = false;
-            for (int index = 0; index < pending.Count;)
-            {
-                RuntimeExtensionDescriptor descriptor = pending[index];
-                if (descriptor.Requires.Any(requirement =>
-                        !available.Contains(requirement)))
-                {
-                    ++index;
-                    continue;
-                }
+            return;
+        }
+        if (!_initializationPrepared)
+        {
+            throw new InvalidOperationException(
+                "Runtime-extension initialization has not been prepared.");
+        }
 
-                pending.RemoveAt(index);
-                progressed = true;
-                if (TryInitialize(descriptor, out ActiveRuntimeExtension? active))
-                {
-                    _active.Add(active);
-                    foreach (string capability in descriptor.Provides)
-                    {
-                        available.Add(capability);
-                    }
-                }
-                else
-                {
-                    MarkUnavailable(descriptor);
-                }
-            }
+        ObserveInitializing();
+        StartReadyInitializations();
+        ObserveInitializing();
 
-            if (progressed)
+        if (_initializing.Count != 0)
+        {
+            return;
+        }
+
+        if (_pendingInitialization.Count != 0)
+        {
+            QuarantineUnsatisfiedPending();
+        }
+
+        if (_pendingInitialization.Count == 0)
+        {
+            _initializationCompleted = true;
+            log.Information(
+                $"Activated {_active.Count} root runtime extension(s); " +
+                $"quarantined {_unavailableAssemblies.Count} root assembly(ies).");
+        }
+    }
+
+    private void ObserveInitializing()
+    {
+        for (int index = _initializing.Count - 1; index >= 0; --index)
+        {
+            PendingRuntimeExtension pending = _initializing[index];
+            ManagedLifecycleOperationSnapshot snapshot =
+                pending.Operation.Poll();
+            if (snapshot.Status is ManagedLifecycleOperationStatus.Pending)
             {
                 continue;
             }
 
-            foreach (RuntimeExtensionDescriptor descriptor in pending)
-            {
-                string missing = string.Join(
-                    ", ",
-                    descriptor.Requires.Where(requirement =>
-                        !available.Contains(requirement)));
-                log.Error(
-                    $"Runtime extension '{descriptor.Id}' is quarantined for " +
-                    $"this GTA session. Unsatisfied capabilities: {missing}.");
-                MarkUnavailable(descriptor);
-            }
-            pending.Clear();
-        }
+            _initializing.RemoveAt(index);
+            ManagedLifecycleAuthority authority = pending.Operation.Authority;
+            Task initializationCompletion = pending.Operation.Completion;
+            pending.Operation.Dispose();
 
-        log.Information(
-            $"Activated {_active.Count} root runtime extension(s); " +
-            $"quarantined {_unavailableAssemblies.Count} root assembly(ies). " +
-            "Root extensions have one lifecycle per GTA process and are never retried.");
+            switch (snapshot.Status)
+            {
+                case ManagedLifecycleOperationStatus.Succeeded:
+                    _active.Add(new(
+                        pending.Descriptor,
+                        pending.Instance,
+                        authority));
+                    foreach (string capability in pending.Descriptor.Provides)
+                    {
+                        _availableCapabilities.Add(capability);
+                    }
+                    log.Information(
+                        $"Runtime extension '{pending.Descriptor.Id}' initialized " +
+                        "for its one root lifecycle in this GTA process.");
+                    break;
+
+                case ManagedLifecycleOperationStatus.TimedOut:
+                    MarkUnavailable(pending.Descriptor);
+                    BeginRetirement(
+                        pending.Descriptor,
+                        pending.Instance,
+                        "initialization timeout",
+                        initializationCompletion);
+                    log.Error(
+                        $"Runtime extension '{pending.Descriptor.Id}' exceeded its " +
+                        $"{RootInitializationTimeout.TotalSeconds:0.###} second " +
+                        "initialization deadline and was quarantined independently.");
+                    break;
+
+                case ManagedLifecycleOperationStatus.Cancelled:
+                    MarkUnavailable(pending.Descriptor);
+                    BeginRetirement(
+                        pending.Descriptor,
+                        pending.Instance,
+                        "initialization cancellation",
+                        initializationCompletion);
+                    log.Error(
+                        $"Runtime extension '{pending.Descriptor.Id}' initialization " +
+                        "was cancelled and the extension was quarantined.");
+                    break;
+
+                case ManagedLifecycleOperationStatus.Faulted:
+                    MarkUnavailable(pending.Descriptor);
+                    BeginRetirement(
+                        pending.Descriptor,
+                        pending.Instance,
+                        "initialization fault",
+                        initializationCompletion);
+                    log.Error(
+                        $"Runtime extension '{pending.Descriptor.Id}' could not " +
+                        "initialize and will not be retried before the game restarts: " +
+                        snapshot.Exception);
+                    break;
+            }
+        }
+    }
+
+    private void StartReadyInitializations()
+    {
+        while (_initializing.Count < MaximumConcurrentInitializations)
+        {
+            int readyIndex = _pendingInitialization.FindIndex(
+                descriptor => descriptor.Requires.All(
+                    _availableCapabilities.Contains));
+            if (readyIndex < 0)
+            {
+                return;
+            }
+
+            RuntimeExtensionDescriptor descriptor =
+                _pendingInitialization[readyIndex];
+            _pendingInitialization.RemoveAt(readyIndex);
+
+            PendingRuntimeExtension? pending = TryBeginInitialize(descriptor);
+            if (pending is null)
+            {
+                MarkUnavailable(descriptor);
+                continue;
+            }
+            _initializing.Add(pending);
+        }
+    }
+
+    private PendingRuntimeExtension? TryBeginInitialize(
+        RuntimeExtensionDescriptor descriptor)
+    {
+        IScript4RuntimeExtension? instance = null;
+        try
+        {
+            Assembly assembly = _resolver?.LoadRootAssembly(descriptor.AssemblyName)
+                ?? throw new InvalidOperationException(
+                    $"Root extension image '{descriptor.AssemblyName}' is unavailable in the committed RAM snapshot.");
+            Type entryType = assembly.GetType(
+                descriptor.EntryType,
+                throwOnError: true,
+                ignoreCase: false)!;
+            object? created = Activator.CreateInstance(entryType, nonPublic: true);
+            if (created is not IScript4RuntimeExtension extension)
+            {
+                throw new InvalidOperationException(
+                    $"Entry type '{descriptor.EntryType}' does not implement " +
+                    $"{nameof(IScript4RuntimeExtension)} from the active contract assembly.");
+            }
+            instance = extension;
+
+            bool nativeAuthority = descriptor.Provides.Contains(
+                "native.call.admission",
+                StringComparer.OrdinalIgnoreCase);
+            bool gameThreadFunctionAuthority = descriptor.Requires.Contains(
+                RuntimeCapabilities.GameThreadFunctions,
+                StringComparer.OrdinalIgnoreCase);
+            IRuntimeServiceRegistry ownerServices = services.CreateOwnerScope(
+                descriptor.Id,
+                nativeAuthority,
+                gameThreadFunctionAuthority);
+            RuntimeExtensionContext context = new(
+                rootDirectory,
+                scriptsDirectory,
+                ownerServices,
+                new RuntimeExtensionDependencyScope(this, descriptor.Id));
+
+            ManagedLifecycleOperation operation = ManagedLifecycleOperation.Start(
+                token => instance.InitializeAsync(context, token),
+                RootInitializationTimeout);
+
+            log.Information(
+                $"Runtime extension '{descriptor.Id}' initialization started with " +
+                $"its own {RootInitializationTimeout.TotalSeconds:0.###} second deadline.");
+
+            return new(descriptor, instance, operation);
+        }
+        catch (Exception exception)
+        {
+            MarkUnavailable(descriptor);
+            if (instance is not null)
+            {
+                BeginRetirement(descriptor, instance, "initialization setup fault");
+            }
+            log.Error(
+                $"Runtime extension '{descriptor.Id}' could not begin initialization " +
+                $"and will not be retried before the game restarts: {exception}");
+            return null;
+        }
+    }
+
+    private void QuarantineUnsatisfiedPending()
+    {
+        foreach (RuntimeExtensionDescriptor descriptor in _pendingInitialization)
+        {
+            string missing = string.Join(
+                ", ",
+                descriptor.Requires.Where(requirement =>
+                    !_availableCapabilities.Contains(requirement)));
+            log.Error(
+                $"Runtime extension '{descriptor.Id}' is quarantined for " +
+                $"this GTA session. Unsatisfied capabilities: {missing}.");
+            MarkUnavailable(descriptor);
+        }
+        _pendingInitialization.Clear();
     }
 
     private void RejectUndeclaredRootReferences(
@@ -209,9 +394,13 @@ internal sealed class RuntimeExtensionManager(
                     }
 
                     bool declared = consumer.Requires.Any(requirement =>
-                        provider.Provides.Contains(
-                            requirement,
-                            StringComparer.OrdinalIgnoreCase));
+                            provider.Provides.Contains(
+                                requirement,
+                                StringComparer.OrdinalIgnoreCase)) ||
+                        consumer.ConditionalRequires.Any(requirement =>
+                            provider.Provides.Contains(
+                                requirement,
+                                StringComparer.OrdinalIgnoreCase));
                     if (declared)
                     {
                         continue;
@@ -225,10 +414,10 @@ internal sealed class RuntimeExtensionManager(
                         $"Runtime extension '{consumer.Id}' has a compile-time " +
                         $"reference closure that reaches root extension assembly " +
                         $"'{provider.AssemblyName}' ({provider.Id}) without declaring " +
-                        "a capability dependency on that provider. " +
+                        "a static or conditional capability dependency on that provider. " +
                         $"Provider capabilities: [{capabilities}]. The consumer is " +
                         "quarantined so helper assemblies cannot bypass the " +
-                        "Provides/Requires lifecycle graph.");
+                        "declared dependency lifecycle graph.");
                     break;
                 }
 
@@ -276,26 +465,35 @@ internal sealed class RuntimeExtensionManager(
 
     public void AdvanceHostFrame(RuntimeExtensionFrameContext context)
     {
-        for (int index = 0; index < _active.Count; ++index)
+        ObserveRetirements();
+        if (!_initializationCompleted)
         {
-            ActiveRuntimeExtension active = _active[index];
-            if (active.Faulted)
+            return;
+        }
+
+        ActiveRuntimeExtension[] frame = [.. _active];
+        foreach (ActiveRuntimeExtension active in frame)
+        {
+            if (active.Unavailable)
             {
                 continue;
             }
 
             try
             {
+                using IDisposable scope =
+                    ManagedLifecycleAuthorityContext.Enter(active.Authority);
                 active.Instance.AdvanceHostFrame(context);
             }
             catch (Exception exception)
             {
                 log.Error(
                     $"Runtime extension '{active.Descriptor.Id}' faulted while " +
-                    $"advancing a host frame and is permanently quarantined: {exception}");
+                    $"advancing a host frame: {exception}");
                 Quarantine(active.Descriptor.Id, "host-frame fault");
             }
         }
+        ObserveRetirements();
     }
 
     internal IReadOnlyList<string> DrainNewUnavailableAssemblyNames()
@@ -308,90 +506,100 @@ internal sealed class RuntimeExtensionManager(
         return result.AsReadOnly();
     }
 
-    public void Shutdown()
+    public async Task ShutdownAsync()
     {
-        if (_shutdown)
+        if (!_shutdown)
         {
-            return;
-        }
-        _shutdown = true;
+            _shutdown = true;
 
-        for (int index = _active.Count - 1; index >= 0; --index)
-        {
-            ActiveRuntimeExtension active = _active[index];
-            ShutdownOne(active, "runtime shutdown");
-            services.RevokeOwner(active.Descriptor.Id);
+            foreach (PendingRuntimeExtension pending in _initializing)
+            {
+                Task initializationCompletion = pending.Operation.Completion;
+                pending.Operation.Cancel();
+                pending.Operation.Dispose();
+                MarkUnavailable(pending.Descriptor);
+                BeginRetirement(
+                    pending.Descriptor,
+                    pending.Instance,
+                    "runtime shutdown during initialization",
+                    initializationCompletion);
+            }
+            _initializing.Clear();
+
+            foreach (RuntimeExtensionDescriptor descriptor in _pendingInitialization)
+            {
+                MarkUnavailable(descriptor);
+            }
+            _pendingInitialization.Clear();
+
+            ActiveRuntimeExtension[] active = [.. _active];
+            foreach (ActiveRuntimeExtension extension in active)
+            {
+                extension.Unavailable = true;
+                extension.Authority.ForceRevoke();
+                foreach (string capability in extension.Descriptor.Provides)
+                {
+                    _availableCapabilities.Remove(capability);
+                }
+                MarkUnavailable(extension.Descriptor);
+            }
+            _active.Clear();
+
+            foreach (ActiveRuntimeExtension extension in active)
+            {
+                BeginRetirement(
+                    extension.Descriptor,
+                    extension.Instance,
+                    "runtime shutdown");
+            }
         }
-        _active.Clear();
+
+        await DrainRetirementsAsync().ConfigureAwait(false);
     }
 
     public void Dispose()
     {
-        Shutdown();
+        ShutdownAsync().GetAwaiter().GetResult();
         _resolver?.Dispose();
         _resolver = null;
     }
 
-    private bool TryInitialize(
-        RuntimeExtensionDescriptor descriptor,
-        [NotNullWhen(true)] out ActiveRuntimeExtension? active)
+
+    private void RequireConditionalCapability(string extensionId, string capability)
     {
-        active = null;
-        try
+        ArgumentException.ThrowIfNullOrWhiteSpace(extensionId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(capability);
+        if (Environment.CurrentManagedThreadId != _runtimeThreadId)
         {
-            Assembly assembly = _resolver?.LoadRootAssembly(descriptor.AssemblyName)
-                ?? throw new InvalidOperationException(
-                    $"Root extension image '{descriptor.AssemblyName}' is unavailable in the committed RAM snapshot.");
-            Type entryType = assembly.GetType(
-                descriptor.EntryType,
-                throwOnError: true,
-                ignoreCase: false)!;
-            object? created = Activator.CreateInstance(entryType, nonPublic: true);
-            if (created is not IScript4RuntimeExtension instance)
-            {
-                throw new InvalidOperationException(
-                    $"Entry type '{descriptor.EntryType}' does not implement " +
-                    $"{nameof(IScript4RuntimeExtension)} from the active contract assembly.");
-            }
+            throw new InvalidOperationException(
+                "Conditional runtime dependencies must be activated on the " +
+                "managed runtime frame thread.");
+        }
 
-            bool nativeAuthority = descriptor.Provides.Contains(
-                "native.call.admission",
-                StringComparer.OrdinalIgnoreCase);
-            IRuntimeServiceRegistry ownerServices = services.CreateOwnerScope(
-                descriptor.Id,
-                nativeAuthority);
-            RuntimeExtensionContext context = new(
-                rootDirectory,
-                scriptsDirectory,
-                ownerServices);
+        ActiveRuntimeExtension? active = _active.FirstOrDefault(value =>
+            !value.Unavailable &&
+            value.Descriptor.Id.Equals(
+                extensionId,
+                StringComparison.OrdinalIgnoreCase)) ?? throw new InvalidOperationException(
+                $"Runtime extension '{extensionId}' can activate conditional " +
+                "dependencies only while its root lifecycle is active.");
+        string normalized = capability.Trim();
+        if (!active.Descriptor.ConditionalRequires.Contains(
+                normalized,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Runtime extension '{extensionId}' did not declare conditional " +
+                $"capability dependency '{normalized}'.");
+        }
+        if (!_availableCapabilities.Contains(normalized))
+        {
+            throw new InvalidOperationException(
+                $"Conditional runtime capability '{normalized}' is unavailable " +
+                $"to extension '{extensionId}'.");
+        }
 
-            ManagedLifecycleExecutor.Run(
-                token => instance.InitializeAsync(context, token),
-                RootLifecycleTimeout,
-                $"Runtime extension '{descriptor.Id}' exceeded the initialization deadline.");
-            active = new(descriptor, assembly, instance, Faulted: false);
-            log.Information(
-                $"Runtime extension '{descriptor.Id}' initialized for its one " +
-                "root lifecycle in this GTA process.");
-            return true;
-        }
-        catch (ManagedLifecycleTimeoutException)
-        {
-            services.RevokeOwner(descriptor.Id);
-            log.Error(
-                $"Runtime extension '{descriptor.Id}' exceeded its initialization " +
-                "deadline. Managed-brain startup is aborted because root " +
-                "infrastructure may still have cooperative work in flight.");
-            throw;
-        }
-        catch (Exception exception)
-        {
-            services.RevokeOwner(descriptor.Id);
-            log.Error(
-                $"Runtime extension '{descriptor.Id}' could not initialize and " +
-                $"will not be retried before the game restarts: {exception}");
-            return false;
-        }
+        active.RuntimeRequirements.Add(normalized);
     }
 
     private void Quarantine(string extensionId, string reason)
@@ -410,7 +618,7 @@ internal sealed class RuntimeExtensionManager(
             changed = false;
             foreach (ActiveRuntimeExtension active in _active)
             {
-                if (active.Faulted)
+                if (active.Unavailable)
                 {
                     continue;
                 }
@@ -424,7 +632,8 @@ internal sealed class RuntimeExtensionManager(
                     continue;
                 }
 
-                if (active.Descriptor.Requires.Any(removedCapabilities.Contains) &&
+                if ((active.Descriptor.Requires.Any(removedCapabilities.Contains) ||
+                     active.RuntimeRequirements.Any(removedCapabilities.Contains)) &&
                     extensionIds.Add(active.Descriptor.Id))
                 {
                     changed = true;
@@ -436,18 +645,31 @@ internal sealed class RuntimeExtensionManager(
             }
         }
         while (changed);
-        for (int index = _active.Count - 1; index >= 0; --index)
-        {
-            ActiveRuntimeExtension active = _active[index];
-            if (active.Faulted || !extensionIds.Contains(active.Descriptor.Id))
-            {
-                continue;
-            }
 
-            active.Faulted = true;
-            ShutdownOne(active, reason);
-            services.RevokeOwner(active.Descriptor.Id);
+        ActiveRuntimeExtension[] affected = [.. _active.Where(active =>
+            !active.Unavailable && extensionIds.Contains(active.Descriptor.Id))];
+        if (affected.Length == 0)
+        {
+            return;
+        }
+
+        foreach (ActiveRuntimeExtension active in affected)
+        {
+            active.Unavailable = true;
+            active.Authority.ForceRevoke();
+            foreach (string capability in active.Descriptor.Provides)
+            {
+                _availableCapabilities.Remove(capability);
+            }
             MarkUnavailable(active.Descriptor);
+        }
+        foreach (ActiveRuntimeExtension active in affected)
+        {
+            _active.Remove(active);
+        }
+        foreach (ActiveRuntimeExtension active in affected)
+        {
+            BeginRetirement(active.Descriptor, active.Instance, reason);
             log.Error(
                 $"Runtime extension '{active.Descriptor.Id}' is permanently " +
                 "unavailable until GTA restarts.");
@@ -463,49 +685,186 @@ internal sealed class RuntimeExtensionManager(
         services.RevokeOwner(descriptor.Id);
     }
 
-    private void ShutdownOne(ActiveRuntimeExtension active, string reason)
+    private void BeginRetirement(
+        RuntimeExtensionDescriptor descriptor,
+        IScript4RuntimeExtension instance,
+        string reason,
+        Task? predecessor = null)
     {
-        try
+        if (_retiring.Any(value => value.Descriptor.Id.Equals(
+                descriptor.Id,
+                StringComparison.OrdinalIgnoreCase)))
         {
-            ManagedLifecycleExecutor.Run(
-                token => active.Instance.ShutdownAsync(token),
-                RootLifecycleTimeout,
-                $"Runtime extension '{active.Descriptor.Id}' exceeded the shutdown deadline.");
-            log.Information(
-                $"Runtime extension '{active.Descriptor.Id}' stopped; reason={reason}.");
+            return;
         }
-        catch (Exception exception)
+
+        _retiring.Add(new(
+            descriptor,
+            reason,
+            ManagedRetirementOperation.Start(
+                instance.ShutdownAsync,
+                predecessor)));
+        log.Information(
+            $"Runtime extension '{descriptor.Id}' entered asynchronous retirement; " +
+            $"reason={reason}.");
+    }
+
+    private void ObserveRetirements()
+    {
+        for (int index = _retiring.Count - 1; index >= 0; --index)
         {
+            RetiringRuntimeExtension retiring = _retiring[index];
+            ManagedRetirementOperationSnapshot snapshot = retiring.Operation.Poll();
+            if (snapshot.Status is ManagedRetirementOperationStatus.Pending)
+            {
+                continue;
+            }
+
+            _retiring.RemoveAt(index);
+            if (snapshot.Status is ManagedRetirementOperationStatus.Succeeded)
+            {
+                log.Information(
+                    $"Runtime extension '{retiring.Descriptor.Id}' completed cleanup; " +
+                    $"reason={retiring.Reason}.");
+                continue;
+            }
+
             log.Error(
-                $"Runtime extension '{active.Descriptor.Id}' failed during " +
-                $"best-effort shutdown: {exception}");
+                $"Runtime extension '{retiring.Descriptor.Id}' cleanup faulted after " +
+                $"retirement; reason={retiring.Reason}: {snapshot.Exception}");
         }
     }
+
+    private async Task DrainRetirementsAsync()
+    {
+        for (;;)
+        {
+            ObserveRetirements();
+            if (_retiring.Count == 0)
+            {
+                return;
+            }
+
+            Task[] pending = [.. _retiring
+                .Select(value => value.Operation.Completion)
+                .Where(task => !task.IsCompleted)];
+            if (pending.Length == 0)
+            {
+                continue;
+            }
+            await Task.WhenAny(pending).ConfigureAwait(false);
+        }
+    }
+
+    private sealed record PendingRuntimeExtension(
+        RuntimeExtensionDescriptor Descriptor,
+        IScript4RuntimeExtension Instance,
+        ManagedLifecycleOperation Operation);
+
+    private sealed record RetiringRuntimeExtension(
+        RuntimeExtensionDescriptor Descriptor,
+        string Reason,
+        ManagedRetirementOperation Operation);
 
     private sealed class ActiveRuntimeExtension(
         RuntimeExtensionDescriptor descriptor,
-        Assembly assembly,
         IScript4RuntimeExtension instance,
-        bool Faulted)
+        ManagedLifecycleAuthority authority)
     {
         public RuntimeExtensionDescriptor Descriptor { get; } = descriptor;
-        public Assembly Assembly { get; } = assembly;
         public IScript4RuntimeExtension Instance { get; } = instance;
-        public bool Faulted { get; set; } = Faulted;
+        public ManagedLifecycleAuthority Authority { get; } = authority;
+        public HashSet<string> RuntimeRequirements { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+        public bool Unavailable { get; set; }
+    }
+
+    private sealed class RuntimeExtensionDependencyScope(
+        RuntimeExtensionManager owner,
+        string extensionId) : IRuntimeExtensionDependencies
+    {
+        public void Require(string capability) =>
+            owner.RequireConditionalCapability(extensionId, capability);
     }
 }
 
-internal sealed class ManagedLifecycleTimeoutException(
-    string message) : TimeoutException(message)
+internal enum ManagedLifecycleOperationStatus
 {
+    Pending,
+    Succeeded,
+    TimedOut,
+    Cancelled,
+    Faulted
 }
 
-internal static class ManagedLifecycleExecutor
+internal readonly record struct ManagedLifecycleOperationSnapshot(
+    ManagedLifecycleOperationStatus Status,
+    Exception? Exception = null);
+
+internal sealed class ManagedLifecycleAuthority
 {
-    public static void Run(
-        Func<CancellationToken, ValueTask> operationFactory,
+    private int _state;
+
+    internal bool AllowsNativeCalls => Volatile.Read(ref _state) != 2;
+
+    internal bool TryCommit() =>
+        Interlocked.CompareExchange(ref _state, 1, 0) == 0;
+
+    internal void RevokeIfActive() =>
+        Interlocked.CompareExchange(ref _state, 2, 0);
+
+    internal void ForceRevoke() =>
+        Interlocked.Exchange(ref _state, 2);
+}
+
+internal static class ManagedLifecycleAuthorityContext
+{
+    private static readonly AsyncLocal<ManagedLifecycleAuthority?> Current = new();
+
+    internal static bool AllowsNativeCalls =>
+        Current.Value?.AllowsNativeCalls ?? true;
+
+    internal static IDisposable Enter(ManagedLifecycleAuthority authority)
+    {
+        ArgumentNullException.ThrowIfNull(authority);
+        ManagedLifecycleAuthority? previous = Current.Value;
+        Current.Value = authority;
+        return new Scope(previous);
+    }
+
+    private sealed class Scope(
+        ManagedLifecycleAuthority? previous) : IDisposable
+    {
+        private ManagedLifecycleAuthority? _previous = previous;
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            Current.Value = _previous;
+            _previous = null;
+        }
+    }
+}
+
+internal sealed class ManagedLifecycleOperation : IDisposable
+{
+    private readonly CancellationTokenSource _timeout;
+    private readonly CancellationTokenSource _combined;
+    private readonly CancellationToken _externalCancellation;
+    private readonly CancellationTokenRegistration _revocationRegistration;
+    private readonly ManagedLifecycleAuthority _authority = new();
+    private readonly Task _operation;
+    private int _disposed;
+
+    private ManagedLifecycleOperation(
+        Func<CancellationToken, Task> operationFactory,
         TimeSpan timeout,
-        string timeoutMessage)
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operationFactory);
         if (timeout <= TimeSpan.Zero)
@@ -516,57 +875,206 @@ internal static class ManagedLifecycleExecutor
                 "A managed lifecycle deadline must be positive.");
         }
 
-        CancellationTokenSource deadline = new(timeout);
-        CancellationToken deadlineToken = deadline.Token;
-        bool deadlineRetired = false;
-        Task operation = Task.Run(
+        _externalCancellation = cancellationToken;
+        _timeout = new();
+        _timeout.CancelAfter(timeout);
+        _combined = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(
+                _timeout.Token,
+                cancellationToken)
+            : CancellationTokenSource.CreateLinkedTokenSource(_timeout.Token);
+
+        _revocationRegistration = _combined.Token.Register(
+            static state => ((ManagedLifecycleAuthority)state!).RevokeIfActive(),
+            _authority);
+
+        CancellationToken operationToken = _combined.Token;
+        _operation = Task.Run(
             async () =>
             {
-                await operationFactory(deadlineToken).ConfigureAwait(false);
+                using IDisposable scope =
+                    ManagedLifecycleAuthorityContext.Enter(_authority);
+                operationToken.ThrowIfCancellationRequested();
+                await operationFactory(operationToken).ConfigureAwait(false);
+                if (!_authority.TryCommit())
+                {
+                    operationToken.ThrowIfCancellationRequested();
+                    throw new OperationCanceledException(operationToken);
+                }
             },
-            CancellationToken.None);
+            operationToken);
+    }
 
+    internal static ManagedLifecycleOperation Start(
+        Func<CancellationToken, Task> operationFactory,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        new(operationFactory, timeout, cancellationToken);
+
+    internal ManagedLifecycleAuthority Authority => _authority;
+
+    internal Task Completion => _operation;
+
+    internal ManagedLifecycleOperationSnapshot Poll()
+    {
+        if (!_operation.IsCompleted)
+        {
+            if (_timeout.IsCancellationRequested)
+            {
+                return new(ManagedLifecycleOperationStatus.TimedOut);
+            }
+            if (_externalCancellation.IsCancellationRequested)
+            {
+                return new(ManagedLifecycleOperationStatus.Cancelled);
+            }
+            return new(ManagedLifecycleOperationStatus.Pending);
+        }
+
+        if (_operation.IsCompletedSuccessfully)
+        {
+            return new(ManagedLifecycleOperationStatus.Succeeded);
+        }
+
+        if (_operation.IsCanceled)
+        {
+            return new(
+                _timeout.IsCancellationRequested
+                    ? ManagedLifecycleOperationStatus.TimedOut
+                    : ManagedLifecycleOperationStatus.Cancelled);
+        }
+
+        Exception exception = _operation.Exception switch
+        {
+            { InnerException: not null } aggregate => aggregate.InnerException,
+            { } aggregate => aggregate,
+            null => new InvalidOperationException(
+                "The managed lifecycle operation faulted without an exception.")
+        };
+        return new(
+            ManagedLifecycleOperationStatus.Faulted,
+            exception);
+    }
+
+    internal void Cancel()
+    {
+        _authority.RevokeIfActive();
         try
         {
-            operation.WaitAsync(deadlineToken).GetAwaiter().GetResult();
+            _combined.Cancel(throwOnFirstException: false);
         }
-        catch (OperationCanceledException) when (
-            deadline.IsCancellationRequested)
+        catch (AggregateException)
         {
-            deadlineRetired = true;
-            RetireTimedOutOperation(operation, deadline);
-            throw new ManagedLifecycleTimeoutException(timeoutMessage);
-        }
-        finally
-        {
-            if (!deadlineRetired)
-            {
-                deadline.Dispose();
-            }
         }
     }
 
-    private static void RetireTimedOutOperation(
-        Task operation,
-        CancellationTokenSource deadline)
+    public void Dispose()
     {
-        if (operation.IsCompleted)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
-            _ = operation.Exception;
-            deadline.Dispose();
             return;
         }
 
-        _ = operation.ContinueWith(
-            static (task, state) =>
+        _authority.RevokeIfActive();
+        if (!_operation.IsCompleted)
+        {
+            Cancel();
+            _ = _operation.ContinueWith(
+                static (task, state) =>
+                {
+                    ManagedLifecycleOperation owner =
+                        (ManagedLifecycleOperation)state!;
+                    _ = task.Exception;
+                    owner.DisposeResources();
+                },
+                this,
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            return;
+        }
+
+        _ = _operation.Exception;
+        DisposeResources();
+    }
+
+    private void DisposeResources()
+    {
+        _revocationRegistration.Dispose();
+        _combined.Dispose();
+        _timeout.Dispose();
+    }
+}
+
+internal enum ManagedRetirementOperationStatus
+{
+    Pending,
+    Succeeded,
+    Faulted
+}
+
+internal readonly record struct ManagedRetirementOperationSnapshot(
+    ManagedRetirementOperationStatus Status,
+    Exception? Exception = null);
+
+internal sealed class ManagedRetirementOperation
+{
+    private readonly Task _completion;
+
+    private ManagedRetirementOperation(
+        Func<Task> operationFactory,
+        Task? predecessor)
+    {
+        ArgumentNullException.ThrowIfNull(operationFactory);
+        ManagedLifecycleAuthority authority = new();
+        authority.ForceRevoke();
+        _completion = Task.Run(
+            async () =>
             {
-                _ = task.Exception;
-                ((CancellationTokenSource)state!).Dispose();
-            },
-            deadline,
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+                if (predecessor is not null)
+                {
+                    try
+                    {
+                        await predecessor.ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                using IDisposable scope =
+                    ManagedLifecycleAuthorityContext.Enter(authority);
+                await operationFactory().ConfigureAwait(false);
+            });
+    }
+
+    internal static ManagedRetirementOperation Start(
+        Func<Task> operationFactory,
+        Task? predecessor = null) =>
+        new(operationFactory, predecessor);
+
+    internal Task Completion => _completion;
+
+    internal ManagedRetirementOperationSnapshot Poll()
+    {
+        if (!_completion.IsCompleted)
+        {
+            return new(ManagedRetirementOperationStatus.Pending);
+        }
+        if (_completion.IsCompletedSuccessfully)
+        {
+            return new(ManagedRetirementOperationStatus.Succeeded);
+        }
+
+        Exception exception = _completion.Exception switch
+        {
+            { InnerException: not null } aggregate => aggregate.InnerException,
+            { } aggregate => aggregate,
+            null => new InvalidOperationException(
+                "The managed retirement operation faulted without an exception.")
+        };
+        return new(
+            ManagedRetirementOperationStatus.Faulted,
+            exception);
     }
 }
 
@@ -660,9 +1168,7 @@ internal sealed class RootAssemblySnapshot
         }
 
         log.Information(
-            $"Committed {images.Count} root managed assembly image(s) to one " +
-            "immutable RAM snapshot. Extension discovery and execution use the " +
-            "same captured bytes.");
+            $"Committed {images.Count} root managed assembly image(s) to one immutable RAM snapshot.");
         return new(images);
     }
 
@@ -751,8 +1257,7 @@ internal sealed class RootAssemblyResolver : IDisposable
 
         _context.Resolving += Resolve;
         _log.Information(
-            $"Root resolver activated from {snapshot.Images.Count} committed RAM " +
-            "image(s). No root assembly bytes will be reread from disk.");
+            $"Root resolver activated from {snapshot.Images.Count} committed RAM image(s).");
     }
 
     public Assembly LoadRootAssembly(string simpleName)

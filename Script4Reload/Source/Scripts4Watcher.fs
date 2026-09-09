@@ -64,7 +64,6 @@ type Scripts4Watcher(scriptsRoot: string) =
                     value.Dispose())
                 watcher <- Some(createWatcher())
                 errorMessage <- None
-                markDirty()
                 true
             with exceptionValue ->
                 watcher <- None

@@ -1,4 +1,3 @@
-using System.Numerics;
 using Alloc8orStandardNatives.Source;
 
 namespace StandardGameOperations.Source;
@@ -14,25 +13,13 @@ public readonly record struct CombatEngagement(
 public interface ICombatOperations
 {
     bool TryGetTarget(Ped shooter, out Ped target);
-    bool TryResolveEngagement(
-        Ped shooter,
-        out CombatEngagement engagement);
-    bool WasDamagedByWeapon(
-        Entity victim,
-        Ped shooter,
-        uint weaponHash);
+    bool TryResolveEngagement(Ped shooter, out CombatEngagement engagement);
+    bool WasDamagedByWeapon(Entity victim, Ped shooter, uint weaponHash);
     bool WasDamagedByWeapon(
         CombatEngagement engagement,
         uint weaponHash);
     void ClearDamageEvidence(Entity entity);
     void ClearDamageEvidence(CombatEngagement engagement);
-    bool IsImpactOnTargetPath(
-        Ped shooter,
-        Ped target,
-        Vector3 impact,
-        float maximumPerpendicularDistance,
-        float minimumPathFraction,
-        float maximumPathFraction);
 }
 
 internal sealed class CombatOperations(
@@ -95,11 +82,11 @@ internal sealed class CombatOperations(
         _entities.IsValid(victim) &&
         _entities.IsValid(shooter) &&
         StandardNatives.HAS_ENTITY_BEEN_DAMAGED_BY_ENTITY(
-            NativeHandles.ToNative(victim),
-            NativeHandles.ToNativeEntity(shooter),
+            victim.ToNative(),
+            shooter.ToNativeEntity(),
             true) &&
         StandardNatives.HAS_ENTITY_BEEN_DAMAGED_BY_WEAPON(
-            NativeHandles.ToNative(victim),
+            victim.ToNative(),
             weaponHash,
             0);
 
@@ -129,10 +116,8 @@ internal sealed class CombatOperations(
             return;
         }
 
-        StandardNatives.CLEAR_ENTITY_LAST_DAMAGE_ENTITY(
-            NativeHandles.ToNative(entity));
-        StandardNatives.CLEAR_ENTITY_LAST_WEAPON_DAMAGE(
-            NativeHandles.ToNative(entity));
+        StandardNatives.CLEAR_ENTITY_LAST_DAMAGE_ENTITY(entity.ToNative());
+        StandardNatives.CLEAR_ENTITY_LAST_WEAPON_DAMAGE(entity.ToNative());
     }
 
     public void ClearDamageEvidence(CombatEngagement engagement)
@@ -140,62 +125,7 @@ internal sealed class CombatOperations(
         ClearDamageEvidence(_entities.AsEntity(engagement.Victim));
         if (engagement.HasVehicle)
         {
-            ClearDamageEvidence(
-                _entities.AsEntity(engagement.VictimVehicle));
+            ClearDamageEvidence(_entities.AsEntity(engagement.VictimVehicle));
         }
     }
-
-    public bool IsImpactOnTargetPath(
-        Ped shooter,
-        Ped target,
-        Vector3 impact,
-        float maximumPerpendicularDistance,
-        float minimumPathFraction,
-        float maximumPathFraction)
-    {
-        if (!_peds.IsLivingHuman(shooter) ||
-            !_peds.IsLivingHuman(target) ||
-            !IsFinite(impact) ||
-            !float.IsFinite(maximumPerpendicularDistance) ||
-            maximumPerpendicularDistance < 0f ||
-            !float.IsFinite(minimumPathFraction) ||
-            !float.IsFinite(maximumPathFraction) ||
-            minimumPathFraction > maximumPathFraction)
-        {
-            return false;
-        }
-
-        Vector3 start = _peds.GetChestPosition(shooter);
-        Vector3 end = _peds.GetChestPosition(target);
-        Vector3 path = end - start;
-        float pathLengthSquared = path.LengthSquared();
-        if (!float.IsFinite(pathLengthSquared) ||
-            pathLengthSquared <= 0.0001f)
-        {
-            return false;
-        }
-
-        float fraction = Vector3.Dot(impact - start, path) /
-            pathLengthSquared;
-        if (!float.IsFinite(fraction) ||
-            fraction < minimumPathFraction ||
-            fraction > maximumPathFraction)
-        {
-            return false;
-        }
-
-        Vector3 closest = start + path * Math.Clamp(fraction, 0f, 1f);
-        float distanceSquared = Vector3.DistanceSquared(impact, closest);
-        float maximumDistanceSquared =
-            maximumPerpendicularDistance * maximumPerpendicularDistance;
-
-        return float.IsFinite(distanceSquared) &&
-            float.IsFinite(maximumDistanceSquared) &&
-            distanceSquared <= maximumDistanceSquared;
-    }
-
-    private static bool IsFinite(Vector3 value) =>
-        float.IsFinite(value.X) &&
-        float.IsFinite(value.Y) &&
-        float.IsFinite(value.Z);
 }

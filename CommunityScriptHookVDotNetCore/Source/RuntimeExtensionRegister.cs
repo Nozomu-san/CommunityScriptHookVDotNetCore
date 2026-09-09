@@ -9,10 +9,9 @@ internal static class RuntimeExtensionMetadataKeys
     public const string Role = "CSHVDNC.Role";
     public const string Id = "CSHVDNC.Id";
     public const string EntryType = "CSHVDNC.EntryType";
-    public const string ContractMajor = "CSHVDNC.ContractMajor";
-    public const string ContractMinor = "CSHVDNC.ContractMinor";
     public const string Provides = "CSHVDNC.Provides";
     public const string Requires = "CSHVDNC.Requires";
+    public const string ConditionalRequires = "CSHVDNC.ConditionalRequires";
     public const string RuntimeExtensionRole = "RuntimeExtension";
 }
 
@@ -22,6 +21,9 @@ public static class RuntimeCapabilities
     public const string HostFrame = "host.frame";
     public const string RawNative = "host.native.raw";
     public const string NativeAdmissionControl = "host.native.admission";
+    public const string GameThreadFunctions = "host.game-thread.function";
+    public const string GuardedGameThreadFunctions =
+        "host.game-thread.function.guarded";
     public const string CooperativeShutdown = "host.shutdown";
     public const string PackageLifecycle = "package.lifecycle";
     public const string PackageTransitionHost = "package.lifecycle.transition";
@@ -78,8 +80,52 @@ public interface IRawNativeTransport
 {
     RawNativeCallResult Invoke(
         ulong hash,
-        ReadOnlySpan<ulong> arguments,
+        IReadOnlyList<ulong> arguments,
         int resultCount);
+}
+
+public enum GameThreadFunctionCallStatus
+{
+    Success = 0,
+    InvalidRequest = 1,
+    SessionStopping = 5,
+    FunctionFault = 6,
+    AdmissionRejected = 7,
+    GuardRejected = 8
+}
+
+public readonly record struct GameThreadInt32CallResult(
+    GameThreadFunctionCallStatus Status,
+    int Value)
+{
+    public bool IsSuccess => Status is GameThreadFunctionCallStatus.Success;
+}
+
+public readonly record struct GameThreadMemoryGuard(
+    nint Address,
+    ulong Mask,
+    ulong Expected,
+    int Width)
+{
+    public bool IsConfigured =>
+        Address != 0 &&
+        Width is 1 or 2 or 4 or 8;
+
+    public static GameThreadMemoryGuard None { get; } =
+        new(0, 0, 0, 0);
+}
+
+public interface IGameThreadFunctionTransport
+{
+    GameThreadInt32CallResult InvokeInt32(
+        nint functionAddress,
+        nint pointerArgument);
+
+    GameThreadInt32CallResult InvokeInt32Guarded(
+        nint functionAddress,
+        nint pointerArgument,
+        GameThreadMemoryGuard primaryGuard,
+        GameThreadMemoryGuard secondaryGuard);
 }
 
 public interface IRuntimeServiceRegistry
@@ -103,32 +149,40 @@ public readonly record struct RuntimeExtensionFrameContext(
     long PerformanceCounter,
     ulong PerformanceFrequency);
 
+public interface IRuntimeExtensionDependencies
+{
+    void Require(string capability);
+}
+
 public sealed class RuntimeExtensionContext
 {
     internal RuntimeExtensionContext(
         string rootDirectory,
         string scriptsDirectory,
-        IRuntimeServiceRegistry services)
+        IRuntimeServiceRegistry services,
+        IRuntimeExtensionDependencies dependencies)
     {
         RootDirectory = rootDirectory;
         ScriptsDirectory = scriptsDirectory;
         Services = services;
+        Dependencies = dependencies;
     }
 
     public string RootDirectory { get; }
     public string ScriptsDirectory { get; }
     public IRuntimeServiceRegistry Services { get; }
+    public IRuntimeExtensionDependencies Dependencies { get; }
 }
 
 public interface IScript4RuntimeExtension
 {
-    ValueTask InitializeAsync(
+    Task InitializeAsync(
         RuntimeExtensionContext context,
         CancellationToken cancellationToken);
 
     void AdvanceHostFrame(RuntimeExtensionFrameContext context);
 
-    ValueTask ShutdownAsync(CancellationToken cancellationToken);
+    Task ShutdownAsync();
 }
 
 public enum ScriptPackageKind
@@ -140,7 +194,7 @@ public enum ScriptPackageKind
 public enum ScriptLifecycleTransitionReason
 {
     ManualReload,
-    SynchronizedReload
+    AutomaticReload
 }
 
 public sealed record ScriptLifecycleTransitionPlan(
@@ -223,7 +277,8 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
 
     internal IRuntimeServiceRegistry CreateOwnerScope(
         string owner,
-        bool allowNativeAuthority)
+        bool allowNativeAuthority,
+        bool allowGameThreadFunctions)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(owner);
         lock (_gate)
@@ -235,7 +290,11 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
                     "for this GTA process.");
             }
         }
-        return new OwnerServiceView(this, owner, allowNativeAuthority);
+        return new OwnerServiceView(
+            this,
+            owner,
+            allowNativeAuthority,
+            allowGameThreadFunctions);
     }
 
     internal void RevokeOwner(string owner)
@@ -354,16 +413,23 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
         contract == typeof(IRawNativeTransport) ||
         contract == typeof(INativeCallAdmissionControl);
 
+    private static bool IsGameThreadFunctionContract(Type contract) =>
+        contract == typeof(IGameThreadFunctionTransport);
+
     private sealed class OwnerServiceView(
         RuntimeServiceRegistry owner,
         string ownerId,
-        bool allowNativeAuthority) : IRuntimeServiceRegistry
+        bool allowNativeAuthority,
+        bool allowGameThreadFunctions) : IRuntimeServiceRegistry
     {
         public bool TryGet<TService>(
             [NotNullWhen(true)] out TService? service)
             where TService : class
         {
-            if (!allowNativeAuthority && IsNativeAuthorityContract(typeof(TService)))
+            Type contract = typeof(TService);
+            if ((!allowNativeAuthority && IsNativeAuthorityContract(contract)) ||
+                (!allowGameThreadFunctions &&
+                 IsGameThreadFunctionContract(contract)))
             {
                 service = null;
                 return false;
@@ -407,11 +473,11 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
 
 internal sealed record RuntimeExtensionDescriptor(
     string Id,
-    string AssemblyPath,
     string AssemblyName,
     string EntryType,
     IReadOnlyList<string> Provides,
     IReadOnlyList<string> Requires,
+    IReadOnlyList<string> ConditionalRequires,
     IReadOnlyList<string> ReferencedAssemblyNames);
 
 internal static class ManagedAssemblyMetadata
@@ -502,9 +568,6 @@ internal static class ManagedAssemblyMetadata
 
 internal static class RuntimeExtensionDiscovery
 {
-    private const int ContractMajor = 1;
-    private const int ContractMinor = 0;
-
     public static IReadOnlyList<RuntimeExtensionDescriptor> Discover(
         RootAssemblySnapshot snapshot,
         RuntimeLog log)
@@ -572,14 +635,6 @@ internal static class RuntimeExtensionDiscovery
             metadata.GetAssemblyDefinition().Name);
         string id = Required(values, RuntimeExtensionMetadataKeys.Id);
         string entryType = Required(values, RuntimeExtensionMetadataKeys.EntryType);
-        int major = ParseContract(values, RuntimeExtensionMetadataKeys.ContractMajor);
-        int minor = ParseContract(values, RuntimeExtensionMetadataKeys.ContractMinor);
-        if (major != ContractMajor || minor > ContractMinor)
-        {
-            throw new BadImageFormatException(
-                $"Runtime extension '{id}' uses incompatible contract " +
-                $"version {major}.{minor}.");
-        }
 
         HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
         foreach (AssemblyReferenceHandle handle in metadata.AssemblyReferences)
@@ -594,11 +649,11 @@ internal static class RuntimeExtensionDiscovery
 
         return new(
             id,
-            image.Path,
             assemblyName,
             entryType,
             ParseCapabilities(values, RuntimeExtensionMetadataKeys.Provides),
             ParseCapabilities(values, RuntimeExtensionMetadataKeys.Requires),
+            ParseCapabilities(values, RuntimeExtensionMetadataKeys.ConditionalRequires),
             Array.AsReadOnly(
                 [.. references.OrderBy(
                     value => value,
@@ -616,17 +671,6 @@ internal static class RuntimeExtensionDiscovery
                 $"Required runtime-extension metadata '{key}' is missing.");
         }
         return value.Trim();
-    }
-
-    private static int ParseContract(
-        IReadOnlyDictionary<string, string> values,
-        string key)
-    {
-        string text = Required(values, key);
-        return int.TryParse(text, out int value) && value >= 0
-            ? value
-            : throw new BadImageFormatException(
-                $"Runtime-extension metadata '{key}' is invalid.");
     }
 
     private static IReadOnlyList<string> ParseCapabilities(

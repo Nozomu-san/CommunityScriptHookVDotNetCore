@@ -1,5 +1,5 @@
+using System.Diagnostics;
 using System.Reflection;
-using Alloc8orStandardNatives.Source;
 using CommunityScriptHookVDotNetCore.Source;
 
 [assembly: AssemblyMetadata("CSHVDNC.Role", "RuntimeExtension")]
@@ -7,23 +7,22 @@ using CommunityScriptHookVDotNetCore.Source;
 [assembly: AssemblyMetadata(
     "CSHVDNC.EntryType",
     "LocalNativeMemories.Source.LocalNativeMemoriesExtension")]
-[assembly: AssemblyMetadata("CSHVDNC.ContractMajor", "1")]
-[assembly: AssemblyMetadata("CSHVDNC.ContractMinor", "0")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Provides",
-    "memory.ped.invincibility")]
+    "memory.local;memory.entity.pools;memory.entity.identity;memory.ped;memory.vehicle")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Requires",
-    "native.standard")]
+    "host.game-thread.function;host.game-thread.function.guarded")]
 
 namespace LocalNativeMemories.Source;
 
 internal sealed class LocalNativeMemoriesExtension :
     IScript4RuntimeExtension
 {
-    private TargetedEntityMemory? _memory;
+    private LocalMemoryService? _memory;
+    private EntityPools? _pools;
 
-    public ValueTask InitializeAsync(
+    public Task InitializeAsync(
         RuntimeExtensionContext context,
         CancellationToken cancellationToken)
     {
@@ -36,26 +35,67 @@ internal sealed class LocalNativeMemoriesExtension :
                 "LocalNativeMemories is already initialized.");
         }
 
-        IStandardNatives natives =
-            context.Services.GetRequired<IStandardNatives>();
-        TargetedEntityMemory memory = new(natives.GameBuild.Current);
-        PedInvincibilityMemoryService invincibility = new(memory);
+        LocalGameEdition edition = LocalProcess.ResolveEdition();
+        GameMemoryProfile profile = GameMemoryProfile.Resolve(edition);
+        IGameThreadFunctionTransport gameThread =
+            context.Services.GetRequired<IGameThreadFunctionTransport>();
+        LocalMemoryService memory = new();
+        EntityAddressResolver addressResolver = new(memory, profile);
+        PoolBackendResolver poolBackends = new(memory, profile);
+        PoolVerification poolVerification = new(memory, profile);
+        EntityPools pools = new(
+            memory,
+            poolBackends,
+            poolVerification,
+            gameThread);
+        PedMemory peds = new(profile, memory, addressResolver);
+        VehicleMemory vehicles = new(profile, memory, addressResolver);
 
-        context.Services.Register<IPedInvincibilityMemory>(invincibility);
+        context.Services.RegisterRuntimeOnly<ILocalMemory>(memory);
+        context.Services.RegisterRuntimeOnly<ILocalEntityPools>(pools);
+        context.Services.RegisterRuntimeOnly<ILocalEntityIdentity>(pools);
+        context.Services.RegisterRuntimeOnly<IPedLocalMemory>(peds);
+        context.Services.RegisterRuntimeOnly<IVehicleLocalMemory>(vehicles);
+
         _memory = memory;
-        return ValueTask.CompletedTask;
+        _pools = pools;
+        return Task.CompletedTask;
     }
 
     public void AdvanceHostFrame(RuntimeExtensionFrameContext context)
     {
-        _ = context;
+        _pools?.AdvanceHostFrame();
     }
 
-    public ValueTask ShutdownAsync(CancellationToken cancellationToken)
+    public Task ShutdownAsync()
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        _memory?.Dispose();
+        _pools = null;
         _memory = null;
-        return ValueTask.CompletedTask;
+        return Task.CompletedTask;
+    }
+}
+
+internal static class LocalProcess
+{
+    internal static LocalGameEdition ResolveEdition()
+    {
+        using Process process = Process.GetCurrentProcess();
+        string? path = process.MainModule?.FileName;
+        string name = Path.GetFileName(path ?? string.Empty) ?? string.Empty;
+
+        if (name.Equals("GTA5.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return LocalGameEdition.Legacy;
+        }
+
+        if (name.Equals(
+                "GTA5_Enhanced.exe",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return LocalGameEdition.Enhanced;
+        }
+
+        throw new PlatformNotSupportedException(
+            $"Unsupported local process '{name}'.");
     }
 }

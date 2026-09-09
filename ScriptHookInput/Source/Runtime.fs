@@ -2,7 +2,6 @@ namespace ScriptHookInput.Source
 
 open System
 open System.Collections.Generic
-open Alloc8orStandardNatives.Source
 open CommunityScriptHookVDotNetCore.Source
 
 [<StructuralEquality; NoComparison>]
@@ -18,7 +17,6 @@ type internal ObservationEntry(key: ObservationKey, origin: InputOrigin) =
     let mutable state = InputState.Unavailable(0UL, origin)
 
     member _.Key = key
-    member _.References = references
     member _.State = state
 
     member _.AddReference() =
@@ -63,12 +61,13 @@ type internal ObservationEntry(key: ObservationKey, origin: InputOrigin) =
         initialized <- true
 
 [<Sealed>]
-type internal InputRuntime(nativeServices: IStandardNatives) as this =
+type internal InputRuntime() as this =
     let gate = obj()
-    let gameReader = GameInputReader(nativeServices)
+    let gameReader = GameInputReader()
     let deviceReader = new DeviceInputReader()
     let observations = Dictionary<ObservationKey, ObservationEntry>()
     let actions = ResizeArray<InputAction>()
+    let mutable controllerObservationCount = 0
     let mutable frame = InputFrame.Empty
     let mutable pointer = PointerState.Unavailable 0UL
     let mutable disposed = false
@@ -90,6 +89,10 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
             | false, _ ->
                 let created = ObservationEntry(key, origin)
                 observations.Add(key, created)
+                match key with
+                | DeviceKey(InputDeviceKind.Controller, _, _) ->
+                    controllerObservationCount <- controllerObservationCount + 1
+                | _ -> ()
                 created
 
         entry.AddReference()
@@ -97,7 +100,11 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
 
     let release (entry: ObservationEntry) =
         if entry.RemoveReference() = 0 then
-            observations.Remove(entry.Key) |> ignore
+            if observations.Remove(entry.Key) then
+                match entry.Key with
+                | DeviceKey(InputDeviceKind.Controller, _, _) ->
+                    controllerObservationCount <- controllerObservationCount - 1
+                | _ -> ()
 
     let readEntry
         (entry: ObservationEntry)
@@ -135,7 +142,9 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
                     context.HostFrameIndex,
                     foreground)
 
-            deviceReader.Capture frameContext
+            deviceReader.Capture(
+                frameContext,
+                controllerObservationCount > 0)
             pointer <- deviceReader.Pointer
 
             let usingKeyboardAndMouse =
@@ -219,6 +228,10 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
         member _.Create(name, inputs) =
             this.CreateInputAction(InputActionBinding(name, inputs))
 
+        member _.CreateSingle(name, input) =
+            let binding = InputBindingCodec.Parse(input)
+            this.CreateInputAction(InputActionBinding(name, [| binding |]))
+
     interface IDisposable with
         member _.Dispose() =
             lock gate (fun () ->
@@ -228,6 +241,7 @@ type internal InputRuntime(nativeServices: IStandardNatives) as this =
                         action.Detach()
                     actions.Clear()
                     observations.Clear()
+                    controllerObservationCount <- 0
                     frame <- InputFrame.Empty
                     pointer <- PointerState.Unavailable frame.FrameIndex
                     (deviceReader :> IDisposable).Dispose())

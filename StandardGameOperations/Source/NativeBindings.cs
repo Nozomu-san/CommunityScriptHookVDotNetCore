@@ -5,66 +5,38 @@ namespace StandardGameOperations.Source;
 
 internal sealed class NativeBindings
 {
-    private readonly IStandardNatives _natives;
-    private readonly NativeDescriptor _applyDamageToPed;
-    private readonly NativeDescriptor _getLastImpact;
-    private readonly NativeDescriptor _getCombatTarget;
-    private readonly NativeDescriptor _getAmmoInClip;
-    private readonly NativeDescriptor _getNearbyPeds;
+    private readonly IKnownNativeInvoker _known;
+    private readonly ulong _getLastImpact;
+    private readonly ulong _getAmmoInClip;
+    private readonly ulong _getNearbyPeds;
 
-    internal NativeBindings(IStandardNatives natives)
+    internal NativeBindings(
+        IStandardNatives natives,
+        IKnownNativeInvoker known)
     {
-        _natives = natives ?? throw new ArgumentNullException(nameof(natives));
-
-        _applyDamageToPed = Resolve(
-            "APPLY_DAMAGE_TO_PED",
-            NativeAbiType.Void,
-            NativeAbiType.Ped,
-            NativeAbiType.Int32,
-            NativeAbiType.Boolean32,
-            NativeAbiType.Any,
-            NativeAbiType.Hash32);
-
-        _getLastImpact = Resolve(
-            "GET_PED_LAST_WEAPON_IMPACT_COORD",
-            NativeAbiType.Boolean32,
-            NativeAbiType.Ped,
-            NativeAbiType.Vector3Pointer);
-
-        _getCombatTarget = Resolve(
-            "GET_PED_TARGET_FROM_COMBAT_PED",
-            NativeAbiType.Entity,
-            NativeAbiType.Ped,
-            NativeAbiType.Any);
-
-        _getAmmoInClip = Resolve(
-            "GET_AMMO_IN_CLIP",
-            NativeAbiType.Boolean32,
-            NativeAbiType.Ped,
-            NativeAbiType.Hash32,
-            NativeAbiType.Int32Pointer);
-
-        _getNearbyPeds = Resolve(
-            "GET_PED_NEARBY_PEDS",
-            NativeAbiType.Int32,
-            NativeAbiType.Ped,
-            NativeAbiType.AnyPointer,
-            NativeAbiType.Int32);
+        ArgumentNullException.ThrowIfNull(natives);
+        _known = known ?? throw new ArgumentNullException(nameof(known));
+        _getLastImpact = ResolveCallable(
+            natives.Catalog,
+            _known,
+            "GET_PED_LAST_WEAPON_IMPACT_COORD");
+        _getAmmoInClip = ResolveCallable(
+            natives.Catalog,
+            _known,
+            "GET_AMMO_IN_CLIP");
+        _getNearbyPeds = ResolveCallable(
+            natives.Catalog,
+            _known,
+            "GET_PED_NEARBY_PEDS");
     }
 
-    internal void ApplyPedHealthDamage(Ped victim, int damageAmount)
-    {
-        KnownNativeArgument[] arguments =
-        [
-            KnownNativeArgument.Ped(NativeHandles.ToNative(victim)),
-            KnownNativeArgument.Int32(damageAmount),
-            KnownNativeArgument.Boolean(false),
-            KnownNativeArgument.Any(new NativeAny(0)),
-            KnownNativeArgument.Hash32(0)
-        ];
-
-        _ = _natives.Known.Invoke(_applyDamageToPed.Hash, arguments);
-    }
+    internal void ApplyPedHealthDamage(Ped victim, int damageAmount) =>
+        StandardNatives.APPLY_DAMAGE_TO_PED(
+            victim.ToNative(),
+            damageAmount,
+            false,
+            new NativeAny(0),
+            0u);
 
     internal bool TryGetLastImpact(Ped ped, out Vector3 position)
     {
@@ -72,19 +44,17 @@ internal sealed class NativeBindings
         KnownNativeVector3Output output = new();
         KnownNativeArgument[] arguments =
         [
-            KnownNativeArgument.Ped(NativeHandles.ToNative(ped)),
+            KnownNativeArgument.Ped(ped.ToNative()),
             KnownNativeArgument.Vector3Output(output)
         ];
 
-        if (!_natives.Known.Invoke(_getLastImpact.Hash, arguments).AsBoolean())
+        if (!_known.Invoke(_getLastImpact, arguments).AsBoolean())
         {
             return false;
         }
 
         Vector3 value = output.Value;
-        if (!float.IsFinite(value.X) ||
-            !float.IsFinite(value.Y) ||
-            !float.IsFinite(value.Z))
+        if (!IsFinite(value))
         {
             return false;
         }
@@ -95,18 +65,11 @@ internal sealed class NativeBindings
 
     internal bool TryGetCombatTarget(Ped shooter, out Entity target)
     {
-        KnownNativeArgument[] arguments =
-        [
-            KnownNativeArgument.Ped(NativeHandles.ToNative(shooter)),
-            KnownNativeArgument.Any(new NativeAny(0))
-        ];
-
-        KnownNativeResult result = _natives.Known.Invoke(
-            _getCombatTarget.Hash,
-            arguments);
-
-        Alloc8orStandardNatives.Source.Entity native = result.AsEntity();
-        target = new(native.Value);
+        Alloc8orStandardNatives.Source.Entity native =
+            StandardNatives.GET_PED_TARGET_FROM_COMBAT_PED(
+                shooter.ToNative(),
+                new NativeAny(0));
+        target = native.FromNative();
         return target.Value != 0;
     }
 
@@ -119,12 +82,12 @@ internal sealed class NativeBindings
         KnownNativeInt32Output output = new();
         KnownNativeArgument[] arguments =
         [
-            KnownNativeArgument.Ped(NativeHandles.ToNative(ped)),
+            KnownNativeArgument.Ped(ped.ToNative()),
             KnownNativeArgument.Hash32(weaponHash),
             KnownNativeArgument.Int32Output(output)
         ];
 
-        if (!_natives.Known.Invoke(_getAmmoInClip.Hash, arguments).AsBoolean())
+        if (!_known.Invoke(_getAmmoInClip, arguments).AsBoolean())
         {
             return false;
         }
@@ -133,9 +96,7 @@ internal sealed class NativeBindings
         return true;
     }
 
-    internal Ped[] GetNearbyPeds(
-        Ped origin,
-        int maxAmount)
+    internal Ped[] GetNearbyPeds(Ped origin, int maxAmount)
     {
         int capacity = Math.Clamp(maxAmount, 1, 16);
         int[] seed = new int[(capacity * 2) + 2];
@@ -144,15 +105,12 @@ internal sealed class NativeBindings
         KnownNativeInt32BufferOutput output = new(seed);
         KnownNativeArgument[] arguments =
         [
-            KnownNativeArgument.Ped(NativeHandles.ToNative(origin)),
+            KnownNativeArgument.Ped(origin.ToNative()),
             KnownNativeArgument.AnyInt32BufferOutput(output),
             KnownNativeArgument.Int32(-1)
         ];
 
-        int found = _natives.Known.Invoke(
-            _getNearbyPeds.Hash,
-            arguments).AsInt32();
-
+        int found = _known.Invoke(_getNearbyPeds, arguments).AsInt32();
         int count = Math.Clamp(found, 0, capacity);
         if (count == 0)
         {
@@ -172,54 +130,30 @@ internal sealed class NativeBindings
             int handle = values[valueIndex];
             if (handle != 0 && handle != origin.Value)
             {
-                result.Add(new Ped(handle));
+                result.Add(new(handle));
             }
         }
 
         return [.. result];
     }
 
-    private NativeDescriptor Resolve(
-        string name,
-        NativeAbiType returnType,
-        params NativeAbiType[] parameterTypes)
+    private static ulong ResolveCallable(
+        INativeCatalog catalog,
+        IKnownNativeInvoker known,
+        string name)
     {
-        if (!_natives.Catalog.TryGet(name, out NativeDescriptor? descriptor))
+        if (!catalog.TryGet(name, out NativeDescriptor? descriptor))
         {
             throw new InvalidDataException(
                 $"ASN does not contain native '{name}'.");
         }
 
-        GameBuildInfo game = _natives.GameBuild.Current;
-        NativeSignatureVariant variant = descriptor.GetVariant(game.Edition) ??
-            throw new InvalidDataException(
-                $"Native '{name}' has no ABI variant for '{game.Edition}'.");
-
-        if (game.Build < variant.MinimumBuild)
-        {
-            throw new PlatformNotSupportedException(
-                $"Native '{name}' requires build {variant.MinimumBuild}, " +
-                $"but the current build is {game.Build}.");
-        }
-
-        if (variant.ReturnType != returnType ||
-            variant.Parameters.Count != parameterTypes.Length)
-        {
-            throw new InvalidDataException(
-                $"Native '{name}' does not match the expected ABI contract.");
-        }
-
-        for (int index = 0; index < parameterTypes.Length; ++index)
-        {
-            if (variant.Parameters[index].Type != parameterTypes[index])
-            {
-                throw new InvalidDataException(
-                    $"Native '{name}' parameter {index} is " +
-                    $"{variant.Parameters[index].Type}, not " +
-                    $"{parameterTypes[index]}.");
-            }
-        }
-
-        return descriptor;
+        known.Validate(descriptor.Hash);
+        return descriptor.Hash;
     }
+
+    private static bool IsFinite(Vector3 value) =>
+        float.IsFinite(value.X) &&
+        float.IsFinite(value.Y) &&
+        float.IsFinite(value.Z);
 }

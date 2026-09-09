@@ -6,11 +6,15 @@
     <Platforms>x64</Platforms>
     <AssemblyTitle>Script Hook Inputs</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
+    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
+    <FileVersion>09.09.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="Source\Input.fs" />
-    <Compile Include="Source\GameInput.fs" />
+    <Compile Include="Source\InputModel.fs" />
+    <Compile Include="Source\InputParsing.fs" />
+    <Compile Include="Source\InputActions.fs" />
     <Compile Include="Source\DeviceInput.fs" />
+    <Compile Include="Source\GameInput.fs" />
     <Compile Include="Source\Runtime.fs" />
     <Compile Include="Source\Extension.fs" />
   </ItemGroup>

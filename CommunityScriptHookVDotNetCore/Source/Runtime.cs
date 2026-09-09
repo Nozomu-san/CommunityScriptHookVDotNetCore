@@ -29,8 +29,6 @@ internal static class Runtime
 
             files.Log.Information(
                 $"Managed runtime thread: {Environment.CurrentManagedThreadId}.");
-            files.Log.Information(
-                "Frame, raw-native, and cooperative-shutdown bridges are available.");
 
             session.Initialize();
             session.SignalReady();
@@ -48,6 +46,8 @@ internal static class Runtime
     }
 }
 
+internal sealed record ScriptEnvironment(string ScriptsDirectory) : IScriptEnvironment;
+
 internal sealed class RuntimeSession : IDisposable
 {
     private readonly HostRunRequest _request;
@@ -61,6 +61,7 @@ internal sealed class RuntimeSession : IDisposable
     private readonly NativeTransport _native;
     private readonly PackageManager _packages;
     private readonly RuntimeExtensionManager _extensions;
+    private bool _rootInitializationCommitted;
     private bool _initialized;
     private bool _shutdown;
 
@@ -78,15 +79,15 @@ internal sealed class RuntimeSession : IDisposable
         _stopRequested = BorrowEvent(
             request.StopRequestedEvent,
             EventResetMode.ManualReset);
-        _scheduler = new(
-            files.Configuration,
-            request.PerformanceFrequency,
-            files.Log);
+        _scheduler = new(files.Log);
         _native = new(
             request.NativeCall,
             BorrowEvent(request.NativeRequestedEvent, EventResetMode.AutoReset),
             BorrowEvent(request.NativeCompletedEvent, EventResetMode.AutoReset),
             BorrowEvent(request.StopRequestedEvent, EventResetMode.ManualReset));
+        _services.Register<IScriptEnvironment>(
+            new ScriptEnvironment(files.ScriptsDirectory));
+
         _packages = new(
             files.ScriptsDirectory,
             _services.ScriptServices,
@@ -99,6 +100,7 @@ internal sealed class RuntimeSession : IDisposable
 
         _services.RegisterRuntimeOnly<IRawNativeTransport>(_native);
         _services.RegisterRuntimeOnly<INativeCallAdmissionControl>(_native);
+        _services.RegisterRuntimeOnly<IGameThreadFunctionTransport>(_native);
         _services.RegisterRuntimeOnly<IReloadRuntimeHost>(_packages);
     }
 
@@ -110,10 +112,7 @@ internal sealed class RuntimeSession : IDisposable
                 "The managed runtime session is already initialized.");
         }
 
-        _extensions.LoadAndInitialize();
-        _packages.SetUnavailableRuntimeAssemblies(
-            _extensions.UnavailableAssemblyNames);
-        _packages.ActivateInitialPackages();
+        _extensions.PrepareInitialization();
         _initialized = true;
     }
 
@@ -126,7 +125,10 @@ internal sealed class RuntimeSession : IDisposable
         {
             for (;;)
             {
-                switch (WaitHandle.WaitAny(waits))
+                int signaled = WaitHandle.WaitAny(
+                    waits,
+                    _scheduler.GetWaitTimeoutMilliseconds());
+                switch (signaled)
                 {
                     case 0:
                         _log.Information(
@@ -137,9 +139,13 @@ internal sealed class RuntimeSession : IDisposable
                         ProcessFrame();
                         break;
 
+                    case WaitHandle.WaitTimeout:
+                        break;
+
                     default:
                         return BrainRunResult.InternalFailure;
                 }
+
             }
         }
         finally
@@ -171,10 +177,33 @@ internal sealed class RuntimeSession : IDisposable
                     "The host frame mailbox is incompatible.");
             }
 
-            _extensions.AdvanceHostFrame(new(
+            RuntimeExtensionFrameContext extensionFrame = new(
                 frame.FrameIndex,
                 frame.PerformanceCounter,
-                _request.PerformanceFrequency));
+                _request.PerformanceFrequency);
+
+            _extensions.AdvanceInitialization();
+            if (!_extensions.InitializationCompleted)
+            {
+                return;
+            }
+
+            if (!_rootInitializationCommitted)
+            {
+                _packages.SetUnavailableRuntimeAssemblies(
+                    _extensions.UnavailableAssemblyNames);
+                _ = _extensions.DrainNewUnavailableAssemblyNames();
+                _packages.BeginInitialActivation();
+                _rootInitializationCommitted = true;
+            }
+
+            _packages.AdvanceInitialActivation(frame.FrameIndex);
+            if (!_packages.InitialActivationCompleted)
+            {
+                return;
+            }
+
+            _extensions.AdvanceHostFrame(extensionFrame);
             IReadOnlyList<string> unavailableRoots =
                 _extensions.DrainNewUnavailableAssemblyNames();
             if (unavailableRoots.Count != 0)
@@ -182,12 +211,27 @@ internal sealed class RuntimeSession : IDisposable
                 _packages.QuarantineAssemblyReferences(unavailableRoots);
             }
             _packages.AdvanceTransitionOperations(frame.FrameIndex);
-            _scheduler.Dispatch(frame, _packages.Tick);
+            _scheduler.ObserveHostFrame(frame.FrameIndex);
+            _scheduler.Start(frame.FrameIndex);
+            DispatchScriptTickIfDue();
         }
         finally
         {
             _frameCompleted.Set();
         }
+    }
+
+
+    private void DispatchScriptTickIfDue()
+    {
+        if (!_rootInitializationCommitted ||
+            !_packages.InitialActivationCompleted ||
+            !_scheduler.IsStarted)
+        {
+            return;
+        }
+
+        _scheduler.DispatchIfDue(_packages.Tick);
     }
 
     private void Shutdown()
@@ -200,9 +244,12 @@ internal sealed class RuntimeSession : IDisposable
 
         if (_initialized)
         {
-            _packages.BeginShutdown();
-            _packages.StopAll(ScriptStopReason.RuntimeShutdown);
-            _extensions.Shutdown();
+            Task packageShutdown = _packages.ShutdownAsync(
+                ScriptStopReason.RuntimeShutdown);
+            Task extensionShutdown = _extensions.ShutdownAsync();
+            Task.WhenAll(packageShutdown, extensionShutdown)
+                .GetAwaiter()
+                .GetResult();
         }
     }
 
@@ -218,20 +265,39 @@ internal sealed class RuntimeSession : IDisposable
     }
 }
 
-internal sealed class NativeTransport(
-    nint mailbox,
-    EventWaitHandle requested,
-    EventWaitHandle completed,
-    EventWaitHandle stopRequested) :
+internal sealed class NativeTransport :
     IRawNativeTransport,
     INativeCallAdmissionControl,
+    IGameThreadFunctionTransport,
     IDisposable
 {
     private readonly Lock _gate = new();
-    private readonly WaitHandle[] _waits = [stopRequested, completed];
+    private readonly nint _mailbox;
+    private readonly EventWaitHandle _requested;
+    private readonly EventWaitHandle _completed;
+    private readonly EventWaitHandle _stopRequested;
+    private readonly WaitHandle[] _waits;
     private INativeCallAdmissionPolicy? _admissionPolicy;
     private ulong _admissionGeneration;
     private ulong _requestId;
+
+    public NativeTransport(
+        nint mailbox,
+        EventWaitHandle requested,
+        EventWaitHandle completed,
+        EventWaitHandle stopRequested)
+    {
+        ArgumentOutOfRangeException.ThrowIfZero(mailbox);
+        ArgumentNullException.ThrowIfNull(requested);
+        ArgumentNullException.ThrowIfNull(completed);
+        ArgumentNullException.ThrowIfNull(stopRequested);
+
+        _mailbox = mailbox;
+        _requested = requested;
+        _completed = completed;
+        _stopRequested = stopRequested;
+        _waits = [_stopRequested, _completed];
+    }
 
     public IDisposable Install(INativeCallAdmissionPolicy policy)
     {
@@ -253,10 +319,11 @@ internal sealed class NativeTransport(
 
     public RawNativeCallResult Invoke(
         ulong hash,
-        ReadOnlySpan<ulong> arguments,
+        IReadOnlyList<ulong> arguments,
         int resultCount)
     {
-        if (arguments.Length > HostContract.MaximumNativeArguments)
+        ArgumentNullException.ThrowIfNull(arguments);
+        if (arguments.Count > HostContract.MaximumNativeArguments)
         {
             throw new ArgumentOutOfRangeException(nameof(arguments));
         }
@@ -264,9 +331,22 @@ internal sealed class NativeTransport(
         {
             throw new ArgumentOutOfRangeException(nameof(resultCount));
         }
-
+        if (!ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+        {
+            return new(
+                RawNativeCallStatus.AdmissionRejected,
+                []);
+        }
+        ScriptExecutionMetricsContext.RecordNativeCall();
         lock (_gate)
         {
+            if (!ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+            {
+                return new(
+                    RawNativeCallStatus.AdmissionRejected,
+                    []);
+            }
+
             INativeCallAdmissionPolicy? policy = _admissionPolicy;
             if (policy is null)
             {
@@ -280,7 +360,7 @@ internal sealed class NativeTransport(
             {
                 admission = policy.Evaluate(
                     hash,
-                    arguments.Length,
+                    arguments.Count,
                     resultCount);
             }
             catch
@@ -298,40 +378,51 @@ internal sealed class NativeTransport(
             }
 
             Marshal.WriteInt32(
-                mailbox,
+                _mailbox,
                 HostContract.NativeSizeOffset,
                 HostContract.NativeMailboxSize);
-            Marshal.WriteInt32(
-                mailbox,
+            Marshal.WriteInt16(
+                _mailbox,
                 HostContract.NativeArgumentCountOffset,
-                arguments.Length);
+                checked((short)arguments.Count));
+            Marshal.WriteInt16(
+                _mailbox,
+                HostContract.NativeOperationOffset,
+                (short)HostCallOperation.ScriptNative);
             Marshal.WriteInt32(
-                mailbox,
+                _mailbox,
                 HostContract.NativeRequestedResultCountOffset,
                 resultCount);
             Marshal.WriteInt32(
-                mailbox,
+                _mailbox,
                 HostContract.NativeStatusOffset,
                 (int)NativeCallStatus.Pending);
             Marshal.WriteInt64(
-                mailbox,
+                _mailbox,
                 HostContract.NativeRequestIdOffset,
                 unchecked((long)++_requestId));
             Marshal.WriteInt64(
-                mailbox,
+                _mailbox,
                 HostContract.NativeHashOffset,
                 unchecked((long)hash));
 
-            for (int index = 0; index < arguments.Length; ++index)
+            for (int index = 0; index < arguments.Count; ++index)
             {
                 Marshal.WriteInt64(
-                    mailbox,
+                    _mailbox,
                     HostContract.NativeArgumentsOffset + index * sizeof(ulong),
                     unchecked((long)arguments[index]));
             }
 
-            requested.Set();
-            if (WaitHandle.WaitAny(_waits) == 0)
+            if (!ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+            {
+                return new(
+                    RawNativeCallStatus.AdmissionRejected,
+                    []);
+            }
+
+            _requested.Set();
+            if (WaitForCompletion() == 0)
             {
                 return new(
                     RawNativeCallStatus.SessionStopping,
@@ -339,7 +430,7 @@ internal sealed class NativeTransport(
             }
 
             NativeCallStatus status = (NativeCallStatus)Marshal.ReadInt32(
-                mailbox,
+                _mailbox,
                 HostContract.NativeStatusOffset);
             ulong[] results = new ulong[resultCount];
             if (status == NativeCallStatus.Success)
@@ -347,7 +438,7 @@ internal sealed class NativeTransport(
                 for (int index = 0; index < resultCount; ++index)
                 {
                     results[index] = unchecked((ulong)Marshal.ReadInt64(
-                        mailbox,
+                        _mailbox,
                         HostContract.NativeResultsOffset + index * sizeof(ulong)));
                 }
             }
@@ -356,6 +447,231 @@ internal sealed class NativeTransport(
                 results);
         }
     }
+
+    public GameThreadInt32CallResult InvokeInt32(
+        nint functionAddress,
+        nint pointerArgument)
+    {
+        if (functionAddress == 0 ||
+            pointerArgument == 0 ||
+            !ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+        {
+            return new(
+                GameThreadFunctionCallStatus.AdmissionRejected,
+                0);
+        }
+
+        ScriptExecutionMetricsContext.RecordNativeCall();
+        lock (_gate)
+        {
+            if (!ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+            {
+                return new(
+                    GameThreadFunctionCallStatus.AdmissionRejected,
+                    0);
+            }
+
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeSizeOffset,
+                HostContract.NativeMailboxSize);
+            Marshal.WriteInt16(
+                _mailbox,
+                HostContract.NativeArgumentCountOffset,
+                1);
+            Marshal.WriteInt16(
+                _mailbox,
+                HostContract.NativeOperationOffset,
+                (short)HostCallOperation.Int32FunctionOnePointer);
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeRequestedResultCountOffset,
+                1);
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeStatusOffset,
+                (int)NativeCallStatus.Pending);
+            Marshal.WriteInt64(
+                _mailbox,
+                HostContract.NativeRequestIdOffset,
+                unchecked((long)++_requestId));
+            Marshal.WriteInt64(
+                _mailbox,
+                HostContract.NativeHashOffset,
+                functionAddress.ToInt64());
+            Marshal.WriteInt64(
+                _mailbox,
+                HostContract.NativeArgumentsOffset,
+                pointerArgument.ToInt64());
+
+            _requested.Set();
+            if (WaitForCompletion() == 0)
+            {
+                return new(
+                    GameThreadFunctionCallStatus.SessionStopping,
+                    0);
+            }
+
+            NativeCallStatus status = (NativeCallStatus)Marshal.ReadInt32(
+                _mailbox,
+                HostContract.NativeStatusOffset);
+            int value = status is NativeCallStatus.Success
+                ? Marshal.ReadInt32(
+                    _mailbox,
+                    HostContract.NativeResultsOffset)
+                : 0;
+
+            return new(
+                status switch
+                {
+                    NativeCallStatus.Success =>
+                        GameThreadFunctionCallStatus.Success,
+                    NativeCallStatus.SessionStopping =>
+                        GameThreadFunctionCallStatus.SessionStopping,
+                    NativeCallStatus.FunctionFault =>
+                        GameThreadFunctionCallStatus.FunctionFault,
+                    _ => GameThreadFunctionCallStatus.InvalidRequest
+                },
+                value);
+        }
+    }
+
+    public GameThreadInt32CallResult InvokeInt32Guarded(
+        nint functionAddress,
+        nint pointerArgument,
+        GameThreadMemoryGuard primaryGuard,
+        GameThreadMemoryGuard secondaryGuard)
+    {
+        if (functionAddress == 0 ||
+            pointerArgument == 0 ||
+            !primaryGuard.IsConfigured ||
+            !IsValidGuard(primaryGuard) ||
+            (secondaryGuard.Address != 0 &&
+             (!secondaryGuard.IsConfigured ||
+              !IsValidGuard(secondaryGuard))) ||
+            !ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+        {
+            return new(
+                GameThreadFunctionCallStatus.AdmissionRejected,
+                0);
+        }
+
+        ScriptExecutionMetricsContext.RecordNativeCall();
+        lock (_gate)
+        {
+            if (!ManagedLifecycleAuthorityContext.AllowsNativeCalls)
+            {
+                return new(
+                    GameThreadFunctionCallStatus.AdmissionRejected,
+                    0);
+            }
+
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeSizeOffset,
+                HostContract.NativeMailboxSize);
+            Marshal.WriteInt16(
+                _mailbox,
+                HostContract.NativeArgumentCountOffset,
+                9);
+            Marshal.WriteInt16(
+                _mailbox,
+                HostContract.NativeOperationOffset,
+                (short)HostCallOperation.Int32FunctionOneGuardedObjectPointer);
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeRequestedResultCountOffset,
+                1);
+            Marshal.WriteInt32(
+                _mailbox,
+                HostContract.NativeStatusOffset,
+                (int)NativeCallStatus.Pending);
+            Marshal.WriteInt64(
+                _mailbox,
+                HostContract.NativeRequestIdOffset,
+                unchecked((long)++_requestId));
+            Marshal.WriteInt64(
+                _mailbox,
+                HostContract.NativeHashOffset,
+                functionAddress.ToInt64());
+
+            WriteGuardedArgument(0, unchecked((ulong)(nuint)pointerArgument));
+            WriteGuardedArgument(
+                1,
+                unchecked((ulong)(nuint)primaryGuard.Address));
+            WriteGuardedArgument(2, primaryGuard.Mask);
+            WriteGuardedArgument(3, primaryGuard.Expected);
+            WriteGuardedArgument(4, checked((ulong)primaryGuard.Width));
+            WriteGuardedArgument(
+                5,
+                unchecked((ulong)(nuint)secondaryGuard.Address));
+            WriteGuardedArgument(6, secondaryGuard.Mask);
+            WriteGuardedArgument(7, secondaryGuard.Expected);
+            WriteGuardedArgument(
+                8,
+                secondaryGuard.Address == 0
+                    ? 0
+                    : checked((ulong)secondaryGuard.Width));
+
+            _requested.Set();
+            if (WaitForCompletion() == 0)
+            {
+                return new(
+                    GameThreadFunctionCallStatus.SessionStopping,
+                    0);
+            }
+
+            NativeCallStatus status = (NativeCallStatus)Marshal.ReadInt32(
+                _mailbox,
+                HostContract.NativeStatusOffset);
+            int value = status is NativeCallStatus.Success
+                ? Marshal.ReadInt32(
+                    _mailbox,
+                    HostContract.NativeResultsOffset)
+                : 0;
+
+            return new(
+                status switch
+                {
+                    NativeCallStatus.Success =>
+                        GameThreadFunctionCallStatus.Success,
+                    NativeCallStatus.SessionStopping =>
+                        GameThreadFunctionCallStatus.SessionStopping,
+                    NativeCallStatus.FunctionFault =>
+                        GameThreadFunctionCallStatus.FunctionFault,
+                    NativeCallStatus.GuardRejected =>
+                        GameThreadFunctionCallStatus.GuardRejected,
+                    _ => GameThreadFunctionCallStatus.InvalidRequest
+                },
+                value);
+        }
+    }
+
+    private int WaitForCompletion() =>
+        WaitHandle.WaitAny(_waits);
+
+    private static bool IsValidGuard(GameThreadMemoryGuard guard)
+    {
+        ulong widthMask = guard.Width switch
+        {
+            1 => byte.MaxValue,
+            2 => ushort.MaxValue,
+            4 => uint.MaxValue,
+            8 => ulong.MaxValue,
+            _ => 0
+        };
+
+        return widthMask != 0 &&
+               (guard.Mask & ~widthMask) == 0 &&
+               (guard.Expected & ~guard.Mask) == 0;
+    }
+
+    private void WriteGuardedArgument(int index, ulong value) =>
+        Marshal.WriteInt64(
+            _mailbox,
+            HostContract.NativeArgumentsOffset + index * sizeof(ulong),
+            unchecked((long)value));
+
 
     private void RemoveAdmissionPolicy(ulong generation)
     {
@@ -380,9 +696,9 @@ internal sealed class NativeTransport(
             ++_admissionGeneration;
         }
 
-        stopRequested.Dispose();
-        completed.Dispose();
-        requested.Dispose();
+        _stopRequested.Dispose();
+        _completed.Dispose();
+        _requested.Dispose();
     }
 
     private sealed class AdmissionLease(

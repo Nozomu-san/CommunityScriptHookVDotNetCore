@@ -8,17 +8,12 @@ namespace CommunityScriptHookVDotNetCore.Source;
 
 internal sealed record PackageDescriptor(
     string Name,
-    string Directory,
     ScriptPackageKind Kind,
     string? EntryAssembly,
     IReadOnlyList<string> ScriptTypeNames,
-    IReadOnlyList<string> AssemblyFiles,
     IReadOnlyDictionary<string, string> AssemblyPathsByName,
     IReadOnlyList<string> ReferencedAssemblyNames,
-    IReadOnlyList<string> DependencyPackageNames)
-{
-    public static int PackageLocalLibraryCount => 0;
-}
+    IReadOnlyList<string> DependencyPackageNames);
 
 internal sealed record PackageAssemblyImage(
     string Path,
@@ -41,7 +36,6 @@ internal sealed record StagedPackageImage(
     IReadOnlyList<PackageAssemblyImage> Assemblies);
 
 internal sealed record StagedReloadImage(
-    IReadOnlyList<string> TargetPackages,
     IReadOnlyDictionary<string, StagedPackageImage> Packages,
     IReadOnlyList<PackageDescriptor> Catalog);
 
@@ -263,40 +257,6 @@ internal static class PackageDiscovery
     private const string ScriptTypeName = "Script4";
     private const string RawNativeTransportTypeName = "IRawNativeTransport";
 
-    public static IReadOnlyList<PackageDescriptor> Discover(
-        string scriptsDirectory,
-        RuntimeLog log)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(scriptsDirectory);
-        ArgumentNullException.ThrowIfNull(log);
-
-        string root = Path.GetFullPath(scriptsDirectory);
-        Directory.CreateDirectory(root);
-        EnsureFlatAssemblyLayout(root);
-
-        List<PackageDescriptor> discovered = [];
-        foreach (string assemblyPath in Directory
-                     .EnumerateFiles(
-                         root,
-                         "*.dll",
-                         SearchOption.TopDirectoryOnly)
-                     .OrderBy(
-                         path => path,
-                         StringComparer.OrdinalIgnoreCase))
-        {
-            PackageDescriptor? descriptor = InspectPackage(
-                root,
-                assemblyPath,
-                log);
-            if (descriptor is not null)
-            {
-                discovered.Add(descriptor);
-            }
-        }
-
-        return ResolveDependencies(discovered);
-    }
-
     internal static PackageDescriptor? InspectPackageImages(
         string scriptsDirectory,
         IReadOnlyList<PackageAssemblyImage> images,
@@ -335,7 +295,7 @@ internal static class PackageDiscovery
                 exception);
         }
 
-        return BuildDescriptor(root, inspection, log);
+        return BuildDescriptor(inspection, log);
     }
 
     internal static IReadOnlyList<PackageDescriptor> ResolveDependencies(
@@ -511,39 +471,7 @@ internal static class PackageDiscovery
                 StringComparer.OrdinalIgnoreCase)]);
     }
 
-    private static PackageDescriptor? InspectPackage(
-        string scriptsRoot,
-        string assemblyPath,
-        RuntimeLog log)
-    {
-        ValidateDirectAssemblyPath(scriptsRoot, assemblyPath);
-
-        AssemblyInspection inspection;
-        try
-        {
-            inspection = InspectAssembly(assemblyPath);
-        }
-        catch (Exception exception)
-        {
-            log.Warning(
-                $"Assembly '{Path.GetFileName(assemblyPath)}' could not be " +
-                $"inspected: {exception.Message}");
-            return null;
-        }
-
-        try
-        {
-            return BuildDescriptor(scriptsRoot, inspection, log);
-        }
-        catch (BadImageFormatException exception)
-        {
-            log.Error(exception.Message);
-            return null;
-        }
-    }
-
     private static PackageDescriptor? BuildDescriptor(
-        string scriptsRoot,
         AssemblyInspection inspection,
         RuntimeLog log)
     {
@@ -601,10 +529,7 @@ internal static class PackageDiscovery
                 $"entry point '{inspection.ForbiddenNativeImport}'.");
         }
 
-        string fullRoot = Path.GetFullPath(scriptsRoot);
         string fullAssemblyPath = Path.GetFullPath(inspection.Path);
-        IReadOnlyList<string> assemblyFiles =
-            Array.AsReadOnly([fullAssemblyPath]);
         IReadOnlyDictionary<string, string> assemblyPathsByName =
             new ReadOnlyDictionary<string, string>(
                 new Dictionary<string, string>(
@@ -627,13 +552,11 @@ internal static class PackageDiscovery
 
         return new(
             assemblyName,
-            fullRoot,
             executable
                 ? ScriptPackageKind.Executable
                 : ScriptPackageKind.Library,
             executable ? fullAssemblyPath : null,
             inspection.ScriptTypeNames,
-            assemblyFiles,
             assemblyPathsByName,
             references,
             DependencyPackageNames: []);
@@ -677,16 +600,6 @@ internal static class PackageDiscovery
             throw new InvalidDataException(
                 $"Assembly '{assemblyPath}' is not a direct scripts4 DLL.");
         }
-    }
-
-    private static AssemblyInspection InspectAssembly(string path)
-    {
-        using FileStream stream = File.Open(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.ReadWrite | FileShare.Delete);
-        return InspectAssembly(path, stream);
     }
 
     private static AssemblyInspection InspectAssembly(
