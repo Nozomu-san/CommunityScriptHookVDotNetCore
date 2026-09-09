@@ -1,3 +1,6 @@
 [submodule "Alloc8orStandardNatives/Source/Json"]
 	path = Alloc8orStandardNatives/Source/Json
 	url = https://github.com/alloc8or/gta5-nativedb-data.git
+[submodule "CEventGenerator/Source/MinHook"]
+	path = CEventGenerator/Source/MinHook
+	url = https://github.com/TsudaKageyu/minhook.git
