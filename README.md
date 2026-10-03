@@ -17,28 +17,28 @@
 - Contract based design: In order to recognise other infrastructures, contracts are mode to be recognised instead of naming, so naming no longer matter.
 
 ### Host
-Importance: Mandatory
-Role: Work as a powerhouse for .NET Core and some low level executions from original Script Hook V, serve as one-time written, many-times reused . The main role on this level is just call low level executions & host .NET Core.
+- Importance: Mandatory
+- Role: Work as a powerhouse for .NET Core and some low level executions from original Script Hook V, serve as one-time written, many-times reused . The main role on this level is just call low level executions & host .NET Core.
 
 ### Central Brain
-Importance: Mandatory
-Role: Use tickrates to manage lifetime of inherited classes. If classes shouldever fail, they will be retired and no longer available on lifetime. Starting with scripts4 folder, any file .dll does not have any inherited class are recognied as library, 1 or more classes will be recognised as inherited classes. However collapse ecosystem is managed on class-designed, rather than entire content from file .dll fails. If classes fail, any other classes does not require from collapsed still work normally.
+- Importance: Mandatory
+- Role: Use tickrates to manage lifetime of inherited classes. If classes shouldever fail, they will be retired and no longer available on lifetime. Starting with scripts4 folder, any file .dll does not have any inherited class are recognied as library, 1 or more classes will be recognised as inherited classes. However collapse ecosystem is managed on class-designed, rather than entire content from file .dll fails. If classes fail, any other classes does not require from collapsed still work normally.
 
 ### Extended Contents
-Importance: Code-based
-Role: Extended contents formerly seen [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), now been split on many contents & types to operate.
+- Importance: Code-based
+- Role: Extended contents formerly seen [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), now been split on many contents & types to operate.
 
 ### Dynamic Library
-Importance: Code-based
-Role: Same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), this is where you want to commonize contents.
+- Importance: Code-based
+- Role: Same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), this is where you want to commonize contents.
 
 ### Inherited Class
-Importance: Code-based
-Role: Main contents on modding, same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced).
+- Importance: Code-based
+- Role: Main contents on modding, same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced).
 
 ### Human Readables
-Importance: Optional
-Role: Such as readable files like json, log, ini, etc... which mod can either read to operate or read-only kind.
+- Importance: Optional
+- Role: Such as readable files like json, log, ini, etc... which mod can either read to operate or read-only kind.
 
 ## Components
 
