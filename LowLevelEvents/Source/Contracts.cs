@@ -8,6 +8,11 @@ public interface ILowLevelSubscription<T> : IDisposable
     bool TryRead([MaybeNullWhen(false)] out T value);
 }
 
+public interface ILowLevelListenerSubscription : IDisposable
+{
+    ulong FaultCount { get; }
+}
+
 public interface ILowLevelEventContinuity
 {
     ulong ContinuityRevision { get; }
@@ -21,8 +26,13 @@ public interface ILowLevelEventStream : ILowLevelEventContinuity
     ulong NativeDroppedCount { get; }
     ulong ManagedDroppedCount { get; }
     LowLevelEventDiagnostics Diagnostics { get; }
+    IReadOnlyList<GameEventDescriptor> Catalog { get; }
     ILowLevelSubscription<RawLowLevelEvent> SubscribeRaw(
         IEnumerable<uint> eventIds,
+        int capacity = 256);
+
+    ILowLevelSubscription<RawLowLevelEvent> SubscribeCatalog(
+        IEnumerable<string> eventNames,
         int capacity = 256);
 }
 
@@ -37,7 +47,13 @@ public interface ILowLevelWeaponEventStream : ILowLevelEventContinuity
     ILowLevelSubscription<GunAimedAtEvent> SubscribeGunAimedAt(
         int capacity = 256);
 
+    ILowLevelListenerSubscription ListenGunAimedAt(
+        Action<GunAimedAtEvent> listener);
+
     ILowLevelSubscription<GunShotEvent> SubscribeGunShots(
+        int capacity = 256);
+
+    ILowLevelSubscription<GunShotWhizzedByEvent> SubscribeGunShotWhizzedBy(
         int capacity = 256);
 
     ILowLevelSubscription<BulletImpactEvent> SubscribeBulletImpacts(

@@ -40,7 +40,7 @@ internal sealed class DamageOperations(
             _peds.IsLivingHuman(victim) &&
             _peds.CanReceiveSyntheticDamage(victim))
         {
-            _known.ApplyPedHealthDamage(victim, damageAmount);
+            NativeBindings.ApplyPedHealthDamage(victim, damageAmount);
         }
     }
 

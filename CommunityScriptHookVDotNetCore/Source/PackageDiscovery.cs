@@ -68,7 +68,7 @@ internal static class PackageImageCapture
             cancellationToken.ThrowIfCancellationRequested();
             string root = Path.GetFullPath(scriptsDirectory);
             Dictionary<string, (string AssemblyPath, string? SymbolsPath)>
-                files = new(StringComparer.OrdinalIgnoreCase);
+                files = [with(StringComparer.OrdinalIgnoreCase)];
 
             foreach (string packageName in packageNames)
             {
@@ -113,7 +113,7 @@ internal static class PackageImageCapture
             }
 
             Dictionary<string, byte[]> bytes =
-                new(StringComparer.OrdinalIgnoreCase);
+                [with(StringComparer.OrdinalIgnoreCase)];
             foreach (CaptureFile file in opened)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -124,7 +124,7 @@ internal static class PackageImageCapture
             }
 
             Dictionary<string, CapturedPackageImage> packages =
-                new(StringComparer.OrdinalIgnoreCase);
+                [with(StringComparer.OrdinalIgnoreCase)];
             foreach (KeyValuePair<
                          string,
                          (string AssemblyPath, string? SymbolsPath)> pair in files)
@@ -303,8 +303,8 @@ internal static class PackageDiscovery
     {
         ArgumentNullException.ThrowIfNull(packages);
 
-        Dictionary<string, PackageDescriptor> byPackageName = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, PackageDescriptor> byPackageName = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach (PackageDescriptor package in packages)
         {
             if (!byPackageName.TryAdd(package.Name, package))
@@ -315,8 +315,8 @@ internal static class PackageDiscovery
             }
         }
 
-        Dictionary<string, string> assemblyOwners = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> assemblyOwners = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach (PackageDescriptor package in packages)
         {
             foreach (string assemblyName in package.AssemblyPathsByName.Keys)
@@ -337,12 +337,11 @@ internal static class PackageDiscovery
             }
         }
 
-        Dictionary<string, string[]> directDependencies = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string[]> directDependencies = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach (PackageDescriptor package in packages)
         {
-            HashSet<string> dependencies = new(
-                StringComparer.OrdinalIgnoreCase);
+            HashSet<string> dependencies = [with(StringComparer.OrdinalIgnoreCase)];
             foreach (string reference in package.ReferencedAssemblyNames)
             {
                 if (package.AssemblyPathsByName.ContainsKey(reference) ||
@@ -381,8 +380,8 @@ internal static class PackageDiscovery
                     StringComparer.OrdinalIgnoreCase)];
         }
 
-        Dictionary<string, byte> visitState = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, byte> visitState = [with(
+            StringComparer.OrdinalIgnoreCase)];
         List<string> visitStack = [];
 
         void VisitDependency(string packageName)
@@ -431,8 +430,7 @@ internal static class PackageDiscovery
         List<PackageDescriptor> resolved = [];
         foreach (PackageDescriptor package in packages)
         {
-            HashSet<string> transitive = new(
-                StringComparer.OrdinalIgnoreCase);
+            HashSet<string> transitive = [with(StringComparer.OrdinalIgnoreCase)];
             Queue<string> pending = new(directDependencies[package.Name]);
             while (pending.Count != 0)
             {
@@ -658,8 +656,7 @@ internal static class PackageDiscovery
             }
         }
 
-        HashSet<string> referencedAssemblies = new(
-            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> referencedAssemblies = [with(StringComparer.OrdinalIgnoreCase)];
         foreach (AssemblyReferenceHandle handle in metadata.AssemblyReferences)
         {
             AssemblyReference reference = metadata.GetAssemblyReference(handle);

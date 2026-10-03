@@ -279,7 +279,7 @@ public sealed class KnownNativeInt32BufferOutput
         }
 
         _initialValues = [.. initialValues];
-        Values = new ReadOnlyMemory<int>([.. initialValues]);
+        Values = new([.. initialValues]);
     }
 
     public ReadOnlyMemory<int> Values { get; internal set; }
@@ -662,7 +662,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         _entries = entries;
         Identity = identity;
         _byName = new(entries.Length, StringComparer.Ordinal);
-        _byHash = new(entries.Length);
+        _byHash = [with(entries.Length)];
 
         foreach (NativeDescriptor descriptor in entries)
         {
@@ -868,7 +868,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
         {
             NativeAbiType type = ReadAbiType(reader);
             string name = GetString(strings, ReadVarUInt32(reader));
-            parameters[index] = new NativeParameterDescriptor(name, type);
+            parameters[index] = new(name, type);
         }
 
         return parameters;
@@ -963,7 +963,7 @@ internal sealed class Int32BufferOutputBinding(
     {
         int[] values = new int[_output.InitialValues.Length];
         Marshal.Copy(address, values, 0, values.Length);
-        _output.Values = new ReadOnlyMemory<int>(values);
+        _output.Values = new(values);
     }
 }
 
@@ -1514,7 +1514,7 @@ internal sealed class KnownNativeInvoker(
                 result.Status);
         }
 
-        return new KnownNativeResult(
+        return new(
             descriptor,
             result.Variant,
             result.Results);

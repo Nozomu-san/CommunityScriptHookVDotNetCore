@@ -19,34 +19,22 @@ internal static class EventCatalog
         MeleeAction,
         GunShot,
         GunShotBulletImpact,
+        GunShotWhizzedBy,
         EntityDamaged
     ];
 
     internal static IEnumerable<uint> GetDetailedEventIds() => DetailedIds;
 
-    internal static string? ResolveName(uint _, uint eventId)
-    {
-        if (eventId == NativeAbi.EntityDamageMetadataEventId)
+    internal static string? ResolveSyntheticName(uint eventId) =>
+        eventId switch
         {
-            return "EntityDamageMetadata";
-        }
-
-        return eventId switch
-        {
-            Damage => "CEventDamage",
-            GunAimedAt => "CEventGunAimedAt",
-            MeleeAction => "CEventMeleeAction",
-            ShockingGunshotFired => "CEventShockingGunshotFired",
-            ShockingVisibleWeapon => "CEventShockingVisibleWeapon",
-            GunShot => "CEventGunShot",
-            GunShotBulletImpact => "CEventGunShotBulletImpact",
-            GunShotWhizzedBy => "CEventGunShotWhizzedBy",
-            EntityDamaged => "CEventEntityDamaged",
+            NativeAbi.EntityDamageMetadataEventId => "EntityDamageMetadata",
             _ => null
         };
-    }
 
-    internal static bool RequiresEntityIdentity(uint eventId) =>
+    internal static bool RequiresEntityIdentity(
+        uint eventId,
+        uint catalogEventId) =>
         eventId is Damage or
             GunAimedAt or
             MeleeAction or
@@ -56,5 +44,6 @@ internal static class EventCatalog
             GunShotBulletImpact or
             GunShotWhizzedBy or
             EntityDamaged or
-            NativeAbi.EntityDamageMetadataEventId;
+            NativeAbi.EntityDamageMetadataEventId ||
+        catalogEventId != 0;
 }

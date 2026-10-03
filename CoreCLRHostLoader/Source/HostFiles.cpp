@@ -73,8 +73,14 @@ namespace CoreCLRHostLoader
             std::wstring_view value,
             std::wstring_view suffix) noexcept
         {
-            return value.size() >= suffix.size() &&
-                EqualsIgnoreCase(value.substr(value.size() - suffix.size()), suffix);
+            return std::ranges::ends_with(
+                value,
+                suffix,
+                [](wchar_t leftCharacter, wchar_t rightCharacter)
+                {
+                    return std::towlower(leftCharacter) ==
+                        std::towlower(rightCharacter);
+                });
         }
 
         [[nodiscard]]

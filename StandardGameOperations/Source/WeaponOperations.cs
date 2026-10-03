@@ -13,6 +13,11 @@ public interface IWeaponOperations
     bool TryGetAmmoInClip(Ped ped, uint weaponHash, out int ammo);
     int GetMaxAmmoInClip(Ped ped, uint weaponHash);
     bool TryGetLastImpact(Ped ped, out Vector3 position);
+    bool IsReadyToShoot(Ped ped);
+    bool IsWeaponInHand(Ped ped);
+    bool TryGetCurrentMaximumRange(Ped ped, out float range);
+    int GetDamageType(uint weaponHash);
+    bool TryGetTimeBetweenShots(uint weaponHash, out float seconds);
     bool TryGetDamage(
         uint weaponHash,
         out float damage,
@@ -98,6 +103,76 @@ internal sealed class WeaponOperations(
         position = default;
         return _entities.IsValid(ped) &&
             _known.TryGetLastImpact(ped, out position);
+    }
+
+    public bool IsReadyToShoot(Ped ped) =>
+        _entities.IsValid(ped) &&
+        StandardNatives.IS_PED_WEAPON_READY_TO_SHOOT(
+            ped.ToNative());
+
+    public bool IsWeaponInHand(Ped ped)
+    {
+        if (!_entities.IsValid(ped))
+        {
+            return false;
+        }
+
+        var weaponEntity =
+            StandardNatives.GET_CURRENT_PED_WEAPON_ENTITY_INDEX(
+                ped.ToNative(),
+                default);
+
+        return weaponEntity.Value != 0 &&
+            StandardNatives.DOES_ENTITY_EXIST(weaponEntity);
+    }
+
+    public bool TryGetCurrentMaximumRange(
+        Ped ped,
+        out float range)
+    {
+        range = 0f;
+        if (!_entities.IsValid(ped))
+        {
+            return false;
+        }
+
+        float value =
+            StandardNatives.GET_MAX_RANGE_OF_CURRENT_PED_WEAPON(
+                ped.ToNative());
+        if (!float.IsFinite(value) || value <= 0f)
+        {
+            return false;
+        }
+
+        range = value;
+        return true;
+    }
+
+    public int GetDamageType(uint weaponHash) =>
+        weaponHash == 0
+            ? 0
+            : StandardNatives.GET_WEAPON_DAMAGE_TYPE(weaponHash);
+
+    public bool TryGetTimeBetweenShots(
+        uint weaponHash,
+        out float seconds)
+    {
+        seconds = 0f;
+        if (weaponHash == 0)
+        {
+            return false;
+        }
+
+        float value =
+            StandardNatives.GET_WEAPON_TIME_BETWEEN_SHOTS(
+                weaponHash);
+        if (!float.IsFinite(value) || value <= 0f)
+        {
+            return false;
+        }
+
+        seconds = value;
+        return true;
     }
 
     public bool TryGetDamage(

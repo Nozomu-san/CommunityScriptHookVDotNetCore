@@ -51,7 +51,7 @@ internal sealed partial class PackageManager
         IEnumerable<string> seeds,
         IReadOnlyList<PackageDescriptor> catalog)
     {
-        HashSet<string> closure = new(seeds, StringComparer.OrdinalIgnoreCase);
+        HashSet<string> closure = [with(seeds, StringComparer.OrdinalIgnoreCase)];
         bool changed;
         do
         {
@@ -79,9 +79,8 @@ internal sealed partial class PackageManager
 
     private string[] CreateFullCaptureTargets()
     {
-        HashSet<string> names = new(
-            _catalog.Select(value => value.Name),
-            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> names = [with(_catalog.Select(value => value.Name),
+            StringComparer.OrdinalIgnoreCase)];
         names.UnionWith(EnumerateDiskPackageNames());
         return [.. names.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)];
     }
@@ -89,10 +88,9 @@ internal sealed partial class PackageManager
     private static Dictionary<string, string> Fingerprints(
         StagedReloadImage staged)
     {
-        HashSet<string> valid = new(
-            staged.Catalog.Select(value => value.Name),
-            StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, string> result = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> valid = [with(staged.Catalog.Select(value => value.Name),
+            StringComparer.OrdinalIgnoreCase)];
+        Dictionary<string, string> result = [with(StringComparer.OrdinalIgnoreCase)];
         foreach ((string name, StagedPackageImage package) in staged.Packages)
         {
             if (!valid.Contains(name))
@@ -108,21 +106,18 @@ internal sealed partial class PackageManager
     private string[] DetectChangedSeeds(StagedReloadImage staged)
     {
         Dictionary<string, string> candidate = Fingerprints(staged);
-        HashSet<string> names = new(
-            _activeFingerprints.Keys,
-            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> names = [with(_activeFingerprints.Keys,
+            StringComparer.OrdinalIgnoreCase)];
         names.UnionWith(candidate.Keys);
 
-        HashSet<string> activeExecutables = new(
-            _packages.Select(package => package.Name),
-            StringComparer.OrdinalIgnoreCase);
-        HashSet<string> missingExecutableGeneration = new(
-            staged.Catalog
+        HashSet<string> activeExecutables = [with(_packages.Select(package => package.Name),
+            StringComparer.OrdinalIgnoreCase)];
+        HashSet<string> missingExecutableGeneration = [with(staged.Catalog
                 .Where(package =>
                     package.Kind == ScriptPackageKind.Executable &&
                     !activeExecutables.Contains(package.Name))
                 .Select(package => package.Name),
-            StringComparer.OrdinalIgnoreCase);
+            StringComparer.OrdinalIgnoreCase)];
 
         return [.. names
             .Where(name =>
@@ -151,9 +146,8 @@ internal sealed partial class PackageManager
         IEnumerable<string> names,
         bool reverse)
     {
-        HashSet<string> selected = new(
-            names,
-            StringComparer.OrdinalIgnoreCase);
+        HashSet<string> selected = [with(names,
+            StringComparer.OrdinalIgnoreCase)];
         Dictionary<string, PackageDescriptor> descriptors = catalog.ToDictionary(
             value => value.Name,
             StringComparer.OrdinalIgnoreCase);
@@ -186,11 +180,10 @@ internal sealed partial class PackageManager
             }
         }
 
-        SortedSet<string> ready = new(
-            indegree
+        SortedSet<string> ready = [with(indegree
                 .Where(value => value.Value == 0)
                 .Select(value => value.Key),
-            StringComparer.OrdinalIgnoreCase);
+            StringComparer.OrdinalIgnoreCase)];
         List<string> ordered = [];
         while (ready.Count != 0)
         {
@@ -252,12 +245,11 @@ internal sealed partial class PackageManager
                     StringComparer.OrdinalIgnoreCase)]);
         if (_unavailableRuntimeAssemblies.Count != 0)
         {
-            HashSet<string> invalidSeeds = new(
-                resolvedCatalog
+            HashSet<string> invalidSeeds = [with(resolvedCatalog
                     .Where(package => package.ReferencedAssemblyNames.Any(reference =>
                         _unavailableRuntimeAssemblies.Contains(reference)))
                     .Select(package => package.Name),
-                StringComparer.OrdinalIgnoreCase);
+                StringComparer.OrdinalIgnoreCase)];
             HashSet<string> invalid = ExpandDependentClosure(
                 invalidSeeds,
                 resolvedCatalog);
@@ -277,8 +269,8 @@ internal sealed partial class PackageManager
             resolvedCatalog.ToDictionary(
                 value => value.Name,
                 StringComparer.OrdinalIgnoreCase);
-        Dictionary<string, StagedPackageImage> stagedPackages = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, StagedPackageImage> stagedPackages = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach ((string name, CapturedPackageImage package) in captured.Packages)
         {
             if (!resolvedByName.TryGetValue(
@@ -444,9 +436,9 @@ internal sealed partial class PackageManager
         private readonly List<string> _added = [];
         private readonly List<string> _removed = [];
         private readonly List<string> _failed = [];
-        private HashSet<string> _targetSet = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _targetSet = [with(StringComparer.OrdinalIgnoreCase)];
         private string[] _binarySeeds = [];
-        private HashSet<string> _originalPackageNames = new(StringComparer.OrdinalIgnoreCase);
+        private HashSet<string> _originalPackageNames = [with(StringComparer.OrdinalIgnoreCase)];
         private Task<CaptureAttempt>? _captureTask;
         private long _captureStarted;
         private long _removalConfirmationStarted;
@@ -724,9 +716,8 @@ internal sealed partial class PackageManager
             }
 
             _binarySeeds = owner.DetectChangedSeeds(staged);
-            _originalPackageNames = new(
-                owner._catalog.Select(value => value.Name),
-                StringComparer.OrdinalIgnoreCase);
+            _originalPackageNames = [with(owner._catalog.Select(value => value.Name),
+                StringComparer.OrdinalIgnoreCase)];
             HashSet<string> closure = ExpandDependentClosure(
                 _binarySeeds,
                 owner._catalog);
@@ -832,9 +823,8 @@ internal sealed partial class PackageManager
                 owner.ApplyStagedCatalog(_staged);
             }
 
-            HashSet<string> candidateNames = new(
-                _staged.Catalog.Select(value => value.Name),
-                StringComparer.OrdinalIgnoreCase);
+            HashSet<string> candidateNames = [with(_staged.Catalog.Select(value => value.Name),
+                StringComparer.OrdinalIgnoreCase)];
             foreach (string name in _originalPackageNames)
             {
                 if (!candidateNames.Contains(name))

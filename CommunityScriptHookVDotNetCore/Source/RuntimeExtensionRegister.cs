@@ -266,7 +266,7 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
     private readonly Lock _gate = new();
     private readonly Dictionary<Type, Registration> _services = [];
     private readonly HashSet<string> _revokedOwners =
-        new(StringComparer.OrdinalIgnoreCase);
+        [with(StringComparer.OrdinalIgnoreCase)];
 
     internal RuntimeServiceRegistry()
     {
@@ -489,7 +489,7 @@ internal static class ManagedAssemblyMetadata
         MetadataReader metadata)
     {
         Dictionary<string, string> values =
-            new(StringComparer.OrdinalIgnoreCase);
+            [with(StringComparer.OrdinalIgnoreCase)];
         AssemblyDefinition assembly = metadata.GetAssemblyDefinition();
         foreach (CustomAttributeHandle handle in assembly.GetCustomAttributes())
         {
@@ -600,7 +600,7 @@ internal static class RuntimeExtensionDiscovery
             }
         }
 
-        HashSet<string> ids = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> ids = [with(StringComparer.OrdinalIgnoreCase)];
         foreach (RuntimeExtensionDescriptor descriptor in result)
         {
             if (!ids.Add(descriptor.Id))
@@ -636,7 +636,7 @@ internal static class RuntimeExtensionDiscovery
         string id = Required(values, RuntimeExtensionMetadataKeys.Id);
         string entryType = Required(values, RuntimeExtensionMetadataKeys.EntryType);
 
-        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> references = [with(StringComparer.OrdinalIgnoreCase)];
         foreach (AssemblyReferenceHandle handle in metadata.AssemblyReferences)
         {
             AssemblyReference reference = metadata.GetAssemblyReference(handle);

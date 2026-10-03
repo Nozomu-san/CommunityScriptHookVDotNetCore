@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+#include <utility>
 
 namespace CEventGenerator
 {
@@ -50,8 +51,7 @@ namespace CEventGenerator
     constexpr RecordFlags operator|(RecordFlags left, RecordFlags right) noexcept
     {
         return static_cast<RecordFlags>(
-            static_cast<std::uint32_t>(left) |
-            static_cast<std::uint32_t>(right));
+            std::to_underlying(left) | std::to_underlying(right));
     }
 
     struct alignas(8) EventRecord final
@@ -62,6 +62,7 @@ namespace CEventGenerator
         std::int64_t PerformanceCounter{};
         std::uint32_t GameBuild{};
         std::uint32_t EventId{};
+        std::uint32_t CatalogEventId{};
         EventStream Stream{};
         std::uint32_t ArgumentCount{};
         std::uint64_t GroupAddress{};
@@ -75,5 +76,5 @@ namespace CEventGenerator
     };
 
     static_assert(std::is_trivially_copyable_v<EventRecord>);
-    static_assert(sizeof(EventRecord) == 1040);
+    static_assert(sizeof(EventRecord) == 1048);
 }

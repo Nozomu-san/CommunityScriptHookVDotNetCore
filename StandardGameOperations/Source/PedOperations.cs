@@ -110,11 +110,17 @@ public interface IPedOperations
     bool IsLivingHuman(Ped ped);
     bool IsDead(Ped ped);
     bool IsShooting(Ped ped);
+    bool IsTaskActive(Ped ped, int taskType);
     bool IsPerformingMeleeAction(Ped ped);
     bool IsReloading(Ped ped);
+    bool IsRagdoll(Ped ped);
+    bool IsGettingUp(Ped ped);
     bool IsInCover(Ped ped);
+    int GetAccuracy(Ped ped);
+    bool TrySetAccuracy(Ped ped, int accuracy);
     PedVitals ReadVitals(Ped ped);
     Vector3 GetChestPosition(Ped ped);
+    bool TryConsumeLastDamageBone(Ped ped, out ushort boneTag);
     Vehicle GetCurrentVehicle(Ped ped);
     bool CanRagdoll(Ped ped);
     bool TryRagdoll(Ped ped, int minimumTime = 450, int maximumTime = 900);
@@ -391,6 +397,13 @@ internal sealed class PedOperations(
         _entities.IsValid(ped) &&
         StandardNatives.IS_PED_SHOOTING(ped.ToNative());
 
+    public bool IsTaskActive(Ped ped, int taskType) =>
+        _entities.IsValid(ped) &&
+        taskType >= 0 &&
+        StandardNatives.GET_IS_TASK_ACTIVE(
+            ped.ToNative(),
+            taskType);
+
     public bool IsPerformingMeleeAction(Ped ped) =>
         _entities.IsValid(ped) &&
         StandardNatives.IS_PED_PERFORMING_MELEE_ACTION(ped.ToNative());
@@ -399,9 +412,33 @@ internal sealed class PedOperations(
         _entities.IsValid(ped) &&
         StandardNatives.IS_PED_RELOADING(ped.ToNative());
 
+    public bool IsRagdoll(Ped ped) =>
+        _entities.IsValid(ped) &&
+        StandardNatives.IS_PED_RAGDOLL(ped.ToNative());
+
+    public bool IsGettingUp(Ped ped) =>
+        _entities.IsValid(ped) &&
+        StandardNatives.IS_PED_GETTING_UP(ped.ToNative());
+
     public bool IsInCover(Ped ped) =>
         IsLivingHuman(ped) &&
         StandardNatives.IS_PED_IN_COVER(ped.ToNative(), false);
+
+    public int GetAccuracy(Ped ped) =>
+        !_entities.IsValid(ped)
+            ? 0
+            : Math.Clamp(StandardNatives.GET_PED_ACCURACY(ped.ToNative()), 0, 100);
+
+    public bool TrySetAccuracy(Ped ped, int accuracy)
+    {
+        if (!_entities.IsValid(ped) || accuracy < 0 || accuracy > 100)
+        {
+            return false;
+        }
+
+        StandardNatives.SET_PED_ACCURACY(ped.ToNative(), accuracy);
+        return true;
+    }
 
     public PedVitals ReadVitals(Ped ped) =>
         !_entities.IsValid(ped)
@@ -422,6 +459,26 @@ internal sealed class PedOperations(
                 0f,
                 0f,
                 0f);
+
+    public bool TryConsumeLastDamageBone(Ped ped, out ushort boneTag)
+    {
+        boneTag = 0;
+        if (!_entities.IsValid(ped))
+        {
+            return false;
+        }
+
+        bool found = _known.TryGetLastDamageBone(ped, out int bone);
+        StandardNatives.CLEAR_PED_LAST_DAMAGE_BONE(ped.ToNative());
+
+        if (!found)
+        {
+            return false;
+        }
+
+        boneTag = (ushort)bone;
+        return true;
+    }
 
     public Vehicle GetCurrentVehicle(Ped ped) =>
         !_entities.IsValid(ped)

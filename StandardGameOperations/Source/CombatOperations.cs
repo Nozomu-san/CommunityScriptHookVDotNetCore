@@ -13,6 +13,9 @@ public readonly record struct CombatEngagement(
 public interface ICombatOperations
 {
     bool TryGetTarget(Ped shooter, out Ped target);
+    bool IsEngagedWith(Ped shooter, Ped target);
+    bool IsFacingTarget(Ped shooter, Ped target, float angle);
+    bool HasClearLineOfSight(Ped shooter, Ped target);
     bool TryResolveEngagement(Ped shooter, out CombatEngagement engagement);
     bool WasDamagedByWeapon(Entity victim, Ped shooter, uint weaponHash);
     bool WasDamagedByWeapon(
@@ -38,7 +41,7 @@ internal sealed class CombatOperations(
     {
         target = default;
         if (!_entities.IsValid(shooter) ||
-            !_known.TryGetCombatTarget(shooter, out Entity entity))
+            !NativeBindings.TryGetCombatTarget(shooter, out Entity entity))
         {
             return false;
         }
@@ -53,6 +56,40 @@ internal sealed class CombatOperations(
         target = candidate;
         return true;
     }
+
+    public bool IsEngagedWith(Ped shooter, Ped target) =>
+        _peds.IsLivingHuman(shooter) &&
+        _peds.IsLivingHuman(target) &&
+        StandardNatives.IS_PED_IN_COMBAT(
+            shooter.ToNative(),
+            target.ToNative());
+
+    public bool IsFacingTarget(
+        Ped shooter,
+        Ped target,
+        float angle)
+    {
+        if (!_peds.IsLivingHuman(shooter) ||
+            !_peds.IsLivingHuman(target) ||
+            !float.IsFinite(angle) ||
+            angle <= 0f)
+        {
+            return false;
+        }
+
+        return StandardNatives.IS_PED_FACING_PED(
+            shooter.ToNative(),
+            target.ToNative(),
+            angle);
+    }
+
+    public bool HasClearLineOfSight(Ped shooter, Ped target) =>
+        _peds.IsLivingHuman(shooter) &&
+        _peds.IsLivingHuman(target) &&
+        StandardNatives.HAS_ENTITY_CLEAR_LOS_TO_ENTITY(
+            shooter.ToNativeEntity(),
+            target.ToNativeEntity(),
+            17);
 
     public bool TryResolveEngagement(
         Ped shooter,

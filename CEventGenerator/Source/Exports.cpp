@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <utility>
 
 using namespace CEventGenerator;
 
@@ -16,7 +17,7 @@ std::uint32_t CEG_GetRecordSize() noexcept
 extern "C" __declspec(dllexport)
 std::uint32_t CEG_GetStatus() noexcept
 {
-    return static_cast<std::uint32_t>(GetStatus());
+    return std::to_underlying(GetStatus());
 }
 
 extern "C" __declspec(dllexport)
@@ -79,4 +80,47 @@ extern "C" __declspec(dllexport)
 std::uint32_t CEG_AddDetailedEventId(std::uint32_t eventId) noexcept
 {
     return AddDetailedEventId(eventId) ? 1u : 0u;
+}
+
+extern "C" __declspec(dllexport)
+void CEG_ClearCaptureStreamMasks() noexcept
+{
+    ClearCaptureStreamMasks();
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_SetCaptureStreamMask(
+    std::uint32_t eventId,
+    std::uint32_t streamMask) noexcept
+{
+    return SetCaptureStreamMask(eventId, streamMask) ? 1u : 0u;
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetCatalogEventCount() noexcept
+{
+    return GetCatalogEventCount();
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetCatalogEventName(
+    std::uint32_t catalogEventId,
+    char* destination,
+    std::uint32_t destinationSize) noexcept
+{
+    return CopyCatalogEventName(catalogEventId, destination, destinationSize);
+}
+
+extern "C" __declspec(dllexport)
+void CEG_ClearCatalogCaptureStreamMasks() noexcept
+{
+    ClearCatalogCaptureStreamMasks();
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_SetCatalogCaptureStreamMask(
+    std::uint32_t catalogEventId,
+    std::uint32_t streamMask) noexcept
+{
+    return SetCatalogCaptureStreamMask(catalogEventId, streamMask) ? 1u : 0u;
 }

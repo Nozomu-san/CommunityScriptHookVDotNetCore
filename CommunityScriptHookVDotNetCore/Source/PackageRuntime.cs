@@ -31,9 +31,9 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     private readonly List<LifecycleTransitionOperation> _operations = [];
     private readonly List<UnloadProbe> _unloadProbes = [];
     private readonly Dictionary<string, string> _activeFingerprints =
-        new(StringComparer.OrdinalIgnoreCase);
+        [with(StringComparer.OrdinalIgnoreCase)];
     private readonly HashSet<string> _unavailableRuntimeAssemblies =
-        new(StringComparer.OrdinalIgnoreCase);
+        [with(StringComparer.OrdinalIgnoreCase)];
     private IReadOnlyList<PackageDescriptor> _catalog = [];
     private LifecycleTransitionOperation? _activeOperation;
     private ulong _lifecycleEpoch;
@@ -382,12 +382,11 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             _unavailableRuntimeAssemblies.Add(name);
         }
 
-        HashSet<string> seeds = new(
-            _catalog
+        HashSet<string> seeds = [with(_catalog
                 .Where(package => package.ReferencedAssemblyNames.Any(reference =>
                     _unavailableRuntimeAssemblies.Contains(reference)))
                 .Select(package => package.Name),
-            StringComparer.OrdinalIgnoreCase);
+            StringComparer.OrdinalIgnoreCase)];
         HashSet<string> closure = ExpandDependentClosure(seeds, _catalog);
         if (closure.Count != 0 &&
             _activeOperation is not null &&
@@ -722,9 +721,8 @@ internal sealed class ScriptPackage
         Assembly assembly,
         ulong generationId)
     {
-        HashSet<string> expected = new(
-            descriptor.ScriptTypeNames,
-            StringComparer.Ordinal);
+        HashSet<string> expected = [with(descriptor.ScriptTypeNames,
+            StringComparer.Ordinal)];
         Type[] scriptTypes = [.. GetLoadableTypes(assembly)
             .Where(type =>
                 type.FullName is not null &&
@@ -1291,10 +1289,10 @@ internal abstract class SharedScriptPackageLoadContext(
     private static readonly string SharedAssemblyName =
         SharedRuntimeAssembly.GetName().Name!;
     private static readonly HashSet<string> PlatformSharedAssemblyNames =
-        new(StringComparer.OrdinalIgnoreCase)
-        {
-            "FSharp.Core"
-        };
+    [
+        with(StringComparer.OrdinalIgnoreCase),
+        "FSharp.Core"
+    ];
 
     protected static Assembly? FindSharedAssembly(AssemblyName requested)
     {
@@ -1379,7 +1377,7 @@ internal sealed class StagedScriptPackageLoadContext :
     SharedScriptPackageLoadContext
 {
     private readonly Dictionary<string, PackageAssemblyImage> _images =
-        new(StringComparer.OrdinalIgnoreCase);
+        [with(StringComparer.OrdinalIgnoreCase)];
     private readonly PackageAssemblyImage _entry;
     private readonly string _entryPath;
 

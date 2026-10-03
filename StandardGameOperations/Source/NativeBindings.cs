@@ -7,6 +7,7 @@ internal sealed class NativeBindings
 {
     private readonly IKnownNativeInvoker _known;
     private readonly ulong _getLastImpact;
+    private readonly ulong _getLastDamageBone;
     private readonly ulong _getAmmoInClip;
     private readonly ulong _getNearbyPeds;
 
@@ -20,6 +21,10 @@ internal sealed class NativeBindings
             natives.Catalog,
             _known,
             "GET_PED_LAST_WEAPON_IMPACT_COORD");
+        _getLastDamageBone = ResolveCallable(
+            natives.Catalog,
+            _known,
+            "GET_PED_LAST_DAMAGE_BONE");
         _getAmmoInClip = ResolveCallable(
             natives.Catalog,
             _known,
@@ -30,12 +35,12 @@ internal sealed class NativeBindings
             "GET_PED_NEARBY_PEDS");
     }
 
-    internal void ApplyPedHealthDamage(Ped victim, int damageAmount) =>
+    internal static void ApplyPedHealthDamage(Ped victim, int damageAmount) =>
         StandardNatives.APPLY_DAMAGE_TO_PED(
             victim.ToNative(),
             damageAmount,
             false,
-            new NativeAny(0),
+            new(0),
             0u);
 
     internal bool TryGetLastImpact(Ped ped, out Vector3 position)
@@ -63,12 +68,31 @@ internal sealed class NativeBindings
         return true;
     }
 
-    internal bool TryGetCombatTarget(Ped shooter, out Entity target)
+    internal bool TryGetLastDamageBone(Ped ped, out int bone)
+    {
+        bone = 0;
+        KnownNativeInt32Output output = new();
+        KnownNativeArgument[] arguments =
+        [
+            KnownNativeArgument.Ped(ped.ToNative()),
+            KnownNativeArgument.Int32Output(output)
+        ];
+
+        if (!_known.Invoke(_getLastDamageBone, arguments).AsBoolean())
+        {
+            return false;
+        }
+
+        bone = output.Value;
+        return bone >= 0 && bone <= ushort.MaxValue;
+    }
+
+    internal static bool TryGetCombatTarget(Ped shooter, out Entity target)
     {
         Alloc8orStandardNatives.Source.Entity native =
             StandardNatives.GET_PED_TARGET_FROM_COMBAT_PED(
                 shooter.ToNative(),
-                new NativeAny(0));
+                new(0));
         target = native.FromNative();
         return target.Value != 0;
     }
@@ -118,7 +142,7 @@ internal sealed class NativeBindings
         }
 
         ReadOnlySpan<int> values = output.Values.Span;
-        List<Ped> result = new(count);
+        List<Ped> result = [with(count)];
         for (int index = 0; index < count; ++index)
         {
             int valueIndex = (index * 2) + 2;

@@ -3,6 +3,7 @@
 #include "EventAbi.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -23,6 +24,8 @@ namespace CEventGenerator
         [[nodiscard]] std::uint64_t DroppedCount() const noexcept;
 
     private:
+        static constexpr std::size_t MaximumPendingRecords = 8192;
+
         EventQueue() = default;
 
         mutable std::mutex _gate;

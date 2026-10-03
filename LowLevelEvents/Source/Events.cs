@@ -28,11 +28,17 @@ public enum DamageMagnitudeSource : uint
     DamageProcess = 1
 }
 
+public readonly record struct GameEventDescriptor(
+    uint CatalogId,
+    string Name);
+
+
 public readonly record struct RawLowLevelEvent(
     ulong Sequence,
     long PerformanceCounter,
     uint GameBuild,
     uint EventId,
+    uint CatalogEventId,
     string? EventName,
     LowLevelEventStream Stream,
     ulong GroupAddress,
@@ -60,6 +66,14 @@ public readonly record struct GunShotEvent(
     int ShooterHandle,
     uint WeaponHash,
     Vector3 SourcePosition);
+
+public readonly record struct GunShotWhizzedByEvent(
+    ulong Sequence,
+    long PerformanceCounter,
+    ulong ShooterAddress,
+    int ShooterHandle,
+    ulong VictimAddress,
+    int VictimHandle);
 
 public readonly record struct BulletImpactEvent(
     ulong Sequence,

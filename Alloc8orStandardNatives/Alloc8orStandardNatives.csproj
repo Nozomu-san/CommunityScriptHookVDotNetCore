@@ -1,15 +1,17 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
     <AssemblyTitle>Alloc8or's Standard Native Executables</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
-    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
-    <FileVersion>09.09.2026.0</FileVersion>
+    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
+    <FileVersion>04.10.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
-    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
+    <Reference Include="CommunityScriptHookVDotNetCore">
+      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

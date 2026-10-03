@@ -32,13 +32,15 @@ internal static class EventDecoder
         byte[] probeData = ReadProbeData(buffer, flags, probeSize);
         uint gameBuild = ReadUInt32(buffer, NativeAbi.GameBuildOffset);
         uint eventId = ReadUInt32(buffer, NativeAbi.EventIdOffset);
+        uint catalogEventId = ReadUInt32(buffer, NativeAbi.CatalogEventIdOffset);
 
-        return new RawLowLevelEvent(
+        return new(
             ReadUInt64(buffer, NativeAbi.SequenceOffset),
             ReadInt64(buffer, NativeAbi.PerformanceCounterOffset),
             gameBuild,
             eventId,
-            EventCatalog.ResolveName(gameBuild, eventId),
+            catalogEventId,
+            EventCatalog.ResolveSyntheticName(eventId),
             (LowLevelEventStream)ReadUInt32(buffer, NativeAbi.StreamOffset),
             ReadUInt64(buffer, NativeAbi.GroupAddressOffset),
             ReadUInt64(buffer, NativeAbi.EventAddressOffset),

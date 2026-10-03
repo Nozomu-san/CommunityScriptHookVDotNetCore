@@ -39,8 +39,9 @@ internal sealed class LowLevelEventsExtension : IScript4RuntimeExtension
         EventStream? stream = null;
         try
         {
-            stream = new EventStream(bridge, identity);
+            stream = new(bridge, identity);
             stream.ConfigureDetailedEventIds(EventCatalog.GetDetailedEventIds());
+            stream.ConfigureCapturePolicy();
             context.Services.Register<ILowLevelEventStream>(stream);
             context.Services.Register<ILowLevelDamageStream>(stream);
             context.Services.Register<ILowLevelWeaponEventStream>(stream);

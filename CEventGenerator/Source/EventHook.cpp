@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <iterator>
+#include <string_view>
 
 namespace
 {
@@ -43,9 +45,300 @@ namespace
     using GetEventEntity = void* (__fastcall*)(void*);
 
     constexpr std::uint32_t EmptyDetailedEventId = 0xFFFFFFFFu;
-    constexpr std::size_t DetailedEventIdCapacity = 16;
+    constexpr std::size_t DetailedEventIdCapacity = 24;
+    constexpr std::size_t CaptureEventIdCapacity = 512;
+    constexpr std::uint8_t ReactionStreamMask = 1u << 0;
+    constexpr std::uint8_t GroupStreamMask = 1u << 1;
+    constexpr std::uint8_t GlobalStreamMask = 1u << 2;
     constexpr std::size_t DetailedEventProbeCapacity = 128;
+    constexpr std::size_t AimEventProbeCapacity = 288;
+    constexpr std::size_t AimGroupProbeCapacity = 288;
     constexpr std::size_t RecentDamageContextCapacity = 32;
+
+    constexpr std::uint32_t CatalogEventCacheMiss = 0xFFFFFFFFu;
+    constexpr std::size_t CatalogVtableCacheCapacity = 256;
+
+    constexpr std::array CatalogEventNames
+    {
+        std::string_view{"CEventAcquaintancePed"},
+        std::string_view{"CEventAcquaintancePedDead"},
+        std::string_view{"CEventAcquaintancePedDislike"},
+        std::string_view{"CEventAcquaintancePedHate"},
+        std::string_view{"CEventAcquaintancePedLike"},
+        std::string_view{"CEventAcquaintancePedWanted"},
+        std::string_view{"CEventAgitated"},
+        std::string_view{"CEventAgitatedAction"},
+        std::string_view{"CEventCallForCover"},
+        std::string_view{"CEventCarUndriveable"},
+        std::string_view{"CEventClimbLadderOnRoute"},
+        std::string_view{"CEventClimbNavMeshOnRoute"},
+        std::string_view{"CEventCombatTaunt"},
+        std::string_view{"CEventCommunicateEvent"},
+        std::string_view{"CEventCopCarBeingStolen"},
+        std::string_view{"CEventCrimeCryForHelp"},
+        std::string_view{"CEventCrimeReported"},
+        std::string_view{"CEventDamage"},
+        std::string_view{"CEventDataDecisionMaker"},
+        std::string_view{"CEventDataFileMounter"},
+        std::string_view{"CEventDataResponseAggressiveRubberneck"},
+        std::string_view{"CEventDataResponseDeferToScenarioPointFlags"},
+        std::string_view{"CEventDataResponseFriendlyAimedAt"},
+        std::string_view{"CEventDataResponseFriendlyNearMiss"},
+        std::string_view{"CEventDataResponsePlayerDeath"},
+        std::string_view{"CEventDataResponsePoliceTaskWanted"},
+        std::string_view{"CEventDataResponseSwatTaskWanted"},
+        std::string_view{"CEventDataResponseTask"},
+        std::string_view{"CEventDataResponseTaskAgitated"},
+        std::string_view{"CEventDataResponseTaskCombat"},
+        std::string_view{"CEventDataResponseTaskCower"},
+        std::string_view{"CEventDataResponseTaskCrouch"},
+        std::string_view{"CEventDataResponseTaskDuckAndCover"},
+        std::string_view{"CEventDataResponseTaskEscapeBlast"},
+        std::string_view{"CEventDataResponseTaskEvasiveStep"},
+        std::string_view{"CEventDataResponseTaskExhaustedFlee"},
+        std::string_view{"CEventDataResponseTaskExplosion"},
+        std::string_view{"CEventDataResponseTaskFlee"},
+        std::string_view{"CEventDataResponseTaskFlyAway"},
+        std::string_view{"CEventDataResponseTaskGrowlAndFlee"},
+        std::string_view{"CEventDataResponseTaskGunAimedAt"},
+        std::string_view{"CEventDataResponseTaskHandsUp"},
+        std::string_view{"CEventDataResponseTaskHeadTrack"},
+        std::string_view{"CEventDataResponseTaskLeaveCarAndFlee"},
+        std::string_view{"CEventDataResponseTaskScenarioFlee"},
+        std::string_view{"CEventDataResponseTaskSharkAttack"},
+        std::string_view{"CEventDataResponseTaskShockingEventBackAway"},
+        std::string_view{"CEventDataResponseTaskShockingEventGoto"},
+        std::string_view{"CEventDataResponseTaskShockingEventHurryAway"},
+        std::string_view{"CEventDataResponseTaskShockingEventReact"},
+        std::string_view{"CEventDataResponseTaskShockingEventReactToAircraft"},
+        std::string_view{"CEventDataResponseTaskShockingEventStopAndStare"},
+        std::string_view{"CEventDataResponseTaskShockingEventThreatResponse"},
+        std::string_view{"CEventDataResponseTaskShockingEventWatch"},
+        std::string_view{"CEventDataResponseTaskShockingNiceCar"},
+        std::string_view{"CEventDataResponseTaskShockingPoliceInvestigate"},
+        std::string_view{"CEventDataResponseTaskThreat"},
+        std::string_view{"CEventDataResponseTaskTurnToFace"},
+        std::string_view{"CEventDataResponseTaskWalkAway"},
+        std::string_view{"CEventDataResponseTaskWalkRoundEntity"},
+        std::string_view{"CEventDataResponseTaskWalkRoundFire"},
+        std::string_view{"CEventDeadPedFound"},
+        std::string_view{"CEventDeath"},
+        std::string_view{"CEventDecisionMakerResponse"},
+        std::string_view{"CEventDisturbance"},
+        std::string_view{"CEventDraggedOutCar"},
+        std::string_view{"CEventEditableResponse"},
+        std::string_view{"CEventEncroachingPed"},
+        std::string_view{"CEventEntityDamaged"},
+        std::string_view{"CEventEntityDestroyed"},
+        std::string_view{"CEventExplosion"},
+        std::string_view{"CEventExplosionHeard"},
+        std::string_view{"CEventFireNearby"},
+        std::string_view{"CEventFootStepHeard"},
+        std::string_view{"CEventFriendlyAimedAt"},
+        std::string_view{"CEventFriendlyFireNearMiss"},
+        std::string_view{"CEventGetOutOfWater"},
+        std::string_view{"CEventGivePedTask"},
+        std::string_view{"CEventGroupScriptAI"},
+        std::string_view{"CEventGroupScriptNetwork"},
+        std::string_view{"CEventGunAimedAt"},
+        std::string_view{"CEventGunShot"},
+        std::string_view{"CEventGunShotBulletImpact"},
+        std::string_view{"CEventGunShotWhizzedBy"},
+        std::string_view{"CEventHelpAmbientFriend"},
+        std::string_view{"CEventHurtTransition"},
+        std::string_view{"CEventInAir"},
+        std::string_view{"CEventInfo"},
+        std::string_view{"CEventInfoBase"},
+        std::string_view{"CEventInjuredCryForHelp"},
+        std::string_view{"CEventLeaderEnteredCarAsDriver"},
+        std::string_view{"CEventLeaderExitedCarAsDriver"},
+        std::string_view{"CEventLeaderHolsteredWeapon"},
+        std::string_view{"CEventLeaderLeftCover"},
+        std::string_view{"CEventLeaderUnholsteredWeapon"},
+        std::string_view{"CEventMeleeAction"},
+        std::string_view{"CEventMustLeaveBoat"},
+        std::string_view{"CEventNetworkAdminInvited"},
+        std::string_view{"CEventNetworkAttemptHostMigration"},
+        std::string_view{"CEventNetworkBail"},
+        std::string_view{"CEventNetworkCashTransactionLog"},
+        std::string_view{"CEventNetworkCheatTriggered"},
+        std::string_view{"CEventNetworkClanInviteReceived"},
+        std::string_view{"CEventNetworkClanJoined"},
+        std::string_view{"CEventNetworkClanKicked"},
+        std::string_view{"CEventNetworkClanLeft"},
+        std::string_view{"CEventNetworkClanRankChanged"},
+        std::string_view{"CEventNetworkCloudEvent"},
+        std::string_view{"CEventNetworkCloudFileResponse"},
+        std::string_view{"CEventNetworkEmailReceivedEvent"},
+        std::string_view{"CEventNetworkEndMatch"},
+        std::string_view{"CEventNetworkEndSession"},
+        std::string_view{"CEventNetworkEntityDamage"},
+        std::string_view{"CEventNetworkFindSession"},
+        std::string_view{"CEventNetworkFollowInviteReceived"},
+        std::string_view{"CEventNetworkHostMigration"},
+        std::string_view{"CEventNetworkHostSession"},
+        std::string_view{"CEventNetworkIncrementStat"},
+        std::string_view{"CEventNetworkInviteAccepted"},
+        std::string_view{"CEventNetworkInviteConfirmed"},
+        std::string_view{"CEventNetworkInviteRejected"},
+        std::string_view{"CEventNetworkJoinSession"},
+        std::string_view{"CEventNetworkJoinSessionResponse"},
+        std::string_view{"CEventNetworkOnlinePermissionsUpdated"},
+        std::string_view{"CEventNetworkPedLeftBehind"},
+        std::string_view{"CEventNetworkPickupRespawned"},
+        std::string_view{"CEventNetworkPlayerArrest"},
+        std::string_view{"CEventNetworkPlayerCollectedAmbientPickup"},
+        std::string_view{"CEventNetworkPlayerCollectedPickup"},
+        std::string_view{"CEventNetworkPlayerCollectedPortablePickup"},
+        std::string_view{"CEventNetworkPlayerDroppedPortablePickup"},
+        std::string_view{"CEventNetworkPlayerEnteredVehicle"},
+        std::string_view{"CEventNetworkPlayerJoinScript"},
+        std::string_view{"CEventNetworkPlayerLeftScript"},
+        std::string_view{"CEventNetworkPlayerScript"},
+        std::string_view{"CEventNetworkPlayerSession"},
+        std::string_view{"CEventNetworkPlayerSpawn"},
+        std::string_view{"CEventNetworkPresenceInvite"},
+        std::string_view{"CEventNetworkPresenceInviteRemoved"},
+        std::string_view{"CEventNetworkPresenceInviteReply"},
+        std::string_view{"CEventNetworkPresenceTriggerEvent"},
+        std::string_view{"CEventNetworkPresence_StatUpdate"},
+        std::string_view{"CEventNetworkPrimaryClanChanged"},
+        std::string_view{"CEventNetworkRequestDelay"},
+        std::string_view{"CEventNetworkRosChanged"},
+        std::string_view{"CEventNetworkScAdminPlayerUpdated"},
+        std::string_view{"CEventNetworkScAdminReceivedCash"},
+        std::string_view{"CEventNetworkScriptEvent"},
+        std::string_view{"CEventNetworkSessionEvent"},
+        std::string_view{"CEventNetworkShopTransaction"},
+        std::string_view{"CEventNetworkSignInStateChanged"},
+        std::string_view{"CEventNetworkSocialClubAccountLinked"},
+        std::string_view{"CEventNetworkSpectateLocal"},
+        std::string_view{"CEventNetworkStartMatch"},
+        std::string_view{"CEventNetworkStartSession"},
+        std::string_view{"CEventNetworkStorePlayerLeft"},
+        std::string_view{"CEventNetworkSummon"},
+        std::string_view{"CEventNetworkSystemServiceEvent"},
+        std::string_view{"CEventNetworkTextMessageReceived"},
+        std::string_view{"CEventNetworkTimedExplosion"},
+        std::string_view{"CEventNetworkTransitionEvent"},
+        std::string_view{"CEventNetworkTransitionGamerInstruction"},
+        std::string_view{"CEventNetworkTransitionMemberJoined"},
+        std::string_view{"CEventNetworkTransitionMemberLeft"},
+        std::string_view{"CEventNetworkTransitionParameterChanged"},
+        std::string_view{"CEventNetworkTransitionStarted"},
+        std::string_view{"CEventNetworkTransitionStringChanged"},
+        std::string_view{"CEventNetworkVehicleUndrivable"},
+        std::string_view{"CEventNetworkVoiceConnectionRequested"},
+        std::string_view{"CEventNetworkVoiceConnectionResponse"},
+        std::string_view{"CEventNetworkVoiceConnectionTerminated"},
+        std::string_view{"CEventNetworkVoiceSessionEnded"},
+        std::string_view{"CEventNetworkVoiceSessionStarted"},
+        std::string_view{"CEventNetworkWithData"},
+        std::string_view{"CEventNetwork_InboxMsgReceived"},
+        std::string_view{"CEventNewTask"},
+        std::string_view{"CEventObjectCollision"},
+        std::string_view{"CEventOnFire"},
+        std::string_view{"CEventOpenDoor"},
+        std::string_view{"CEventPedCollisionWithPed"},
+        std::string_view{"CEventPedCollisionWithPlayer"},
+        std::string_view{"CEventPedEnteredMyVehicle"},
+        std::string_view{"CEventPedJackingMyVehicle"},
+        std::string_view{"CEventPedOnCarRoof"},
+        std::string_view{"CEventPedSeenDeadPed"},
+        std::string_view{"CEventPlayerCollisionWithPed"},
+        std::string_view{"CEventPlayerDeath"},
+        std::string_view{"CEventPlayerUnableToEnterVehicle"},
+        std::string_view{"CEventPotentialBeWalkedInto"},
+        std::string_view{"CEventPotentialBlast"},
+        std::string_view{"CEventPotentialGetRunOver"},
+        std::string_view{"CEventPotentialWalkIntoVehicle"},
+        std::string_view{"CEventProvidingCover"},
+        std::string_view{"CEventRanOverPed"},
+        std::string_view{"CEventReactionEnemyPed"},
+        std::string_view{"CEventReactionInvestigateDeadPed"},
+        std::string_view{"CEventReactionInvestigateThreat"},
+        std::string_view{"CEventRequestHelp"},
+        std::string_view{"CEventRequestHelpWithConfrontation"},
+        std::string_view{"CEventRespondedToThreat"},
+        std::string_view{"CEventScanner"},
+        std::string_view{"CEventScenarioForceAction"},
+        std::string_view{"CEventScriptCommand"},
+        std::string_view{"CEventScriptWithData"},
+        std::string_view{"CEventShocking"},
+        std::string_view{"CEventShockingBicycleCrash"},
+        std::string_view{"CEventShockingBicycleOnPavement"},
+        std::string_view{"CEventShockingCarAlarm"},
+        std::string_view{"CEventShockingCarChase"},
+        std::string_view{"CEventShockingCarCrash"},
+        std::string_view{"CEventShockingCarOnCar"},
+        std::string_view{"CEventShockingCarPileUp"},
+        std::string_view{"CEventShockingDangerousAnimal"},
+        std::string_view{"CEventShockingDeadBody"},
+        std::string_view{"CEventShockingDrivingOnPavement"},
+        std::string_view{"CEventShockingEngineRevved"},
+        std::string_view{"CEventShockingExplosion"},
+        std::string_view{"CEventShockingFire"},
+        std::string_view{"CEventShockingGunFight"},
+        std::string_view{"CEventShockingGunshotFired"},
+        std::string_view{"CEventShockingHelicopterOverhead"},
+        std::string_view{"CEventShockingHornSounded"},
+        std::string_view{"CEventShockingInDangerousVehicle"},
+        std::string_view{"CEventShockingInjuredPed"},
+        std::string_view{"CEventShockingMadDriver"},
+        std::string_view{"CEventShockingMadDriverBicycle"},
+        std::string_view{"CEventShockingMadDriverExtreme"},
+        std::string_view{"CEventShockingMugging"},
+        std::string_view{"CEventShockingNonViolentWeaponAimedAt"},
+        std::string_view{"CEventShockingParachuterOverhead"},
+        std::string_view{"CEventShockingPedKnockedIntoByPlayer"},
+        std::string_view{"CEventShockingPedRunOver"},
+        std::string_view{"CEventShockingPedShot"},
+        std::string_view{"CEventShockingPlaneFlyby"},
+        std::string_view{"CEventShockingPotentialBlast"},
+        std::string_view{"CEventShockingPropertyDamage"},
+        std::string_view{"CEventShockingRunningPed"},
+        std::string_view{"CEventShockingRunningStampede"},
+        std::string_view{"CEventShockingSeenCarStolen"},
+        std::string_view{"CEventShockingSeenConfrontation"},
+        std::string_view{"CEventShockingSeenGangFight"},
+        std::string_view{"CEventShockingSeenInsult"},
+        std::string_view{"CEventShockingSeenMeleeAction"},
+        std::string_view{"CEventShockingSeenNiceCar"},
+        std::string_view{"CEventShockingSeenPedKilled"},
+        std::string_view{"CEventShockingSiren"},
+        std::string_view{"CEventShockingStudioBomb"},
+        std::string_view{"CEventShockingVehicleTowed"},
+        std::string_view{"CEventShockingVisibleWeapon"},
+        std::string_view{"CEventShockingWeaponThreat"},
+        std::string_view{"CEventShockingWeirdPed"},
+        std::string_view{"CEventShockingWeirdPedApproaching"},
+        std::string_view{"CEventShoutBlockingLos"},
+        std::string_view{"CEventShoutTargetPosition"},
+        std::string_view{"CEventShovePed"},
+        std::string_view{"CEventSoundBase"},
+        std::string_view{"CEventStatChangedValue"},
+        std::string_view{"CEventStaticCountReachedMax"},
+        std::string_view{"CEventStuckInAir"},
+        std::string_view{"CEventSuspiciousActivity"},
+        std::string_view{"CEventSwitch2NM"},
+        std::string_view{"CEventUnidentifiedPed"},
+        std::string_view{"CEventVehicleCollision"},
+        std::string_view{"CEventVehicleDamage"},
+        std::string_view{"CEventVehicleDamageWeapon"},
+        std::string_view{"CEventVehicleOnFire"},
+        std::string_view{"CEventWrithe"}
+    };
+
+    struct CompleteObjectLocator64 final
+    {
+        std::uint32_t Signature;
+        std::uint32_t Offset;
+        std::uint32_t ConstructorDisplacementOffset;
+        std::int32_t TypeDescriptorRva;
+        std::int32_t ClassDescriptorRva;
+        std::int32_t SelfRva;
+    };
+
 
     struct DamageContext final
     {
@@ -67,6 +360,11 @@ namespace
     std::atomic<std::uint64_t> g_sequence{};
     std::atomic<std::uint64_t> g_performanceFrequency{};
     std::array<std::atomic<std::uint32_t>, DetailedEventIdCapacity> g_detailedEventIds{};
+    std::array<std::atomic<std::uint8_t>, CaptureEventIdCapacity> g_captureStreamMasks{};
+    std::array<std::atomic<std::uint8_t>, CatalogEventNames.size()> g_catalogCaptureStreamMasks{};
+    std::array<std::atomic<std::uintptr_t>, CatalogVtableCacheCapacity> g_catalogVtableKeys{};
+    std::array<std::atomic<std::uint32_t>, CatalogVtableCacheCapacity> g_catalogVtableIds{};
+    std::atomic<bool> g_catalogCaptureEnabled{};
     std::array<void*, 3> g_targets{};
     std::array<EventDispatch, 3> g_originals{};
     void* g_damageTarget{};
@@ -103,6 +401,197 @@ namespace
             }
         }
         return false;
+    }
+
+    void InitializeCaptureStreamMasks() noexcept
+    {
+        for (auto& value : g_captureStreamMasks)
+        {
+            value.store(0, std::memory_order_relaxed);
+        }
+    }
+
+    void InitializeCatalogCaptureStreamMasks() noexcept
+    {
+        for (auto& value : g_catalogCaptureStreamMasks)
+        {
+            value.store(0, std::memory_order_relaxed);
+        }
+        for (auto& value : g_catalogVtableKeys)
+        {
+            value.store(0, std::memory_order_relaxed);
+        }
+        for (auto& value : g_catalogVtableIds)
+        {
+            value.store(0, std::memory_order_relaxed);
+        }
+        g_catalogCaptureEnabled.store(false, std::memory_order_relaxed);
+    }
+
+
+    [[nodiscard]] bool TryGetCatalogEventIndex(
+        std::uint32_t catalogEventId,
+        std::size_t& index) noexcept
+    {
+        if (catalogEventId == 0 || catalogEventId > CatalogEventNames.size())
+        {
+            return false;
+        }
+
+        index = static_cast<std::size_t>(catalogEventId - 1u);
+        return true;
+    }
+
+    [[nodiscard]] std::uint32_t ResolveCatalogEventId(
+        void** vtable) noexcept
+    {
+#if defined(_M_X64) || defined(__x86_64__)
+        if (vtable == nullptr)
+        {
+            return CatalogEventCacheMiss;
+        }
+
+        __try
+        {
+            const auto* locator =
+                reinterpret_cast<const CompleteObjectLocator64*>(vtable[-1]);
+            if (locator == nullptr || locator->Signature != 1u ||
+                locator->TypeDescriptorRva <= 0 || locator->SelfRva <= 0)
+            {
+                return CatalogEventCacheMiss;
+            }
+
+            const auto* imageBase =
+                reinterpret_cast<const std::byte*>(locator) - locator->SelfRva;
+            const auto* typeDescriptor =
+                imageBase + locator->TypeDescriptorRva;
+            const char* typeName = reinterpret_cast<const char*>(
+                typeDescriptor + sizeof(void*) * 2u);
+            if (typeName == nullptr)
+            {
+                return CatalogEventCacheMiss;
+            }
+
+            const char* eventName = std::strstr(typeName, "CEvent");
+            if (eventName == nullptr)
+            {
+                return CatalogEventCacheMiss;
+            }
+
+            const char* end = std::strchr(eventName, '@');
+            if (end == nullptr || end == eventName)
+            {
+                return CatalogEventCacheMiss;
+            }
+
+            const std::string_view candidate(
+                eventName,
+                static_cast<std::size_t>(end - eventName));
+            const auto found = std::ranges::lower_bound(
+                CatalogEventNames,
+                candidate);
+            if (found == CatalogEventNames.end() || *found != candidate)
+            {
+                return CatalogEventCacheMiss;
+            }
+
+            return static_cast<std::uint32_t>(
+                std::ranges::distance(CatalogEventNames.begin(), found) + 1);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER)
+        {
+            return CatalogEventCacheMiss;
+        }
+#endif
+        return CatalogEventCacheMiss;
+    }
+
+    [[nodiscard]] std::uint32_t ResolveCachedCatalogEventId(
+        void** vtable) noexcept
+    {
+        if (vtable == nullptr)
+        {
+            return CatalogEventCacheMiss;
+        }
+
+        const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(vtable);
+        const std::size_t slot =
+            static_cast<std::size_t>((key >> 4u) & (CatalogVtableCacheCapacity - 1u));
+        const std::uintptr_t cachedKey =
+            g_catalogVtableKeys[slot].load(std::memory_order_acquire);
+        if (cachedKey == key)
+        {
+            return g_catalogVtableIds[slot].load(std::memory_order_acquire);
+        }
+
+        const std::uint32_t resolved = ResolveCatalogEventId(vtable);
+        g_catalogVtableIds[slot].store(resolved, std::memory_order_release);
+        g_catalogVtableKeys[slot].store(key, std::memory_order_release);
+        return resolved;
+    }
+
+
+    [[nodiscard]] constexpr std::uint8_t StreamMask(EventStream stream) noexcept
+    {
+        switch (stream)
+        {
+        case EventStream::Reaction:
+            return ReactionStreamMask;
+        case EventStream::Group:
+            return GroupStreamMask;
+        case EventStream::Global:
+            return GlobalStreamMask;
+        default:
+            return 0;
+        }
+    }
+
+    [[nodiscard]] bool ShouldCaptureEvent(
+        std::uint32_t eventId,
+        EventStream stream) noexcept
+    {
+        if (eventId >= g_captureStreamMasks.size())
+        {
+            return false;
+        }
+
+        const std::uint8_t mask =
+            g_captureStreamMasks[eventId].load(std::memory_order_relaxed);
+        return (mask & StreamMask(stream)) != 0;
+    }
+
+    [[nodiscard]] bool ShouldCaptureCatalogEvent(
+        void** vtable,
+        EventStream stream,
+        std::uint32_t& catalogEventId) noexcept
+    {
+        catalogEventId = 0;
+        if (!g_catalogCaptureEnabled.load(std::memory_order_relaxed))
+        {
+            return false;
+        }
+
+        const std::uint32_t resolved = ResolveCachedCatalogEventId(vtable);
+        if (resolved == CatalogEventCacheMiss)
+        {
+            return false;
+        }
+
+        std::size_t index = 0;
+        if (!TryGetCatalogEventIndex(resolved, index))
+        {
+            return false;
+        }
+
+        const std::uint8_t mask =
+            g_catalogCaptureStreamMasks[index].load(std::memory_order_relaxed);
+        if ((mask & StreamMask(stream)) == 0)
+        {
+            return false;
+        }
+
+        catalogEventId = resolved;
+        return true;
     }
 
     [[nodiscard]] std::atomic<std::uint64_t>* ObservedCounter(
@@ -169,8 +658,36 @@ namespace
         {
             if (stream == EventStream::Reaction)
             {
-                constexpr std::ptrdiff_t EntityOffset = 0x90;
                 auto* bytes = static_cast<std::byte*>(group);
+
+                if (record.EventId == 29 && record.GameBuild == 3889)
+                {
+                    constexpr std::ptrdiff_t PrimaryEntityOffset = 0x98;
+                    constexpr std::ptrdiff_t MirrorEntityOffset = 0xA0;
+
+                    void* primary =
+                        *reinterpret_cast<void**>(bytes + PrimaryEntityOffset);
+                    void* mirror =
+                        *reinterpret_cast<void**>(bytes + MirrorEntityOffset);
+
+                    const auto address =
+                        reinterpret_cast<std::uintptr_t>(primary);
+
+                    if (primary != nullptr &&
+                        primary == mirror &&
+                        address >= 0x10000)
+                    {
+                        record.DispatchEntityAddress =
+                            static_cast<std::uint64_t>(address);
+                        record.DispatchEntityCount = 1;
+                        record.Flags =
+                            record.Flags | RecordFlags::DispatchEntityAddress;
+                    }
+
+                    return;
+                }
+
+                constexpr std::ptrdiff_t EntityOffset = 0x90;
                 void* entity = *reinterpret_cast<void**>(bytes + EntityOffset);
                 if (entity != nullptr)
                 {
@@ -203,24 +720,22 @@ namespace
         }
     }
 
-    void CaptureDetailedProbe(EventRecord& record, void* event) noexcept
+    [[nodiscard]] std::size_t CaptureProbeBytes(
+        std::byte* destination,
+        std::size_t destinationCapacity,
+        const std::byte* source,
+        std::size_t requested) noexcept
     {
-        if (event == nullptr ||
-            (record.EventId != 17 &&
-             record.EventId != 29 &&
-             record.EventId != 42 &&
-             record.EventId != 124 &&
-             record.EventId != 125 &&
-             record.EventId != 141))
+        if (destination == nullptr ||
+            destinationCapacity == 0 ||
+            source == nullptr ||
+            requested == 0)
         {
-            return;
+            return 0;
         }
 
-        const auto* source = static_cast<const std::byte*>(event) + sizeof(void*);
+        const std::size_t limit = std::min(destinationCapacity, requested);
         std::size_t captured = 0;
-        const std::size_t limit = std::min<std::size_t>(
-            record.ProbeData.size(),
-            DetailedEventProbeCapacity);
         while (captured < limit)
         {
             const std::size_t chunk = std::min<std::size_t>(
@@ -230,7 +745,7 @@ namespace
             __try
             {
                 std::memcpy(
-                    record.ProbeData.data() + captured,
+                    destination + captured,
                     source + captured,
                     chunk);
             }
@@ -238,16 +753,81 @@ namespace
             {
                 readable = false;
             }
+
             if (!readable)
             {
                 break;
             }
+
             captured += chunk;
         }
 
-        if (captured != 0)
+        return captured;
+    }
+
+    void CaptureDetailedProbe(
+        EventRecord& record,
+        void* group,
+        void* event) noexcept
+    {
+        if (event == nullptr ||
+            (record.EventId != 17 &&
+             record.EventId != 29 &&
+             record.EventId != 42 &&
+             record.EventId != 124 &&
+             record.EventId != 125 &&
+             record.EventId != 141 &&
+             record.CatalogEventId == 0))
         {
-            record.ProbeSize = static_cast<std::uint32_t>(captured);
+            return;
+        }
+
+        std::size_t extent = 0;
+
+        if (record.EventId == 29 ||
+            record.CatalogEventId != 0)
+        {
+            const auto* eventSource =
+                static_cast<const std::byte*>(event) + sizeof(void*);
+
+            const std::size_t eventCaptured = CaptureProbeBytes(
+                record.ProbeData.data(),
+                record.ProbeData.size(),
+                eventSource,
+                AimEventProbeCapacity);
+
+            extent = eventCaptured;
+
+            if (group != nullptr &&
+                record.ProbeData.size() > AimEventProbeCapacity)
+            {
+                const std::size_t groupCaptured = CaptureProbeBytes(
+                    record.ProbeData.data() + AimEventProbeCapacity,
+                    record.ProbeData.size() - AimEventProbeCapacity,
+                    static_cast<const std::byte*>(group),
+                    AimGroupProbeCapacity);
+
+                if (groupCaptured != 0)
+                {
+                    extent = AimEventProbeCapacity + groupCaptured;
+                }
+            }
+        }
+        else
+        {
+            const auto* source =
+                static_cast<const std::byte*>(event) + sizeof(void*);
+
+            extent = CaptureProbeBytes(
+                record.ProbeData.data(),
+                record.ProbeData.size(),
+                source,
+                DetailedEventProbeCapacity);
+        }
+
+        if (extent != 0)
+        {
+            record.ProbeSize = static_cast<std::uint32_t>(extent);
             record.Flags = record.Flags | RecordFlags::ProbeData;
         }
     }
@@ -284,9 +864,36 @@ namespace
                 return;
             }
 
-            record.EventId = static_cast<std::uint32_t>(getId(event));
-            CountObserved(record.EventId);
-            if (IsDetailedEventId(record.EventId))
+            const std::uint32_t actualEventId =
+                static_cast<std::uint32_t>(getId(event));
+            record.EventId = actualEventId;
+            CountObserved(actualEventId);
+
+            const bool directCapture = ShouldCaptureEvent(actualEventId, stream);
+            std::uint32_t catalogEventId = 0;
+            const bool catalogCapture = ShouldCaptureCatalogEvent(
+                vtable,
+                stream,
+                catalogEventId);
+            if (!directCapture && !catalogCapture)
+            {
+                return;
+            }
+
+            if (catalogEventId == 0 && directCapture)
+            {
+                const std::uint32_t resolved = ResolveCachedCatalogEventId(vtable);
+                if (resolved != CatalogEventCacheMiss)
+                {
+                    catalogEventId = resolved;
+                }
+            }
+
+            record.CatalogEventId = catalogEventId;
+
+            const bool detailedCapture =
+                IsDetailedEventId(actualEventId) || catalogCapture;
+            if (detailedCapture)
             {
                 CaptureDispatchContext(record, stream, group);
             }
@@ -301,7 +908,7 @@ namespace
                 }
             }
 
-            if (IsDetailedEventId(record.EventId))
+            if (detailedCapture)
             {
                 for (std::uint32_t count = 0; count <= ArgumentCapacity; ++count)
                 {
@@ -320,7 +927,7 @@ namespace
                 }
             }
 
-            CaptureDetailedProbe(record, event);
+            CaptureDetailedProbe(record, group, event);
         }
         __except (EXCEPTION_EXECUTE_HANDLER)
         {
@@ -414,10 +1021,9 @@ namespace
 
         if (g_recentDamageContextCount == g_recentDamageContexts.size())
         {
-            std::move(
-                g_recentDamageContexts.begin() + 1,
-                g_recentDamageContexts.end(),
-                g_recentDamageContexts.begin());
+            std::ranges::shift_left(
+                g_recentDamageContexts,
+                1);
             --g_recentDamageContextCount;
         }
 
@@ -450,13 +1056,10 @@ namespace
                 context.BaseDamage,
                 DamageMagnitudeSource::DamageProcess
             };
-            for (std::size_t move = index + 1;
-                 move < g_recentDamageContextCount;
-                 ++move)
-            {
-                g_recentDamageContexts[move - 1] =
-                    g_recentDamageContexts[move];
-            }
+            std::ranges::shift_left(
+                g_recentDamageContexts.begin() + index,
+                g_recentDamageContexts.begin() + g_recentDamageContextCount,
+                1);
             --g_recentDamageContextCount;
             g_recentDamageContexts[g_recentDamageContextCount] = {};
             return magnitude;
@@ -556,6 +1159,7 @@ namespace
         return result;
     }
 
+
     constexpr std::array<EventDispatch, 3> Hooks{
         &HookReaction,
         &HookGroup,
@@ -586,6 +1190,7 @@ namespace
             static_cast<void>(MH_DisableHook(g_damageProcessTarget));
             static_cast<void>(MH_RemoveHook(g_damageProcessTarget));
         }
+
     }
 
     void InstallOptionalDamageProcessHook() noexcept
@@ -642,6 +1247,8 @@ namespace CEventGenerator
         }
 
         InitializeDetailedIds();
+        InitializeCaptureStreamMasks();
+        InitializeCatalogCaptureStreamMasks();
 
         LARGE_INTEGER frequency{};
         if (QueryPerformanceFrequency(&frequency) == FALSE ||
@@ -720,6 +1327,7 @@ namespace CEventGenerator
         }
 
         InstallOptionalDamageProcessHook();
+
         g_status.store(Status::Ready, std::memory_order_release);
         return Status::Ready;
     }
@@ -796,5 +1404,94 @@ namespace CEventGenerator
             }
         }
         return false;
+    }
+
+    void ClearCaptureStreamMasks() noexcept
+    {
+        for (auto& value : g_captureStreamMasks)
+        {
+            value.store(0, std::memory_order_release);
+        }
+    }
+
+    bool SetCaptureStreamMask(
+        std::uint32_t eventId,
+        std::uint32_t streamMask) noexcept
+    {
+        if (eventId >= g_captureStreamMasks.size() ||
+            (streamMask & ~static_cast<std::uint32_t>(
+                ReactionStreamMask | GroupStreamMask | GlobalStreamMask)) != 0)
+        {
+            return false;
+        }
+
+        g_captureStreamMasks[eventId].store(
+            static_cast<std::uint8_t>(streamMask),
+            std::memory_order_release);
+        return true;
+    }
+
+    std::uint32_t GetCatalogEventCount() noexcept
+    {
+        return static_cast<std::uint32_t>(CatalogEventNames.size());
+    }
+
+    std::uint32_t CopyCatalogEventName(
+        std::uint32_t catalogEventId,
+        char* destination,
+        std::uint32_t destinationSize) noexcept
+    {
+        std::size_t index = 0;
+        if (!TryGetCatalogEventIndex(catalogEventId, index))
+        {
+            return 0;
+        }
+
+        const std::string_view name = CatalogEventNames[index];
+        const std::uint32_t required =
+            static_cast<std::uint32_t>(name.size() + 1u);
+        if (destination == nullptr || destinationSize < required)
+        {
+            return required;
+        }
+
+        std::memcpy(destination, name.data(), name.size());
+        destination[name.size()] = '\0';
+        return required;
+    }
+
+    void ClearCatalogCaptureStreamMasks() noexcept
+    {
+        for (auto& value : g_catalogCaptureStreamMasks)
+        {
+            value.store(0, std::memory_order_release);
+        }
+        g_catalogCaptureEnabled.store(false, std::memory_order_release);
+    }
+
+    bool SetCatalogCaptureStreamMask(
+        std::uint32_t catalogEventId,
+        std::uint32_t streamMask) noexcept
+    {
+        if ((streamMask & ~static_cast<std::uint32_t>(
+                ReactionStreamMask | GroupStreamMask | GlobalStreamMask)) != 0)
+        {
+            return false;
+        }
+
+        std::size_t index = 0;
+        if (!TryGetCatalogEventIndex(catalogEventId, index))
+        {
+            return false;
+        }
+
+        g_catalogCaptureStreamMasks[index].store(
+            static_cast<std::uint8_t>(streamMask),
+            std::memory_order_release);
+        if (streamMask != 0)
+        {
+            g_catalogCaptureEnabled.store(true, std::memory_order_release);
+        }
+        return true;
     }
 }

@@ -303,11 +303,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MIN_MOVE_BLEND_RATIO<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(36,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int NETWORK_GET_PLATFORM_PARTY_MEMBER_COUNT() => InvokeInt32(37);
 
@@ -482,7 +482,7 @@ public static partial class StandardNatives
         => InvokeBoolean(62,
             NativeArgument.Cam(cam.Value));
 
-    public static bool _NETWORK_IS_AMERICAS_VERSION() => InvokeBoolean(63);
+    public static bool _0x0292BD7F3766CEBC() => InvokeBoolean(63);
 
     public static void SET_PLAYER_TEAM<T0>(
         Player player,
@@ -668,11 +668,11 @@ public static partial class StandardNatives
 
     public static void SET_VEHICLE_HORN_SOUND_INDEX<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(87,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void START_ALARM(
         string? alarmName,
@@ -734,10 +734,10 @@ public static partial class StandardNatives
     public static void NETWORK_CLEAR_INVALID_OBJECT_MODELS() => InvokeVoid(97);
 
     public static void ADD_TEXT_COMPONENT_INTEGER<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(98,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void DOOR_SYSTEM_SET_AUTOMATIC_RATE<T0, T1>(
         T0 doorHash,
@@ -1101,7 +1101,7 @@ public static partial class StandardNatives
         T0 x,
         T1 y,
         T2 z,
-        T3 value,
+        T3 @value,
         T4 amount,
         T5 model)
         where T0 : INumberBase<T0>
@@ -1114,7 +1114,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(x),
             NativeArgument.Float32(y),
             NativeArgument.Float32(z),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(amount),
             NativeArgument.Hash32(model));
 
@@ -1570,11 +1570,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MOVE_RATE_OVERRIDE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(208,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float GET_WANTED_LEVEL_RADIUS(
         Player player)
@@ -2089,10 +2089,10 @@ public static partial class StandardNatives
             NativeArgument.Hash32(voiceGroupHash));
 
     public static float SIN<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(282,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float GET_HYDRAULIC_SUSPENSION_RAISE_FACTOR<T0>(
         Vehicle vehicle,
@@ -2347,12 +2347,12 @@ public static partial class StandardNatives
     public static bool DECOR_SET_INT<T0>(
         Entity entity,
         string? propertyName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeBoolean(318,
             NativeArgument.Entity(entity.Value),
             NativeArgument.Text(propertyName),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static int UPDATE_ONSCREEN_KEYBOARD() => InvokeInt32(319);
 
@@ -2562,11 +2562,11 @@ public static partial class StandardNatives
             NativeArgument.Text(script));
 
     public static void ADD_TEXT_COMPONENT_FORMATTED_INTEGER<T0>(
-        T0 value,
+        T0 @value,
         bool commaSeparated)
         where T0 : INumberBase<T0>
         => InvokeVoid(345,
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Boolean(commaSeparated));
 
     public static void NETWORK_SET_ACTIVITY_PLAYER_MAX(
@@ -3340,10 +3340,10 @@ public static partial class StandardNatives
             NativeArgument.Any(p13));
 
     public static int CEIL<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeInt32(448,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float GET_DISABLED_CONTROL_NORMAL<T0, T1>(
         T0 control,
@@ -3387,14 +3387,14 @@ public static partial class StandardNatives
 
     public static void PRESENCE_EVENT_UPDATESTAT_INT<T0, T1, T2>(
         T0 statHash,
-        T1 value,
+        T1 @value,
         T2 p2)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeVoid(453,
             NativeArgument.Hash32(statHash),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(p2));
 
     public static void SET_CAN_USE_HYDRAULICS(
@@ -3993,10 +3993,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(brainSet));
 
     public static void SET_PLAYER_CLOTH_LOCK_COUNTER<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(537,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SET_PED_AMMO<T0, T1>(
         Ped ped,
@@ -4038,9 +4038,9 @@ public static partial class StandardNatives
             NativeArgument.Any(p0));
 
     public static void SET_SCENARIO_PEDS_TO_BE_RETURNED_BY_NEXT_COMMAND(
-        bool value)
+        bool @value)
         => InvokeVoid(543,
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static Blip GET_NEXT_BLIP_INFO_ID<T0>(
         T0 blipSprite)
@@ -4095,14 +4095,14 @@ public static partial class StandardNatives
 
     public static void SET_MP_GAMER_TAGS_POINT_HEALTH<T0, T1, T2>(
         T0 gamerTagId,
-        T1 value,
+        T1 @value,
         T2 maximumValue)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeVoid(554,
             NativeArgument.Int32(gamerTagId),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(maximumValue));
 
     public static bool IS_RADAR_HIDDEN() => InvokeBoolean(555);
@@ -4141,14 +4141,14 @@ public static partial class StandardNatives
 
     public static void SET_PACKED_STAT_INT_CODE<T0, T1, T2>(
         T0 index,
-        T1 value,
+        T1 @value,
         T2 characterSlot)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeVoid(557,
             NativeArgument.Int32(index),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(characterSlot));
 
     public static void TASK_VEHICLE_DRIVE_TO_COORD_LONGRANGE<T0, T1, T2, T3, T4, T5>(
@@ -4418,11 +4418,11 @@ public static partial class StandardNatives
 
     public static void SET_ENTITY_MAX_HEALTH<T0>(
         Entity entity,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(589,
             NativeArgument.Entity(entity.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool IS_SCRIPTED_CONVERSATION_ONGOING() => InvokeBoolean(591);
 
@@ -4519,7 +4519,7 @@ public static partial class StandardNatives
             NativeArgument.Cam(cam.Value),
             NativeArgument.Boolean(toggle));
 
-    public static void ATTACH_VEHICLE_ON_TO_TRAILER<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+    public static void ATTACH_VEHICLE_ON_TO_TRAILER<T0, T1, T2, T3, T4, T5, T6, T7, T8>(
         Vehicle vehicle,
         Vehicle trailer,
         T0 offsetX,
@@ -4531,7 +4531,7 @@ public static partial class StandardNatives
         T6 rotationX,
         T7 rotationY,
         T8 rotationZ,
-        T9 disableCollisions)
+        bool disableCollisions)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
@@ -4541,7 +4541,6 @@ public static partial class StandardNatives
         where T6 : INumberBase<T6>
         where T7 : INumberBase<T7>
         where T8 : INumberBase<T8>
-        where T9 : INumberBase<T9>
         => InvokeVoid(596,
             NativeArgument.Vehicle(vehicle.Value),
             NativeArgument.Vehicle(trailer.Value),
@@ -4554,7 +4553,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(rotationX),
             NativeArgument.Float32(rotationY),
             NativeArgument.Float32(rotationZ),
-            NativeArgument.Float32(disableCollisions));
+            NativeArgument.Boolean(disableCollisions));
 
     public static void _SET_MINIMUM_TIME_BETWEEN_GEAR_SHIFTS<T0>(
         Vehicle vehicle,
@@ -4742,12 +4741,12 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_GXT_LABEL<T0>(
         T0 statName,
-        string? value,
+        string? @value,
         bool save)
         where T0 : INumberBase<T0>
         => InvokeBoolean(621,
             NativeArgument.Hash32(statName),
-            NativeArgument.Text(value),
+            NativeArgument.Text(@value),
             NativeArgument.Boolean(save));
 
     public static void CLEAR_PED_SECONDARY_TASK(
@@ -5066,12 +5065,12 @@ public static partial class StandardNatives
     public static void SET_PED_CONFIG_FLAG<T0>(
         Ped ped,
         T0 flagId,
-        bool value)
+        bool @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(657,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Int32(flagId),
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static void SET_VEHICLE_CAN_LEAK_PETROL(
         Vehicle vehicle,
@@ -5448,10 +5447,10 @@ public static partial class StandardNatives
     public static void CLEAR_REPLAY_STATS() => InvokeVoid(707);
 
     public static void SET_AI_WEAPON_DAMAGE_MODIFIER<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(708,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_SPEND_AGENCY(
         NativeAny p0,
@@ -6357,12 +6356,12 @@ public static partial class StandardNatives
 
     public static bool SC_PRESENCE_ATTR_SET_INT<T0, T1>(
         T0 attrHash,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeBoolean(811,
             NativeArgument.Hash32(attrHash),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool LOAD_STREAM(
         string? streamName,
@@ -6833,12 +6832,12 @@ public static partial class StandardNatives
     public static bool DECOR_SET_FLOAT<T0>(
         Entity entity,
         string? propertyName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeBoolean(868,
             NativeArgument.Entity(entity.Value),
             NativeArgument.Text(propertyName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void DRAW_FRONTEND_BACKGROUND_THIS_FRAME() => InvokeVoid(869);
 
@@ -7529,12 +7528,12 @@ public static partial class StandardNatives
 
     public static void SET_VEHICLE_ENGINE_ON(
         Vehicle vehicle,
-        bool value,
+        bool @value,
         bool instantly,
         bool disableAutoStart)
         => InvokeVoid(968,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Boolean(value),
+            NativeArgument.Boolean(@value),
             NativeArgument.Boolean(instantly),
             NativeArgument.Boolean(disableAutoStart));
 
@@ -7729,11 +7728,11 @@ public static partial class StandardNatives
 
     public static void APP_SET_FLOAT<T0>(
         string? property,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1003,
             NativeArgument.Text(property),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void _SET_BLIP_GPS_ROUTE_DISPLAY_DISTANCE<T0>(
         Blip blip,
@@ -8235,11 +8234,11 @@ public static partial class StandardNatives
         T16 alpha,
         bool bobUpAndDown,
         bool faceCamera,
-        T17 p19,
+        T17 rotationOrder,
         bool rotate,
         string? textureDict,
         string? textureName,
-        bool drawOnEnts)
+        bool invert)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
@@ -8278,11 +8277,11 @@ public static partial class StandardNatives
             NativeArgument.Int32(alpha),
             NativeArgument.Boolean(bobUpAndDown),
             NativeArgument.Boolean(faceCamera),
-            NativeArgument.Int32(p19),
+            NativeArgument.Int32(rotationOrder),
             NativeArgument.Boolean(rotate),
             NativeArgument.Text(textureDict),
             NativeArgument.Text(textureName),
-            NativeArgument.Boolean(drawOnEnts));
+            NativeArgument.Boolean(invert));
 
     public static int START_SHAPE_TEST_CAPSULE<T0, T1, T2, T3, T4, T5, T6, T7, T8>(
         T0 x1,
@@ -8318,19 +8317,19 @@ public static partial class StandardNatives
 
     public static bool SC_PRESENCE_ATTR_SET_STRING<T0>(
         T0 attrHash,
-        string? value)
+        string? @value)
         where T0 : INumberBase<T0>
         => InvokeBoolean(1084,
             NativeArgument.Hash32(attrHash),
-            NativeArgument.Text(value));
+            NativeArgument.Text(@value));
 
     public static void SET_PED_STEER_BIAS<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1085,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_SPENT_CASH_DROP<T0>(
         T0 amount,
@@ -8875,11 +8874,11 @@ public static partial class StandardNatives
 
     public static void SET_TRAILER_INVERSE_MASS_SCALE<T0>(
         Vehicle vehicle,
-        T0 p1)
+        T0 scale)
         where T0 : INumberBase<T0>
         => InvokeVoid(1147,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(p1));
+            NativeArgument.Float32(scale));
 
     public static void NETWORK_SPENT_PURCHASE_HACKER_TRUCK(
         NativeAny p0,
@@ -9600,11 +9599,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_VISUAL_FIELD_MIN_ANGLE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1241,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_EARN_GANGOPS_WAGES<T0, T1>(
         T0 amount,
@@ -10289,14 +10288,14 @@ public static partial class StandardNatives
 
     public static void PRESENCE_EVENT_UPDATESTAT_FLOAT<T0, T1, T2>(
         T0 statHash,
-        T1 value,
+        T1 @value,
         T2 p2)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeVoid(1324,
             NativeArgument.Hash32(statHash),
-            NativeArgument.Float32(value),
+            NativeArgument.Float32(@value),
             NativeArgument.Int32(p2));
 
     public static int SCRIPT_THREAD_ITERATOR_GET_NEXT_THREAD_ID() => InvokeInt32(1325);
@@ -10438,12 +10437,13 @@ public static partial class StandardNatives
             NativeArgument.Float32(startRange),
             NativeArgument.Float32(endRange));
 
-    public static void SET_PROP_TINT_INDEX(
-        NativeAny p0,
-        NativeAny p1)
+    public static void SET_PROP_TINT_INDEX<T0>(
+        GameObject @object,
+        T0 tintIndex)
+        where T0 : INumberBase<T0>
         => InvokeVoid(1340,
-            NativeArgument.Any(p0),
-            NativeArgument.Any(p1));
+            NativeArgument.GameObject(@object.Value),
+            NativeArgument.Int32(tintIndex));
 
     public static void SET_MP_GAMER_TAG_HEALTH_BAR_COLOUR<T0, T1>(
         T0 gamerTagId,
@@ -10819,11 +10819,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_HEARING_RANGE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1395,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool IS_REPLAY_RECORD_SPACE_AVAILABLE(
         bool p0)
@@ -11236,11 +11236,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_CAPSULE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1464,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int GET_ROPE_VERTEX_COUNT<T0>(
         T0 ropeId)
@@ -11449,12 +11449,12 @@ public static partial class StandardNatives
     public static void SET_TASK_MOVE_NETWORK_SIGNAL_LOCAL_FLOAT<T0>(
         Ped ped,
         string? signalName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1492,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Text(signalName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void STABILISE_ENTITY_ATTACHED_TO_HELI<T0>(
         Vehicle vehicle,
@@ -11672,10 +11672,10 @@ public static partial class StandardNatives
             NativeArgument.Boolean(toggle));
 
     public static void SET_PROFILE_SETTING_CREATOR_DM_DONE<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1522,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void STOP_CONTROL_SHAKE<T0>(
         T0 control)
@@ -12756,10 +12756,10 @@ public static partial class StandardNatives
 
     public static void APP_SET_STRING(
         string? property,
-        string? value)
+        string? @value)
         => InvokeVoid(1687,
             NativeArgument.Text(property),
-            NativeArgument.Text(value));
+            NativeArgument.Text(@value));
 
     public static void SET_WAYPOINT_CLEAR_ON_ARRIVAL_MODE<T0>(
         T0 mode)
@@ -13118,10 +13118,10 @@ public static partial class StandardNatives
             NativeArgument.ScrHandle(itemset.Value));
 
     public static Player INT_TO_PLAYERINDEX<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokePlayer(1742,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool IS_NETWORK_LOADING_SCENE() => InvokeBoolean(1743);
 
@@ -13301,11 +13301,11 @@ public static partial class StandardNatives
 
     public static void SET_VEHICLE_STEER_BIAS<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1769,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void SET_THIS_THREAD_PRIORITY<T0>(
         T0 priority)
@@ -13367,11 +13367,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MAX_MOVE_BLEND_RATIO<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1783,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int GET_ZONE_POPSCHEDULE<T0>(
         T0 zoneId)
@@ -13448,11 +13448,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MAX_TIME_IN_WATER<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(1797,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void ALLOW_PLAYER_SWITCH_PAN() => InvokeVoid(1798);
 
@@ -14395,13 +14395,13 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_FLOAT<T0, T1>(
         T0 statName,
-        T1 value,
+        T1 @value,
         bool save)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeBoolean(1932,
             NativeArgument.Hash32(statName),
-            NativeArgument.Float32(value),
+            NativeArgument.Float32(@value),
             NativeArgument.Boolean(save));
 
     public static bool IS_PED_IN_COMBAT(
@@ -14823,12 +14823,12 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_BOOL<T0>(
         T0 statName,
-        bool value,
+        bool @value,
         bool save)
         where T0 : INumberBase<T0>
         => InvokeBoolean(2006,
             NativeArgument.Hash32(statName),
-            NativeArgument.Boolean(value),
+            NativeArgument.Boolean(@value),
             NativeArgument.Boolean(save));
 
     public static void ATTACH_ROPE_TO_ENTITY<T0, T1, T2, T3>(
@@ -15370,11 +15370,11 @@ public static partial class StandardNatives
 
     public static void SET_PLAYER_STEALTH_PERCEPTION_MODIFIER<T0>(
         Player player,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2078,
             NativeArgument.Player(player.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void SET_PED_EMISSIVE_SCALE<T0>(
         Ped ped,
@@ -15672,11 +15672,11 @@ public static partial class StandardNatives
 
     public static void PLAYSTATS_BACKGROUND_SCRIPT_ACTION<T0>(
         string? action,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2114,
             NativeArgument.Text(action),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void PLAYSTATS_EARNED_MC_POINTS(
         NativeAny p0,
@@ -15777,7 +15777,7 @@ public static partial class StandardNatives
         T3 z,
         bool isNetwork,
         bool bScriptHostObj,
-        bool dynamic)
+        bool @dynamic)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
@@ -15789,7 +15789,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(z),
             NativeArgument.Boolean(isNetwork),
             NativeArgument.Boolean(bScriptHostObj),
-            NativeArgument.Boolean(dynamic));
+            NativeArgument.Boolean(@dynamic));
 
     public static int GET_AUDIBLE_MUSIC_TRACK_TEXT_ID() => InvokeInt32(2129);
 
@@ -16219,14 +16219,14 @@ public static partial class StandardNatives
             NativeArgument.Ped(ped.Value));
 
     public static int GET_BITS_IN_RANGE<T0, T1, T2>(
-        T0 var,
+        T0 @var,
         T1 rangeStart,
         T2 rangeEnd)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeInt32(2184,
-            NativeArgument.Int32(var),
+            NativeArgument.Int32(@var),
             NativeArgument.Int32(rangeStart),
             NativeArgument.Int32(rangeEnd));
 
@@ -16608,9 +16608,9 @@ public static partial class StandardNatives
             NativeArgument.Float32(z));
 
     public static void DISTANT_COP_CAR_SIRENS(
-        bool value)
+        bool @value)
         => InvokeVoid(2235,
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static bool IS_PED_DIVING(
         Ped ped)
@@ -16618,10 +16618,10 @@ public static partial class StandardNatives
             NativeArgument.Ped(ped.Value));
 
     public static void SET_PROFILE_SETTING_CREATOR_CTF_DONE<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2237,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void NETWORK_SESSION_SET_UNIQUE_CREW_ONLY_CREWS_TRANSITION(
         bool p0)
@@ -16757,11 +16757,11 @@ public static partial class StandardNatives
             NativeArgument.Player(player.Value));
 
     public static void SET_RELATIONSHIP_GROUP_AFFECTS_WANTED_LEVEL<T0>(
-        T0 group,
+        T0 @group,
         bool p1)
         where T0 : INumberBase<T0>
         => InvokeVoid(2260,
-            NativeArgument.Hash32(group),
+            NativeArgument.Hash32(@group),
             NativeArgument.Boolean(p1));
 
     public static Blip GET_AI_PED_VEHICLE_BLIP_INDEX(
@@ -17198,11 +17198,11 @@ public static partial class StandardNatives
 
     public static void SET_ENTITY_LOD_DIST<T0>(
         Entity entity,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2341,
             NativeArgument.Entity(entity.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool IS_USER_OLD_ENOUGH_TO_ACCESS_STORE() => InvokeBoolean(2342);
 
@@ -17535,10 +17535,10 @@ public static partial class StandardNatives
     public static void SET_SCRIPTS_HAVE_CLEANED_UP_FOR_REPLAY_SYSTEM() => InvokeVoid(2389);
 
     public static void SETTIMERB<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2390,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool NETWORK_DID_GET_GAMER_STATUS_SUCCEED() => InvokeBoolean(2391);
 
@@ -18688,11 +18688,11 @@ public static partial class StandardNatives
 
     public static void APP_SET_INT<T0>(
         string? property,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2565,
             NativeArgument.Text(property),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SET_ALL_LOW_PRIORITY_VEHICLE_GENERATORS_ACTIVE(
         bool active)
@@ -19339,7 +19339,7 @@ public static partial class StandardNatives
 
     public static void PRESENCE_EVENT_UPDATESTAT_INT_WITH_STRING<T0, T1, T2>(
         T0 statHash,
-        T1 value,
+        T1 @value,
         T2 p2,
         string? @string)
         where T0 : INumberBase<T0>
@@ -19347,7 +19347,7 @@ public static partial class StandardNatives
         where T2 : INumberBase<T2>
         => InvokeVoid(2659,
             NativeArgument.Hash32(statHash),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(p2),
             NativeArgument.Text(@string));
 
@@ -19750,7 +19750,7 @@ public static partial class StandardNatives
         T2 posY,
         T3 posZ,
         T4 flags,
-        T5 value,
+        T5 @value,
         T6 modelHash,
         bool p7,
         bool p8)
@@ -19767,7 +19767,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(posY),
             NativeArgument.Float32(posZ),
             NativeArgument.Int32(flags),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Hash32(modelHash),
             NativeArgument.Boolean(p7),
             NativeArgument.Boolean(p8));
@@ -20028,12 +20028,12 @@ public static partial class StandardNatives
 
     public static void STAT_SET_PROFILE_SETTING_VALUE<T0, T1>(
         T0 profileSetting,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(2765,
             NativeArgument.Int32(profileSetting),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void _SET_SPHERICAL_STREAM_DISTANT_HILODS_THIS_FRAME() => InvokeVoid(2766);
 
@@ -20212,9 +20212,9 @@ public static partial class StandardNatives
             NativeArgument.Text(animationName));
 
     public static void ADD_REPLAY_STAT_VALUE(
-        NativeAny value)
+        NativeAny @value)
         => InvokeVoid(2789,
-            NativeArgument.Any(value));
+            NativeArgument.Any(@value));
 
     public static bool STAT_SET_LICENSE_PLATE<T0>(
         T0 statName,
@@ -20445,11 +20445,11 @@ public static partial class StandardNatives
     public static bool DECOR_SET_BOOL(
         Entity entity,
         string? propertyName,
-        bool value)
+        bool @value)
         => InvokeBoolean(2817,
             NativeArgument.Entity(entity.Value),
             NativeArgument.Text(propertyName),
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static bool IS_CAM_SHAKING(
         Cam cam)
@@ -20617,11 +20617,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MAX_TIME_UNDERWATER<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2831,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void DOOR_SYSTEM_SET_DOOR_STATE<T0, T1>(
         T0 doorHash,
@@ -21554,11 +21554,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_VISUAL_FIELD_MAX_ANGLE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(2965,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool IS_PEDHEADSHOT_READY<T0>(
         T0 id)
@@ -21852,10 +21852,10 @@ public static partial class StandardNatives
             NativeArgument.Vehicle(vehicle.Value));
 
     public static float SQRT<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(3011,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool IS_SAFE_TO_START_PLAYER_SWITCH() => InvokeBoolean(3013);
 
@@ -22111,11 +22111,11 @@ public static partial class StandardNatives
 
     public static void SET_VARIABLE_ON_UNDER_WATER_STREAM<T0>(
         string? variableName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(3055,
             NativeArgument.Text(variableName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void DISABLE_PED_INJURED_ON_GROUND_BEHAVIOUR(
         Ped ped)
@@ -22312,10 +22312,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(alpha));
 
     public static float ABSF<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(3070,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int NETWORK_GET_ACTIVITY_PLAYER_NUM(
         bool p0)
@@ -22953,11 +22953,11 @@ public static partial class StandardNatives
 
     public static void SET_PLAYER_MAX_ARMOUR<T0>(
         Player player,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(3181,
             NativeArgument.Player(player.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SET_FAKE_PAUSEMAP_PLAYER_POSITION_THIS_FRAME<T0, T1>(
         T0 x,
@@ -25235,13 +25235,13 @@ public static partial class StandardNatives
     public static void SET_HYDRAULIC_SUSPENSION_RAISE_FACTOR<T0, T1>(
         Vehicle vehicle,
         T0 wheelId,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(3505,
             NativeArgument.Vehicle(vehicle.Value),
             NativeArgument.Int32(wheelId),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool GET_IS_HIDEF() => InvokeBoolean(3506);
 
@@ -25493,12 +25493,12 @@ public static partial class StandardNatives
     public static void SET_TASK_MOVE_NETWORK_SIGNAL_FLOAT_LERP_RATE<T0>(
         Ped ped,
         string? signalName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(3541,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Text(signalName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool IS_PED_BEING_STEALTH_KILLED(
         Ped ped)
@@ -26643,12 +26643,12 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_USER_ID<T0>(
         T0 statName,
-        string? value,
+        string? @value,
         bool save)
         where T0 : INumberBase<T0>
         => InvokeBoolean(3701,
             NativeArgument.Hash32(statName),
-            NativeArgument.Text(value),
+            NativeArgument.Text(@value),
             NativeArgument.Boolean(save));
 
     public static void SET_PARTICLE_FX_FORCE_VEHICLE_INTERIOR(
@@ -27245,10 +27245,10 @@ public static partial class StandardNatives
     public static int GET_STATUS_OF_TAKE_MISSION_CREATOR_PHOTO() => InvokeInt32(3791);
 
     public static void SET_AMBIENT_VEHICLE_RANGE_MULTIPLIER_THIS_FRAME<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(3792,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_SPEND_BUY_SUB(
         NativeAny p0,
@@ -27746,11 +27746,11 @@ public static partial class StandardNatives
 
     public static void MODIFY_VEHICLE_TOP_SPEED<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(3861,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_SPEND_INTERACTION_MENU_ABILITY(
         NativeAny p0,
@@ -28317,11 +28317,11 @@ public static partial class StandardNatives
 
     public static void DETACH_ENTITY(
         Entity entity,
-        bool dynamic,
+        bool @dynamic,
         bool collision)
         => InvokeVoid(3929,
             NativeArgument.Entity(entity.Value),
-            NativeArgument.Boolean(dynamic),
+            NativeArgument.Boolean(@dynamic),
             NativeArgument.Boolean(collision));
 
     public static void _PLAYSTATS_SHOWROOM_NAV<T0>(
@@ -28509,11 +28509,11 @@ public static partial class StandardNatives
 
     public static void SET_OBJECT_TINT_INDEX<T0>(
         GameObject @object,
-        T0 textureVariation)
+        T0 tintIndex)
         where T0 : INumberBase<T0>
         => InvokeVoid(3956,
             NativeArgument.GameObject(@object.Value),
-            NativeArgument.Int32(textureVariation));
+            NativeArgument.Int32(tintIndex));
 
     public static void UPDATE_TASK_AIM_GUN_SCRIPTED_TARGET<T0, T1, T2>(
         Ped ped,
@@ -28710,12 +28710,12 @@ public static partial class StandardNatives
             NativeArgument.Any(p0));
 
     public static int SHIFT_RIGHT<T0, T1>(
-        T0 value,
+        T0 @value,
         T1 bitShift)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeInt32(3985,
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(bitShift));
 
     public static int _NETWORK_GET_COMMUNICATION_GROUP_DEFAULT_FLAGS<T0>(
@@ -29007,7 +29007,7 @@ public static partial class StandardNatives
         T3 z,
         bool isNetwork,
         bool bScriptHostObj,
-        bool dynamic,
+        bool @dynamic,
         NativeAny p7)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
@@ -29020,7 +29020,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(z),
             NativeArgument.Boolean(isNetwork),
             NativeArgument.Boolean(bScriptHostObj),
-            NativeArgument.Boolean(dynamic),
+            NativeArgument.Boolean(@dynamic),
             NativeArgument.Any(p7));
 
     public static bool SC_INBOX_MESSAGE_DO_APPLY<T0>(
@@ -29298,12 +29298,12 @@ public static partial class StandardNatives
 
     public static void STAT_INCREMENT<T0, T1>(
         T0 statName,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(4064,
             NativeArgument.Hash32(statName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static Ped CREATE_RANDOM_PED_AS_DRIVER(
         Vehicle vehicle,
@@ -29342,10 +29342,10 @@ public static partial class StandardNatives
     public static void BEGIN_SRL() => InvokeVoid(4072);
 
     public static void SET_INSTANCE_PRIORITY_MODE<T0>(
-        T0 p0)
+        T0 mode)
         where T0 : INumberBase<T0>
         => InvokeVoid(4073,
-            NativeArgument.Int32(p0));
+            NativeArgument.Int32(mode));
 
     public static bool IS_PED_GROUP_MEMBER<T0>(
         Ped ped,
@@ -29545,7 +29545,7 @@ public static partial class StandardNatives
         T2 posY,
         T3 posZ,
         T4 flags,
-        T5 value,
+        T5 @value,
         T6 modelHash,
         bool p7,
         bool p8)
@@ -29562,7 +29562,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(posY),
             NativeArgument.Float32(posZ),
             NativeArgument.Int32(flags),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Hash32(modelHash),
             NativeArgument.Boolean(p7),
             NativeArgument.Boolean(p8));
@@ -30003,10 +30003,10 @@ public static partial class StandardNatives
             NativeArgument.Boolean(p0));
 
     public static int INT_TO_PARTICIPANTINDEX<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeInt32(4158,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static float STAT_GET_CURRENT_JUMP_DISTANCE() => InvokeFloat32(4159);
 
@@ -31849,12 +31849,12 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_STRING<T0>(
         T0 statName,
-        string? value,
+        string? @value,
         bool save)
         where T0 : INumberBase<T0>
         => InvokeBoolean(4438,
             NativeArgument.Hash32(statName),
-            NativeArgument.Text(value),
+            NativeArgument.Text(@value),
             NativeArgument.Boolean(save));
 
     public static void SET_GAMEPLAY_CAM_SHAKE_AMPLITUDE<T0>(
@@ -32476,9 +32476,9 @@ public static partial class StandardNatives
     public static int PLM_GET_CONSTRAINED_DURATION_MS() => InvokeInt32(4520);
 
     public static void ALLOW_DAMAGE_EVENTS_FOR_NON_NETWORKED_OBJECTS(
-        bool value)
+        bool @value)
         => InvokeVoid(4522,
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static bool DOES_TEXT_LABEL_EXIST(
         string? gxt)
@@ -33234,12 +33234,12 @@ public static partial class StandardNatives
 
     public static void SET_BINK_MOVIE_VOLUME<T0, T1>(
         T0 binkMovie,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(4623,
             NativeArgument.Int32(binkMovie),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void DROP_AMBIENT_PROP(
         Ped ped)
@@ -33263,11 +33263,11 @@ public static partial class StandardNatives
 
     public static bool GET_IS_TASK_ACTIVE<T0>(
         Ped ped,
-        T0 taskIndex)
+        T0 taskType)
         where T0 : INumberBase<T0>
         => InvokeBoolean(4630,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Int32(taskIndex));
+            NativeArgument.Int32(taskType));
 
     public static bool NETWORK_HAS_ENTITY_BEEN_REGISTERED_WITH_THIS_THREAD(
         Entity entity)
@@ -33327,11 +33327,11 @@ public static partial class StandardNatives
     public static void SET_TASK_MOVE_NETWORK_SIGNAL_BOOL(
         Ped ped,
         string? signalName,
-        bool value)
+        bool @value)
         => InvokeVoid(4638,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Text(signalName),
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static bool IS_BOAT_ANCHORED(
         Vehicle vehicle)
@@ -33909,13 +33909,13 @@ public static partial class StandardNatives
 
     public static bool STAT_SET_INT<T0, T1>(
         T0 statName,
-        T1 value,
+        T1 @value,
         bool save)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeBoolean(4711,
             NativeArgument.Hash32(statName),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Boolean(save));
 
     public static bool _NETWORK_GET_TUNABLES_REGISTRATION_BOOL<T0>(
@@ -34378,11 +34378,11 @@ public static partial class StandardNatives
 
     public static void SET_VEHICLE_CHEAT_POWER_INCREASE<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(4781,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void INIT_CREATOR_BUDGET() => InvokeVoid(4782);
 
@@ -34673,11 +34673,11 @@ public static partial class StandardNatives
 
     public static void SET_VEHICLE_BODY_HEALTH<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(4823,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float VDIST2<T0, T1, T2, T3, T4, T5>(
         T0 x1,
@@ -35503,10 +35503,10 @@ public static partial class StandardNatives
             NativeArgument.Ped(ped.Value));
 
     public static float TO_FLOAT<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(4941,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void NETWORK_CONCEAL_PLAYER(
         Player player,
@@ -35788,11 +35788,11 @@ public static partial class StandardNatives
 
     public static void SET_VARIABLE_ON_SYNCH_SCENE_AUDIO<T0>(
         string? variableName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(4972,
             NativeArgument.Text(variableName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool GET_DOES_VEHICLE_HAVE_DAMAGE_DECALS(
         Vehicle vehicle)
@@ -35939,10 +35939,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(netHandle));
 
     public static void SET_PLAYER_TCMODIFIER_TRANSITION<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(4997,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void STOP_CAM_SHAKING(
         Cam cam,
@@ -36286,11 +36286,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_ENVEFF_SCALE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5037,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void PLAYSTATS_MISSION_ENDED(
         NativeAny p0)
@@ -36806,20 +36806,20 @@ public static partial class StandardNatives
             NativeArgument.Boolean(toggle));
 
     public static void SETTIMERA<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5104,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SET_PED_RESET_FLAG<T0>(
         Ped ped,
         T0 flagId,
-        bool doReset)
+        bool @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5105,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Int32(flagId),
-            NativeArgument.Boolean(doReset));
+            NativeArgument.Boolean(@value));
 
     public static void PLAYSTATS_HEIST4_FINALE(
         NativeAny p0)
@@ -36940,7 +36940,7 @@ public static partial class StandardNatives
         Vehicle vehicle,
         T0 wheelId,
         T1 state,
-        T2 value,
+        T2 @value,
         NativeAny p4)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
@@ -36949,7 +36949,7 @@ public static partial class StandardNatives
             NativeArgument.Vehicle(vehicle.Value),
             NativeArgument.Int32(wheelId),
             NativeArgument.Int32(state),
-            NativeArgument.Float32(value),
+            NativeArgument.Float32(@value),
             NativeArgument.Any(p4));
 
     public static void NETWORK_POST_UDS_ACTIVITY_TERMINATE() => InvokeVoid(5117);
@@ -37269,10 +37269,10 @@ public static partial class StandardNatives
             NativeArgument.Float32(p0));
 
     public static void SCALEFORM_MOVIE_METHOD_ADD_PARAM_INT<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5162,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void WATER_OVERRIDE_SET_SHOREWAVEMINAMPLITUDE<T0>(
         T0 minAmplitude)
@@ -37419,12 +37419,12 @@ public static partial class StandardNatives
 
     public static bool SC_PRESENCE_ATTR_SET_FLOAT<T0, T1>(
         T0 attrHash,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeBoolean(5186,
             NativeArgument.Hash32(attrHash),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool CAN_PHONE_BE_SEEN_ON_SCREEN() => InvokeBoolean(5187);
 
@@ -37559,9 +37559,9 @@ public static partial class StandardNatives
     public static bool NETWORK_IS_TRANSITION_LEAVE_POSTPONED() => InvokeBoolean(5209);
 
     public static void SCALEFORM_MOVIE_METHOD_ADD_PARAM_BOOL(
-        bool value)
+        bool @value)
         => InvokeVoid(5210,
-            NativeArgument.Boolean(value));
+            NativeArgument.Boolean(@value));
 
     public static float GET_SNOW_LEVEL() => InvokeFloat32(5211);
 
@@ -38574,10 +38574,10 @@ public static partial class StandardNatives
     public static bool IS_CINEMATIC_IDLE_CAM_RENDERING() => InvokeBoolean(5355);
 
     public static void SET_NUMBER_OF_PARKED_VEHICLES<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5356,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void _NETWORK_EARN_DAILY_STASH_HOUSE_COMPLETED(
         NativeAny p0,
@@ -38686,10 +38686,10 @@ public static partial class StandardNatives
     public static bool GET_IS_USING_HOOD_CAMERA() => InvokeBoolean(5373);
 
     public static void SET_NOISINESSOVERIDE<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5374,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void SET_PED_CAN_COWER_IN_COVER(
         Ped ped,
@@ -38761,10 +38761,10 @@ public static partial class StandardNatives
             NativeArgument.Float32(scale));
 
     public static void NETWORK_SET_TALKER_PROXIMITY<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5388,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void PLAYSTATS_MC_REQUEST_BIKE(
         NativeAny p0,
@@ -38786,12 +38786,12 @@ public static partial class StandardNatives
     public static void SET_TASK_VEHICLE_CHASE_BEHAVIOR_FLAG<T0>(
         Ped ped,
         T0 flag,
-        bool set)
+        bool @set)
         where T0 : INumberBase<T0>
         => InvokeVoid(5392,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Int32(flag),
-            NativeArgument.Boolean(set));
+            NativeArgument.Boolean(@set));
 
     public static bool DOES_RELATIONSHIP_GROUP_EXIST<T0>(
         T0 groupHash)
@@ -39619,10 +39619,10 @@ public static partial class StandardNatives
             NativeArgument.Float32(falloff));
 
     public static float COS<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(5508,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float GET_CITY_DENSITY() => InvokeFloat32(5509);
 
@@ -39756,10 +39756,10 @@ public static partial class StandardNatives
     public static int GET_NUM_PED_MAKEUP_TINTS() => InvokeInt32(5529);
 
     public static void SET_GAMEPLAY_HINT_BASE_ORBIT_PITCH_OFFSET<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5530,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void SET_FAKE_MINIMAP_MAX_ALTIMETER_HEIGHT<T0>(
         T0 altitude,
@@ -40490,12 +40490,12 @@ public static partial class StandardNatives
     public static void SET_TASK_MOVE_NETWORK_SIGNAL_FLOAT<T0>(
         Ped ped,
         string? signalName,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5627,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Text(signalName),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void NETWORK_SPENT_NO_COPS(
         NativeAny p0,
@@ -40598,10 +40598,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(p3));
 
     public static void SCALEFORM_MOVIE_METHOD_ADD_PARAM_FLOAT<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5639,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static uint _GET_STAT_HASH_FOR_CHARACTER_STAT<T0, T1, T2>(
         T0 dataType,
@@ -41375,10 +41375,10 @@ public static partial class StandardNatives
             NativeArgument.Entity(entity.Value));
 
     public static void SET_HAS_SPECIALEDITION_CONTENT<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5741,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SET_DRIVE_TASK_DRIVING_STYLE<T0>(
         Ped ped,
@@ -41557,13 +41557,13 @@ public static partial class StandardNatives
 
     public static void SET_PACKED_STAT_BOOL_CODE<T0, T1>(
         T0 index,
-        bool value,
+        bool @value,
         T1 characterSlot)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(5763,
             NativeArgument.Int32(index),
-            NativeArgument.Boolean(value),
+            NativeArgument.Boolean(@value),
             NativeArgument.Int32(characterSlot));
 
     public static void SET_GAMEPLAY_CAM_ALTITUDE_FOV_SCALING_STATE(
@@ -41578,11 +41578,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_ALERTNESS<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(5766,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void GOLF_TRAIL_SET_TESSELLATION<T0, T1>(
         T0 p0,
@@ -43966,12 +43966,12 @@ public static partial class StandardNatives
     public static Interior GET_INTERIOR_FROM_PRIMARY_VIEW() => InvokeInterior(6100);
 
     public static void ADD_TEXT_COMPONENT_FLOAT<T0, T1>(
-        T0 value,
+        T0 @value,
         T1 decimalPlaces)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(6101,
-            NativeArgument.Float32(value),
+            NativeArgument.Float32(@value),
             NativeArgument.Int32(decimalPlaces));
 
     public static void NETWORK_SPENT_MOVE_YACHT<T0>(
@@ -44045,10 +44045,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(stackSize));
 
     public static float LOG10<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeFloat32(6109,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static float GET_ENTITY_SUBMERGED_LEVEL(
         Entity entity)
@@ -44071,7 +44071,7 @@ public static partial class StandardNatives
             NativeArgument.Int32(drawableId),
             NativeArgument.Int32(textureId));
 
-    public static void DRAW_MARKER_EX<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16>(
+    public static void DRAW_MARKER_EX<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16, T17>(
         T0 type,
         T1 posX,
         T2 posY,
@@ -44091,13 +44091,13 @@ public static partial class StandardNatives
         T16 alpha,
         bool bobUpAndDown,
         bool faceCamera,
-        NativeAny p19,
+        T17 rotationOrder,
         bool rotate,
         string? textureDict,
         string? textureName,
-        bool drawOnEnts,
-        bool p24,
-        bool p25)
+        bool invert,
+        bool usePreAlphaDepth,
+        bool matchEntityRotOrder)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
@@ -44115,6 +44115,7 @@ public static partial class StandardNatives
         where T14 : INumberBase<T14>
         where T15 : INumberBase<T15>
         where T16 : INumberBase<T16>
+        where T17 : INumberBase<T17>
         => InvokeVoid(6113,
             NativeArgument.Int32(type),
             NativeArgument.Float32(posX),
@@ -44135,13 +44136,13 @@ public static partial class StandardNatives
             NativeArgument.Int32(alpha),
             NativeArgument.Boolean(bobUpAndDown),
             NativeArgument.Boolean(faceCamera),
-            NativeArgument.Any(p19),
+            NativeArgument.Int32(rotationOrder),
             NativeArgument.Boolean(rotate),
             NativeArgument.Text(textureDict),
             NativeArgument.Text(textureName),
-            NativeArgument.Boolean(drawOnEnts),
-            NativeArgument.Boolean(p24),
-            NativeArgument.Boolean(p25));
+            NativeArgument.Boolean(invert),
+            NativeArgument.Boolean(usePreAlphaDepth),
+            NativeArgument.Boolean(matchEntityRotOrder));
 
     public static void SET_FLY_CAM_VERTICAL_RESPONSE<T0, T1, T2>(
         Cam cam,
@@ -44169,11 +44170,11 @@ public static partial class StandardNatives
 
     public static void SET_BOAT_LOW_LOD_ANCHOR_DISTANCE<T0>(
         Vehicle vehicle,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6118,
             NativeArgument.Vehicle(vehicle.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int GET_OBJECT_TINT_INDEX(
         GameObject @object)
@@ -44254,14 +44255,14 @@ public static partial class StandardNatives
     public static bool SET_CONTROL_VALUE_NEXT_FRAME<T0, T1, T2>(
         T0 control,
         T1 action,
-        T2 value)
+        T2 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
         => InvokeBoolean(6133,
             NativeArgument.Int32(control),
             NativeArgument.Int32(action),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int GET_PLAYER_RADIO_STATION_INDEX() => InvokeInt32(6134);
 
@@ -44888,10 +44889,10 @@ public static partial class StandardNatives
             NativeArgument.Any(p3));
 
     public static void SCALEFORM_MOVIE_METHOD_ADD_PARAM_LATEST_BRIEF_STRING<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6229,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool IS_PED_ON_SPECIFIC_VEHICLE(
         Ped ped,
@@ -45201,12 +45202,12 @@ public static partial class StandardNatives
             NativeArgument.Float32(farDOF));
 
     public static int SHIFT_LEFT<T0, T1>(
-        T0 value,
+        T0 @value,
         T1 bitShift)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeInt32(6271,
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Int32(bitShift));
 
     public static void SET_INPUT_EXCLUSIVE<T0, T1>(
@@ -45366,13 +45367,13 @@ public static partial class StandardNatives
     public static void SET_DAMPING<T0, T1>(
         Entity entity,
         T0 vertex,
-        T1 value)
+        T1 @value)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(6293,
             NativeArgument.Entity(entity.Value),
             NativeArgument.Int32(vertex),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool IS_COLLISION_MARKED_OUTSIDE<T0, T1, T2>(
         T0 x,
@@ -45513,12 +45514,12 @@ public static partial class StandardNatives
     public static void SET_AUDIO_SCENE_VARIABLE<T0>(
         string? scene,
         string? variable,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6309,
             NativeArgument.Text(scene),
             NativeArgument.Text(variable),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static Ped CLONE_PED(
         Ped ped,
@@ -45622,10 +45623,10 @@ public static partial class StandardNatives
     public static void OVERRIDE_INTERIOR_SMOKE_END() => InvokeVoid(6325);
 
     public static bool IS_ENTITY_ATTACHED_TO_ENTITY(
-        Entity from,
+        Entity @from,
         Entity to)
         => InvokeBoolean(6326,
-            NativeArgument.Entity(from.Value),
+            NativeArgument.Entity(@from.Value),
             NativeArgument.Entity(to.Value));
 
     public static void SET_SCRIPT_RAMP_IMPULSE_SCALE<T0>(
@@ -45852,10 +45853,10 @@ public static partial class StandardNatives
             NativeArgument.Ped(ped.Value));
 
     public static int ABSI<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeInt32(6354,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static bool REQUEST_PEDHEADSHOT_IMG_UPLOAD<T0>(
         T0 id)
@@ -45911,11 +45912,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_ID_RANGE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6360,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static bool GET_IS_PLAYER_DRIVING_WRECKLESS<T0>(
         Player player,
@@ -45962,7 +45963,7 @@ public static partial class StandardNatives
         T2 z,
         T3 radius,
         T4 modelHash,
-        T5 textureVariation)
+        T5 tintIndex)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         where T2 : INumberBase<T2>
@@ -45975,7 +45976,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(z),
             NativeArgument.Float32(radius),
             NativeArgument.Hash32(modelHash),
-            NativeArgument.Int32(textureVariation));
+            NativeArgument.Int32(tintIndex));
 
     public static string? GET_CLOUD_TIME_AS_STRING() => InvokeText(6368);
 
@@ -46047,10 +46048,10 @@ public static partial class StandardNatives
             NativeArgument.Boolean(explodeOnImpact));
 
     public static void SET_PROFILE_SETTING_CREATOR_RACES_DONE<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6381,
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void SHOW_START_MISSION_INSTRUCTIONAL_BUTTON(
         bool toggle)
@@ -46207,17 +46208,17 @@ public static partial class StandardNatives
     public static bool FORCE_PED_MOTION_STATE<T0, T1>(
         Ped ped,
         T0 motionStateHash,
-        bool p2,
-        T1 p3,
-        bool p4)
+        bool shouldReset,
+        T1 updateState,
+        bool forceAIPreCameraUpdate)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeBoolean(6404,
             NativeArgument.Ped(ped.Value),
             NativeArgument.Hash32(motionStateHash),
-            NativeArgument.Boolean(p2),
-            NativeArgument.Int32(p3),
-            NativeArgument.Boolean(p4));
+            NativeArgument.Boolean(shouldReset),
+            NativeArgument.Int32(updateState),
+            NativeArgument.Boolean(forceAIPreCameraUpdate));
 
     public static int START_PARTICLE_FX_LOOPED_ON_PED_BONE<T0, T1, T2, T3, T4, T5, T6, T7>(
         string? effectName,
@@ -46265,11 +46266,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_SEEING_RANGE<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6407,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void DRAW_LIGHT_WITH_RANGE<T0, T1, T2, T3, T4, T5, T6, T7>(
         T0 posX,
@@ -46351,10 +46352,10 @@ public static partial class StandardNatives
             NativeArgument.Hash32(statName));
 
     public static int ROUND<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeInt32(6417,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void FLASH_MINIMAP_DISPLAY() => InvokeVoid(6418);
 
@@ -46422,10 +46423,10 @@ public static partial class StandardNatives
             NativeArgument.Ped(ped.Value));
 
     public static int FLOOR<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeInt32(6431,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static void SET_PED_PATH_MAY_ENTER_WATER(
         Ped ped,
@@ -46881,11 +46882,11 @@ public static partial class StandardNatives
 
     public static void SET_PED_MAX_HEALTH<T0>(
         Ped ped,
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6497,
             NativeArgument.Ped(ped.Value),
-            NativeArgument.Int32(value));
+            NativeArgument.Int32(@value));
 
     public static void FORCE_LIGHTNING_FLASH() => InvokeVoid(6499);
 
@@ -47433,10 +47434,10 @@ public static partial class StandardNatives
             NativeArgument.Int32(p1));
 
     public static void SET_GAMEPLAY_HINT_FOLLOW_DISTANCE_SCALAR<T0>(
-        T0 value)
+        T0 @value)
         where T0 : INumberBase<T0>
         => InvokeVoid(6564,
-            NativeArgument.Float32(value));
+            NativeArgument.Float32(@value));
 
     public static int GET_CONVERTIBLE_ROOF_STATE(
         Vehicle vehicle)
@@ -47766,14 +47767,14 @@ public static partial class StandardNatives
             NativeArgument.Boolean(bIncludePlayersVehicle));
 
     public static void START_PLAYER_SWITCH<T0, T1>(
-        Ped from,
+        Ped @from,
         Ped to,
         T0 flags,
         T1 switchType)
         where T0 : INumberBase<T0>
         where T1 : INumberBase<T1>
         => InvokeVoid(6614,
-            NativeArgument.Ped(from.Value),
+            NativeArgument.Ped(@from.Value),
             NativeArgument.Ped(to.Value),
             NativeArgument.Int32(flags),
             NativeArgument.Int32(switchType));
@@ -47924,7 +47925,7 @@ public static partial class StandardNatives
         T2 posY,
         T3 posZ,
         T4 p4,
-        T5 value,
+        T5 @value,
         bool p6,
         T6 modelHash)
         where T0 : INumberBase<T0>
@@ -47940,7 +47941,7 @@ public static partial class StandardNatives
             NativeArgument.Float32(posY),
             NativeArgument.Float32(posZ),
             NativeArgument.Int32(p4),
-            NativeArgument.Int32(value),
+            NativeArgument.Int32(@value),
             NativeArgument.Boolean(p6),
             NativeArgument.Hash32(modelHash));
 
@@ -48711,6 +48712,7 @@ public static partial class StandardNatives
         NativeAny p0)
         => InvokeVoid(6749,
             NativeArgument.Any(p0));
+
 }
 
 #pragma warning restore IDE1006

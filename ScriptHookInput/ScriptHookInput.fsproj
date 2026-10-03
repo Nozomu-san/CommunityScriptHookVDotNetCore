@@ -1,13 +1,13 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <LangVersion>10.0</LangVersion>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Platforms>x64</Platforms>
     <AssemblyTitle>Script Hook Inputs</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
-    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
-    <FileVersion>09.09.2026.0</FileVersion>
+    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
+    <FileVersion>04.10.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Source\InputModel.fs" />
@@ -19,7 +19,11 @@
     <Compile Include="Source\Extension.fs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Alloc8orStandardNatives\Alloc8orStandardNatives.csproj" />
-    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
+    <Reference Include="Alloc8orStandardNatives">
+      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net11.0\Alloc8orStandardNatives.dll</HintPath>
+    </Reference>
+    <Reference Include="CommunityScriptHookVDotNetCore">
+      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>

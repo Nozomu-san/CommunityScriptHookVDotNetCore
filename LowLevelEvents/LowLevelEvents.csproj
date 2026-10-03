@@ -1,19 +1,23 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
-    <FileVersion>09.09.2026.0</FileVersion>
-    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
+    <FileVersion>04.10.2026.0</FileVersion>
+    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
     <AssemblyTitle>Low Level In-Game Events</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
-    <ProjectReference Include="..\LocalNativeMemories\LocalNativeMemories.csproj" />
+    <Reference Include="CommunityScriptHookVDotNetCore">
+      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
+    </Reference>
+    <Reference Include="LocalNativeMemories">
+      <HintPath>..\LocalNativeMemories\bin\x64\Release\net11.0\LocalNativeMemories.dll</HintPath>
+    </Reference>
   </ItemGroup>
 
 </Project>

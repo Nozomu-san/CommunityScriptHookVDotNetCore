@@ -14,6 +14,11 @@ internal sealed class EventStream :
 {
     private const int MaximumNativeDrainPerHostFrame = 1024;
     private const int MaximumSubscriptionCapacity = 2048;
+    private const uint ReactionStreamMask = 1u << 0;
+    private const uint GroupStreamMask = 1u << 1;
+    private const uint GlobalStreamMask = 1u << 2;
+    private const uint AllDispatchStreamMask =
+        ReactionStreamMask | GroupStreamMask | GlobalStreamMask;
     private const int SourcePositionOffset = 56;
     private const int ImpactPositionOffset = 72;
     private const int WeaponHashOffset = 96;
@@ -25,13 +30,18 @@ internal sealed class EventStream :
     private readonly Lock _subscriptionGate = new();
     private readonly Dictionary<Subscription<RawLowLevelEvent>, HashSet<uint>>
         _rawSubscriptions = [];
+    private readonly Dictionary<Subscription<RawLowLevelEvent>, HashSet<uint>>
+        _catalogSubscriptions = [];
     private readonly List<Subscription<EntityDamageEvent>> _damageSubscriptions = [];
     private readonly List<Subscription<MeleeActionEvent>> _meleeActionSubscriptions = [];
     private readonly List<Subscription<GunAimedAtEvent>> _gunAimedAtSubscriptions = [];
+    private readonly List<ListenerSubscription<GunAimedAtEvent>> _gunAimedAtListeners = [];
     private readonly List<Subscription<GunShotEvent>> _gunShotSubscriptions = [];
+    private readonly List<Subscription<GunShotWhizzedByEvent>> _gunShotWhizzedBySubscriptions = [];
     private readonly List<Subscription<BulletImpactEvent>> _bulletImpactSubscriptions = [];
     private readonly Queue<PendingDamageEvent> _pendingDamageEvents = [];
     private readonly Dictionary<ulong, PendingAimEvent> _pendingAimEvents = [];
+    private readonly Queue<PendingWhizzedByEvent> _pendingWhizzedByEvents = [];
     private readonly Queue<PendingWeaponEvent> _pendingWeaponEvents = [];
     private ulong _continuityRevision;
     private ulong _continuityLossCount;
@@ -59,6 +69,7 @@ internal sealed class EventStream :
     private ulong _gunAimedAtDroppedCount;
     private ulong _gunShotPublishedCount;
     private ulong _gunShotDroppedCount;
+    private ulong _gunShotWhizzedByDroppedCount;
     private ulong _bulletImpactPublishedCount;
     private ulong _bulletImpactDroppedCount;
     private ulong _weaponMalformedCount;
@@ -94,10 +105,13 @@ internal sealed class EventStream :
         _meleeActionDroppedCount +
         _gunAimedAtDroppedCount +
         _gunShotDroppedCount +
+        _gunShotWhizzedByDroppedCount +
         _bulletImpactDroppedCount +
         _weaponMalformedCount +
         _weaponMissingShooterCount +
         _weaponIdentityExpiredCount;
+
+    public IReadOnlyList<GameEventDescriptor> Catalog => _bridge.Catalog;
 
     public LowLevelEventDiagnostics Diagnostics => new(
         _continuityRevision,
@@ -159,10 +173,13 @@ internal sealed class EventStream :
             lock (_subscriptionGate)
             {
                 return _rawSubscriptions.Count +
+                    _catalogSubscriptions.Count +
                     _damageSubscriptions.Count +
                     _meleeActionSubscriptions.Count +
                     _gunAimedAtSubscriptions.Count +
+                    _gunAimedAtListeners.Count +
                     _gunShotSubscriptions.Count +
+                    _gunShotWhizzedBySubscriptions.Count +
                     _bulletImpactSubscriptions.Count;
             }
         }
@@ -174,12 +191,103 @@ internal sealed class EventStream :
         _bridge.ReplaceDetailedEventIds(eventIds);
     }
 
+    internal void ConfigureCapturePolicy()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_subscriptionGate)
+        {
+            RefreshNativeCapturePolicyLocked();
+        }
+    }
+
+    private void RefreshNativeCapturePolicyLocked()
+    {
+        Dictionary<uint, uint> rules = [];
+        Dictionary<uint, uint> catalogRules = [];
+
+        static void AddRule(
+            Dictionary<uint, uint> rules,
+            uint eventId,
+            uint streamMask)
+        {
+            if (rules.TryGetValue(eventId, out uint existing))
+            {
+                rules[eventId] = existing | streamMask;
+            }
+            else
+            {
+                rules.Add(eventId, streamMask);
+            }
+        }
+
+        static void AddCatalogRule(
+            Dictionary<uint, uint> rules,
+            uint catalogEventId,
+            uint streamMask)
+        {
+            if (rules.TryGetValue(catalogEventId, out uint existing))
+            {
+                rules[catalogEventId] = existing | streamMask;
+            }
+            else
+            {
+                rules.Add(catalogEventId, streamMask);
+            }
+        }
+
+        if (_meleeActionSubscriptions.Count != 0)
+        {
+            AddRule(rules, EventCatalog.MeleeAction, AllDispatchStreamMask);
+        }
+        if (_gunAimedAtSubscriptions.Count != 0 ||
+            _gunAimedAtListeners.Count != 0)
+        {
+            AddRule(rules, EventCatalog.GunAimedAt, AllDispatchStreamMask);
+        }
+        if (_gunShotSubscriptions.Count != 0)
+        {
+            AddRule(rules, EventCatalog.GunShot, GroupStreamMask);
+        }
+        if (_gunShotWhizzedBySubscriptions.Count != 0)
+        {
+            AddRule(
+                rules,
+                EventCatalog.GunShotWhizzedBy,
+                ReactionStreamMask);
+        }
+        if (_bulletImpactSubscriptions.Count != 0)
+        {
+            AddRule(rules, EventCatalog.GunShotBulletImpact, GroupStreamMask);
+        }
+
+        foreach (HashSet<uint> ids in _rawSubscriptions.Values)
+        {
+            foreach (uint eventId in ids)
+            {
+                AddRule(rules, eventId, AllDispatchStreamMask);
+            }
+        }
+
+        foreach (HashSet<uint> catalogIds in _catalogSubscriptions.Values)
+        {
+            foreach (uint catalogEventId in catalogIds)
+            {
+                AddCatalogRule(catalogRules, catalogEventId, AllDispatchStreamMask);
+            }
+        }
+
+
+        _bridge.ReplaceCaptureStreamMasks(rules);
+        _bridge.ReplaceCatalogCaptureStreamMasks(catalogRules);
+    }
+
     internal void Advance(ulong _)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ObserveNativeDrops();
         DrainPendingDamageEvents();
         DrainPendingAimEvents();
+        DrainPendingWhizzedByEvents();
         DrainPendingWeaponEvents();
 
         int nativeDrainBudget = ResolveNativeDrainBudget();
@@ -188,6 +296,13 @@ internal sealed class EventStream :
              ++drained)
         {
             RawLowLevelEvent lowLevelEvent = EventDecoder.Decode(_bridge.Buffer);
+            if (lowLevelEvent.EventName is null && lowLevelEvent.CatalogEventId != 0)
+            {
+                lowLevelEvent = lowLevelEvent with
+                {
+                    EventName = _bridge.ResolveCatalogEventName(lowLevelEvent.CatalogEventId)
+                };
+            }
             lowLevelEvent = ResolveEventIdentities(lowLevelEvent);
 
             if (lowLevelEvent.EventId == NativeAbi.EntityDamageMetadataEventId)
@@ -205,6 +320,7 @@ internal sealed class EventStream :
 
             ProcessMeleeAction(lowLevelEvent);
             ProcessAimEvent(lowLevelEvent);
+            ProcessWhizzedByEvent(lowLevelEvent);
             ProcessWeaponEvent(lowLevelEvent);
             _subscriberDroppedCount += PublishRaw(lowLevelEvent);
         }
@@ -248,9 +364,53 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _rawSubscriptions.Add(subscription, ids);
+            RefreshNativeCapturePolicyLocked();
         }
         return subscription;
     }
+
+    public ILowLevelSubscription<RawLowLevelEvent> SubscribeCatalog(
+        IEnumerable<string> eventNames,
+        int capacity = 256)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(eventNames);
+        ValidateCapacity(capacity);
+
+        HashSet<uint> catalogIds = [];
+        foreach (string eventName in eventNames)
+        {
+            if (!_bridge.TryResolveCatalogEvent(eventName, out GameEventDescriptor descriptor))
+            {
+                throw new ArgumentException(
+                    $"Unknown CEvent catalog entry: {eventName}.",
+                    nameof(eventNames));
+            }
+
+            catalogIds.Add(descriptor.CatalogId);
+        }
+
+        if (catalogIds.Count == 0)
+        {
+            throw new ArgumentException(
+                "At least one CEvent catalog entry is required.",
+                nameof(eventNames));
+        }
+
+        Subscription<RawLowLevelEvent>? subscription = null;
+        subscription = new(
+            capacity,
+            () => RemoveCatalogSubscription(subscription!));
+
+        lock (_subscriptionGate)
+        {
+            _catalogSubscriptions.Add(subscription, catalogIds);
+            RefreshNativeCapturePolicyLocked();
+        }
+
+        return subscription;
+    }
+
 
     public ILowLevelSubscription<EntityDamageEvent> SubscribeDamage(
         int capacity = 256)
@@ -286,6 +446,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _meleeActionSubscriptions.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
         return subscription;
     }
@@ -305,6 +466,27 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _gunAimedAtSubscriptions.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
+        }
+        return subscription;
+    }
+
+    public ILowLevelListenerSubscription ListenGunAimedAt(
+        Action<GunAimedAtEvent> listener)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(listener);
+
+        ListenerSubscription<GunAimedAtEvent>? subscription = null;
+        subscription = new(
+            listener,
+            () => RemoveGunAimedAtListener(subscription!));
+
+        lock (_subscriptionGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _gunAimedAtListeners.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
         return subscription;
     }
@@ -324,6 +506,27 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _gunShotSubscriptions.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
+        }
+        return subscription;
+    }
+
+    public ILowLevelSubscription<GunShotWhizzedByEvent> SubscribeGunShotWhizzedBy(
+        int capacity = 256)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ValidateCapacity(capacity);
+
+        Subscription<GunShotWhizzedByEvent>? subscription = null;
+        subscription = new(
+            capacity,
+            () => RemoveGunShotWhizzedBySubscription(subscription!));
+
+        lock (_subscriptionGate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _gunShotWhizzedBySubscriptions.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
         return subscription;
     }
@@ -343,6 +546,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _bulletImpactSubscriptions.Add(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
         return subscription;
     }
@@ -357,28 +561,42 @@ internal sealed class EventStream :
         _disposed = true;
 
         Subscription<RawLowLevelEvent>[] raw;
+        Subscription<RawLowLevelEvent>[] catalog;
         Subscription<EntityDamageEvent>[] damage;
         Subscription<MeleeActionEvent>[] meleeActions;
         Subscription<GunAimedAtEvent>[] gunAimedAt;
+        ListenerSubscription<GunAimedAtEvent>[] gunAimedAtListeners;
         Subscription<GunShotEvent>[] gunShots;
+        Subscription<GunShotWhizzedByEvent>[] whizzedBy;
         Subscription<BulletImpactEvent>[] impacts;
         lock (_subscriptionGate)
         {
             raw = [.. _rawSubscriptions.Keys];
+            catalog = [.. _catalogSubscriptions.Keys];
             damage = [.. _damageSubscriptions];
             meleeActions = [.. _meleeActionSubscriptions];
             gunAimedAt = [.. _gunAimedAtSubscriptions];
+            gunAimedAtListeners = [.. _gunAimedAtListeners];
             gunShots = [.. _gunShotSubscriptions];
+            whizzedBy = [.. _gunShotWhizzedBySubscriptions];
             impacts = [.. _bulletImpactSubscriptions];
             _rawSubscriptions.Clear();
+            _catalogSubscriptions.Clear();
             _damageSubscriptions.Clear();
             _meleeActionSubscriptions.Clear();
             _gunAimedAtSubscriptions.Clear();
+            _gunAimedAtListeners.Clear();
             _gunShotSubscriptions.Clear();
+            _gunShotWhizzedBySubscriptions.Clear();
             _bulletImpactSubscriptions.Clear();
+            RefreshNativeCapturePolicyLocked();
         }
 
         foreach (Subscription<RawLowLevelEvent> subscription in raw)
+        {
+            subscription.Detach();
+        }
+        foreach (Subscription<RawLowLevelEvent> subscription in catalog)
         {
             subscription.Detach();
         }
@@ -394,7 +612,17 @@ internal sealed class EventStream :
         {
             subscription.Detach();
         }
+        foreach (ListenerSubscription<GunAimedAtEvent> subscription in gunAimedAtListeners)
+        {
+            subscription.Detach();
+        }
         foreach (Subscription<GunShotEvent> subscription in gunShots)
+        {
+            subscription.Detach();
+        }
+        foreach (
+            Subscription<GunShotWhizzedByEvent> subscription
+            in whizzedBy)
         {
             subscription.Detach();
         }
@@ -405,6 +633,7 @@ internal sealed class EventStream :
 
         _pendingDamageEvents.Clear();
         _pendingAimEvents.Clear();
+        _pendingWhizzedByEvents.Clear();
         _pendingWeaponEvents.Clear();
         _bridge.Dispose();
     }
@@ -438,7 +667,9 @@ internal sealed class EventStream :
     private RawLowLevelEvent ResolveEventIdentities(
         RawLowLevelEvent lowLevelEvent)
     {
-        if (!EventCatalog.RequiresEntityIdentity(lowLevelEvent.EventId))
+        if (!EventCatalog.RequiresEntityIdentity(
+                lowLevelEvent.EventId,
+                lowLevelEvent.CatalogEventId))
         {
             return lowLevelEvent;
         }
@@ -688,12 +919,25 @@ internal sealed class EventStream :
                 break;
         }
 
-        if (lowLevelEvent.RelatedEntityAddress == 0)
+        ulong shooterAddress = lowLevelEvent.RelatedEntityAddress;
+        int shooterHandle = lowLevelEvent.RelatedEntityHandle;
+        ulong victimAddress = lowLevelEvent.DispatchEntityAddress;
+        int victimHandle = lowLevelEvent.DispatchEntityHandle;
+
+        if (lowLevelEvent.Stream == LowLevelEventStream.Reaction)
+        {
+            shooterAddress = lowLevelEvent.DispatchEntityAddress;
+            shooterHandle = lowLevelEvent.DispatchEntityHandle;
+            victimAddress = lowLevelEvent.RelatedEntityAddress;
+            victimHandle = lowLevelEvent.RelatedEntityHandle;
+        }
+
+        if (shooterAddress == 0)
         {
             ++_gunAimedAtMissingSourceCount;
             return;
         }
-        if (lowLevelEvent.DispatchEntityAddress == 0)
+        if (victimAddress == 0)
         {
             ++_gunAimedAtMissingTargetCount;
             return;
@@ -702,10 +946,10 @@ internal sealed class EventStream :
         PendingAimEvent pending = new(
             lowLevelEvent.Sequence,
             lowLevelEvent.PerformanceCounter,
-            lowLevelEvent.RelatedEntityAddress,
-            lowLevelEvent.RelatedEntityHandle,
-            lowLevelEvent.DispatchEntityAddress,
-            lowLevelEvent.DispatchEntityHandle);
+            shooterAddress,
+            shooterHandle,
+            victimAddress,
+            victimHandle);
 
         if (pending.ShooterHandle != 0 && pending.VictimHandle != 0)
         {
@@ -777,6 +1021,118 @@ internal sealed class EventStream :
             victimHandle);
         ++_gunAimedAtPublishedCount;
         _gunAimedAtDroppedCount += PublishGunAimedAt(aimedAt);
+    }
+
+    private void ProcessWhizzedByEvent(RawLowLevelEvent lowLevelEvent)
+    {
+        if (lowLevelEvent.EventId != EventCatalog.GunShotWhizzedBy ||
+            lowLevelEvent.Stream != LowLevelEventStream.Reaction)
+        {
+            return;
+        }
+
+        ulong shooterAddress = lowLevelEvent.DispatchEntityAddress;
+        int shooterHandle = lowLevelEvent.DispatchEntityHandle;
+        ulong victimAddress = lowLevelEvent.RelatedEntityAddress;
+        int victimHandle = lowLevelEvent.RelatedEntityHandle;
+
+        if (shooterAddress == 0 || victimAddress == 0 ||
+            shooterAddress == victimAddress)
+        {
+            return;
+        }
+
+        PendingWhizzedByEvent pending = new(
+            lowLevelEvent.Sequence,
+            lowLevelEvent.PerformanceCounter,
+            shooterAddress,
+            shooterHandle,
+            victimAddress,
+            victimHandle,
+            checked(Stopwatch.GetTimestamp() + PendingIdentityLifetimeTicks));
+
+        if (shooterHandle != 0 && victimHandle != 0)
+        {
+            PublishWhizzedBy(pending, shooterHandle, victimHandle);
+            return;
+        }
+
+        if (shooterHandle == 0)
+        {
+            _identity.RequestHandle(unchecked((nint)(long)shooterAddress));
+        }
+        if (victimHandle == 0)
+        {
+            _identity.RequestHandle(unchecked((nint)(long)victimAddress));
+        }
+
+        _pendingWhizzedByEvents.Enqueue(pending);
+    }
+
+    private void DrainPendingWhizzedByEvents()
+    {
+        if (_pendingWhizzedByEvents.Count == 0)
+        {
+            return;
+        }
+
+        long now = Stopwatch.GetTimestamp();
+        int count = _pendingWhizzedByEvents.Count;
+        for (int index = 0; index < count; ++index)
+        {
+            PendingWhizzedByEvent pending =
+                _pendingWhizzedByEvents.Dequeue();
+
+            int shooterHandle = pending.ShooterHandle;
+            int victimHandle = pending.VictimHandle;
+
+            if (shooterHandle == 0)
+            {
+                shooterHandle =
+                    ResolveCachedOrRequest(pending.ShooterAddress);
+            }
+            if (victimHandle == 0)
+            {
+                victimHandle =
+                    ResolveCachedOrRequest(pending.VictimAddress);
+            }
+
+            if (shooterHandle != 0 && victimHandle != 0)
+            {
+                PublishWhizzedBy(
+                    pending,
+                    shooterHandle,
+                    victimHandle);
+                continue;
+            }
+
+            if (now < pending.ExpiresAt)
+            {
+                _pendingWhizzedByEvents.Enqueue(
+                    pending with
+                    {
+                        ShooterHandle = shooterHandle,
+                        VictimHandle = victimHandle
+                    });
+            }
+        }
+    }
+
+    private void PublishWhizzedBy(
+        PendingWhizzedByEvent pending,
+        int shooterHandle,
+        int victimHandle)
+    {
+        GunShotWhizzedByEvent whizzedBy = new(
+            pending.Sequence,
+            pending.PerformanceCounter,
+            pending.ShooterAddress,
+            shooterHandle,
+            pending.VictimAddress,
+            victimHandle);
+
+        _gunShotWhizzedByDroppedCount +=
+            PublishGunShotWhizzedBy(whizzedBy);
     }
 
     private void ProcessWeaponEvent(RawLowLevelEvent lowLevelEvent)
@@ -1005,21 +1361,36 @@ internal sealed class EventStream :
         }
     }
 
+
     private ulong PublishRaw(RawLowLevelEvent lowLevelEvent)
     {
-        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] subscriptions;
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] rawSubscriptions;
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] catalogSubscriptions;
         lock (_subscriptionGate)
         {
-            subscriptions = [.. _rawSubscriptions];
+            rawSubscriptions = [.. _rawSubscriptions];
+            catalogSubscriptions = [.. _catalogSubscriptions];
         }
 
         ulong dropped = 0;
-        foreach (var pair in subscriptions)
+        foreach (var pair in rawSubscriptions)
         {
             if (pair.Value.Contains(lowLevelEvent.EventId) &&
                 !pair.Key.Publish(lowLevelEvent))
             {
                 ++dropped;
+            }
+        }
+
+        if (lowLevelEvent.CatalogEventId != 0)
+        {
+            foreach (var pair in catalogSubscriptions)
+            {
+                if (pair.Value.Contains(lowLevelEvent.CatalogEventId) &&
+                    !pair.Key.Publish(lowLevelEvent))
+                {
+                    ++dropped;
+                }
             }
         }
         return dropped;
@@ -1066,15 +1437,24 @@ internal sealed class EventStream :
     private ulong PublishGunAimedAt(GunAimedAtEvent aimedAt)
     {
         Subscription<GunAimedAtEvent>[] subscriptions;
+        ListenerSubscription<GunAimedAtEvent>[] listeners;
         lock (_subscriptionGate)
         {
             subscriptions = [.. _gunAimedAtSubscriptions];
+            listeners = [.. _gunAimedAtListeners];
         }
 
         ulong dropped = 0;
         foreach (Subscription<GunAimedAtEvent> subscription in subscriptions)
         {
             if (!subscription.Publish(aimedAt))
+            {
+                ++dropped;
+            }
+        }
+        foreach (ListenerSubscription<GunAimedAtEvent> listener in listeners)
+        {
+            if (!listener.Publish(aimedAt))
             {
                 ++dropped;
             }
@@ -1094,6 +1474,28 @@ internal sealed class EventStream :
         foreach (Subscription<GunShotEvent> subscription in subscriptions)
         {
             if (!subscription.Publish(gunShot))
+            {
+                ++dropped;
+            }
+        }
+        return dropped;
+    }
+
+    private ulong PublishGunShotWhizzedBy(
+        GunShotWhizzedByEvent whizzedBy)
+    {
+        Subscription<GunShotWhizzedByEvent>[] subscriptions;
+        lock (_subscriptionGate)
+        {
+            subscriptions = [.. _gunShotWhizzedBySubscriptions];
+        }
+
+        ulong dropped = 0;
+        foreach (
+            Subscription<GunShotWhizzedByEvent> subscription
+            in subscriptions)
+        {
+            if (!subscription.Publish(whizzedBy))
             {
                 ++dropped;
             }
@@ -1125,8 +1527,20 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _rawSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
     }
+
+    private void RemoveCatalogSubscription(
+        Subscription<RawLowLevelEvent> subscription)
+    {
+        lock (_subscriptionGate)
+        {
+            _catalogSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
+        }
+    }
+
 
     private void RemoveDamageSubscription(
         Subscription<EntityDamageEvent> subscription)
@@ -1143,6 +1557,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _meleeActionSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
     }
 
@@ -1152,6 +1567,17 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _gunAimedAtSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
+        }
+    }
+
+    private void RemoveGunAimedAtListener(
+        ListenerSubscription<GunAimedAtEvent> subscription)
+    {
+        lock (_subscriptionGate)
+        {
+            _gunAimedAtListeners.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
     }
 
@@ -1160,6 +1586,17 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _gunShotSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
+        }
+    }
+
+    private void RemoveGunShotWhizzedBySubscription(
+        Subscription<GunShotWhizzedByEvent> subscription)
+    {
+        lock (_subscriptionGate)
+        {
+            _gunShotWhizzedBySubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
     }
 
@@ -1169,6 +1606,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _bulletImpactSubscriptions.Remove(subscription);
+            RefreshNativeCapturePolicyLocked();
         }
     }
 
@@ -1202,6 +1640,15 @@ internal sealed class EventStream :
         ulong VictimAddress,
         int VictimHandle);
 
+    private readonly record struct PendingWhizzedByEvent(
+        ulong Sequence,
+        long PerformanceCounter,
+        ulong ShooterAddress,
+        int ShooterHandle,
+        ulong VictimAddress,
+        int VictimHandle,
+        long ExpiresAt);
+
     private enum PendingWeaponKind
     {
         GunShot,
@@ -1217,6 +1664,95 @@ internal sealed class EventStream :
         Vector3 SourcePosition,
         Vector3 ImpactPosition,
         long ExpiresAt);
+
+    private sealed class ListenerSubscription<T>(
+        Action<T> listener,
+        Action onDispose) : ILowLevelListenerSubscription
+    {
+        private readonly Lock _gate = new();
+        private Action<T>? _listener = listener ??
+            throw new ArgumentNullException(nameof(listener));
+        private Action? _onDispose = onDispose ??
+            throw new ArgumentNullException(nameof(onDispose));
+        private ulong _faultCount;
+        private bool _faulted;
+        private bool _disposed;
+
+        public ulong FaultCount
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _faultCount;
+                }
+            }
+        }
+
+        internal bool Publish(T value)
+        {
+            Action<T>? callback;
+            lock (_gate)
+            {
+                if (_disposed || _faulted)
+                {
+                    return true;
+                }
+                callback = _listener;
+            }
+
+            if (callback is null)
+            {
+                return true;
+            }
+
+            try
+            {
+                callback(value);
+                return true;
+            }
+            catch
+            {
+                lock (_gate)
+                {
+                    if (!_disposed)
+                    {
+                        ++_faultCount;
+                        _faulted = true;
+                        _listener = null;
+                    }
+                }
+                return false;
+            }
+        }
+
+        internal void Detach()
+        {
+            lock (_gate)
+            {
+                _disposed = true;
+                _listener = null;
+                _onDispose = null;
+            }
+        }
+
+        public void Dispose()
+        {
+            Action? remove;
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _listener = null;
+                remove = Interlocked.Exchange(ref _onDispose, null);
+            }
+            remove?.Invoke();
+        }
+    }
 
     private sealed class Subscription<T>(
         int capacity,
@@ -1296,7 +1832,3 @@ internal sealed class EventStream :
         }
     }
 }
-
-
-
-

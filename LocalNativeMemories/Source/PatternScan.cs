@@ -42,12 +42,11 @@ internal static class ModulePattern
                 segment.Bytes.Length -
                 pattern.Bytes.Length;
 
+            candidate:
             for (int offset = 0;
                 offset <= lastOffset;
                 ++offset)
             {
-                bool matched = true;
-
                 for (int index = 0;
                     index < pattern.Bytes.Length;
                     ++index)
@@ -57,13 +56,11 @@ internal static class ModulePattern
                     if (expected.HasValue &&
                         segment.Bytes[offset + index] != expected.Value)
                     {
-                        matched = false;
-                        break;
+                        continue candidate;
                     }
                 }
 
-                if (matched &&
-                    MemoryAccess.TryAdd(
+                if (MemoryAccess.TryAdd(
                         segment.BaseAddress,
                         offset,
                         out nint address))

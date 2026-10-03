@@ -1,4 +1,4 @@
-#requires -Version 7.6
+#requires -Version 7.7
 
 [CmdletBinding()]
 param(
@@ -143,29 +143,29 @@ public static class CatalogCompiler
             ["Vehicle"] = new("Vehicle", "Vehicle", true),
         };
 
-    private static readonly HashSet<string> Keywords = new(
-        [
-            "abstract", "as", "base", "bool", "break", "byte", "case",
-            "catch", "char", "checked", "class", "const", "continue",
-            "decimal", "default", "delegate", "do", "double", "else",
-            "enum", "event", "explicit", "extern", "false", "finally",
-            "fixed", "float", "for", "foreach", "goto", "if", "implicit",
-            "in", "int", "interface", "internal", "is", "lock", "long",
-            "namespace", "new", "null", "object", "operator", "out",
-            "override", "params", "private", "protected", "public",
-            "readonly", "record", "ref", "return", "sbyte", "sealed",
-            "short", "sizeof", "stackalloc", "static", "string", "struct",
-            "switch", "this", "throw", "true", "try", "typeof", "uint",
-            "ulong", "unchecked", "unsafe", "ushort", "using", "virtual",
-            "void", "volatile", "while", "add", "alias", "and",
-            "ascending", "async", "await", "by", "descending", "dynamic",
-            "equals", "extension", "field", "file", "from", "get", "global", "group", "init",
-            "into", "join", "let", "managed", "nameof", "nint", "not",
-            "notnull", "nuint", "on", "or", "orderby", "partial", "remove",
-            "required", "scoped", "select", "set", "unmanaged", "value",
-            "var", "when", "where", "with", "yield"
-        ],
-        StringComparer.Ordinal);
+    private static readonly HashSet<string> Keywords =
+    [
+        with(StringComparer.Ordinal),
+        "abstract", "as", "base", "bool", "break", "byte", "case",
+        "catch", "char", "checked", "class", "closed", "const", "continue",
+        "decimal", "default", "delegate", "do", "double", "else",
+        "enum", "event", "explicit", "extern", "false", "finally",
+        "fixed", "float", "for", "foreach", "goto", "if", "implicit",
+        "in", "int", "interface", "internal", "is", "lock", "long",
+        "namespace", "new", "null", "object", "operator", "out",
+        "override", "params", "private", "protected", "public",
+        "readonly", "record", "ref", "return", "sbyte", "sealed",
+        "short", "sizeof", "stackalloc", "static", "string", "struct",
+        "switch", "this", "throw", "true", "try", "typeof", "uint", "union",
+        "ulong", "unchecked", "unsafe", "ushort", "using", "virtual",
+        "void", "volatile", "while", "add", "alias", "and",
+        "ascending", "async", "await", "by", "descending", "dynamic",
+        "equals", "extension", "field", "file", "from", "get", "global", "group", "init",
+        "into", "join", "let", "managed", "nameof", "nint", "not",
+        "notnull", "nuint", "on", "or", "orderby", "partial", "remove",
+        "required", "scoped", "select", "set", "unmanaged", "value",
+        "var", "when", "where", "with", "yield"
+    ];
 
     public static int Run(
         string sourceDirectory,
@@ -282,13 +282,13 @@ public static class CatalogCompiler
             enhancedPath,
             "Enhanced");
         int sharedCount = legacy.Keys.Count(enhanced.ContainsKey);
-        SortedSet<ulong> hashes = new(legacy.Keys);
+        SortedSet<ulong> hashes = [with(legacy.Keys)];
         hashes.UnionWith(enhanced.Keys);
         Console.WriteLine(
             $"JSON input: Legacy {legacy.Count}, Enhanced {enhanced.Count}, " +
             $"shared hashes {sharedCount}.");
 
-        List<NativeRecord> records = new(hashes.Count);
+        List<NativeRecord> records = [with(hashes.Count)];
         foreach (ulong hash in hashes)
         {
             legacy.TryGetValue(hash, out SourceEntry? legacyEntry);
@@ -498,7 +498,7 @@ public static class CatalogCompiler
         }
 
         HashSet<ulong> hashes = new();
-        HashSet<string> names = new(StringComparer.Ordinal);
+        HashSet<string> names = [with(StringComparer.Ordinal)];
         ulong previous = 0;
         for (int index = 0; index < records.Count; ++index)
         {
@@ -867,7 +867,7 @@ public static class CatalogCompiler
             strings[index] = Utf8.GetString(bytes);
         }
 
-        List<NativeRecord> records = new(descriptorCount);
+        List<NativeRecord> records = [with(descriptorCount)];
         for (int index = 0; index < descriptorCount; ++index)
         {
             NativeRecord record = format switch
@@ -884,7 +884,7 @@ public static class CatalogCompiler
             throw new InvalidDataException("Catalog contains trailing data.");
         }
         ValidateCatalog(records);
-        return new CatalogImage(
+        return new(
             records,
             Convert.ToHexString(fingerprint),
             packed.Length,
@@ -905,17 +905,17 @@ public static class CatalogCompiler
         List<NativeParameter> parameters = ReadParameters(reader, strings);
         NativeVariant? legacy = legacyBuild < 0
             ? null
-            : new NativeVariant(
+            : new(
                 legacyBuild,
                 returnType,
                 CloneParameters(parameters));
         NativeVariant? enhanced = enhancedBuild < 0
             ? null
-            : new NativeVariant(
+            : new(
                 enhancedBuild,
                 returnType,
                 CloneParameters(parameters));
-        return new NativeRecord(hash, name, legacy, enhanced);
+        return new(hash, name, legacy, enhanced);
     }
 
     private static NativeRecord ReadVersion2Record(
@@ -936,7 +936,7 @@ public static class CatalogCompiler
         NativeVariant? enhanced = (editions & 0x02) != 0
             ? ReadVersion2Variant(reader, strings)
             : null;
-        return new NativeRecord(hash, name, legacy, enhanced);
+        return new(hash, name, legacy, enhanced);
     }
 
     private static NativeRecord ReadVersion3Record(
@@ -957,7 +957,7 @@ public static class CatalogCompiler
         NativeVariant? enhanced = (editions & 0x02) != 0
             ? ReadVariant(reader, strings)
             : null;
-        return new NativeRecord(hash, name, legacy, enhanced);
+        return new(hash, name, legacy, enhanced);
     }
 
     private static NativeVariant ReadVersion2Variant(
@@ -973,7 +973,7 @@ public static class CatalogCompiler
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
         _ = ReadLegacyExposure(reader);
         List<NativeParameter> parameters = ReadParameters(reader, strings);
-        return new NativeVariant(
+        return new(
             minimumBuild,
             returnType,
             parameters);
@@ -991,7 +991,7 @@ public static class CatalogCompiler
         }
         string returnType = NativeTypeNames[(byte)ReadAbiType(reader)];
         List<NativeParameter> parameters = ReadParameters(reader, strings);
-        return new NativeVariant(
+        return new(
             minimumBuild,
             returnType,
             parameters);
@@ -1002,12 +1002,12 @@ public static class CatalogCompiler
         string[] strings)
     {
         int parameterCount = checked((int)ReadVarUInt32(reader));
-        List<NativeParameter> parameters = new(parameterCount);
+        List<NativeParameter> parameters = [with(parameterCount)];
         for (int index = 0; index < parameterCount; ++index)
         {
             AbiType type = ReadAbiType(reader);
             string name = GetString(strings, ReadVarUInt32(reader));
-            parameters.Add(new NativeParameter(
+            parameters.Add(new(
                 NativeTypeNames[(byte)type],
                 name));
         }
@@ -1104,9 +1104,7 @@ public static class CatalogCompiler
     private static string RenderCatalogData(CatalogBuild catalog)
     {
         StringBuilder builder = new();
-        builder.
-            .AppendLine("using System;")
-            .AppendLine()
+        builder
             .AppendLine("namespace Alloc8orStandardNatives.Source;")
             .AppendLine()
             .AppendLine("internal static class NativeCatalogData")
@@ -1153,7 +1151,7 @@ public static class CatalogCompiler
     private static string RenderStandardNatives(List<NativeRecord> records)
     {
         StringBuilder builder = new();
-        builder.
+        builder
             .AppendLine("#pragma warning disable IDE1006")
             .AppendLine()
             .AppendLine("using System.Numerics;")
@@ -1285,7 +1283,7 @@ public static class CatalogCompiler
 
         Dictionary<string, GeneratedMethod> methods =
             new(StringComparer.Ordinal);
-        HashSet<string> collisions = new(StringComparer.Ordinal);
+        HashSet<string> collisions = [with(StringComparer.Ordinal)];
         foreach (NativeVariant variant in candidates)
         {
             string signature = string.Join(
@@ -1611,7 +1609,7 @@ public static class CatalogCompiler
 $typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompiler'
 if ($null -eq ($typeName -as [type])) {
     $compilerOptions = @(
-        '/langversion:14',
+        '/langversion:15',
         '/nullable:enable',
         '/optimize+',
         '/checked+',

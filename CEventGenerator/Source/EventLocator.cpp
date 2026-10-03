@@ -35,6 +35,7 @@ namespace
         0x41, 0x80, 0x60, 0x09, 0xFC, 0x24, 0x40
     };
 
+
     struct ImageView final
     {
         const std::byte* Base{};
@@ -65,6 +66,7 @@ namespace
 
         return {base, nt->OptionalHeader.SizeOfImage};
     }
+
 
     [[nodiscard]] std::vector<const std::byte*> FindAll(
         ImageView image,

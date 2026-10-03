@@ -13,6 +13,11 @@ namespace CEventGenerator
         try
         {
             std::scoped_lock lock(_gate);
+            if (_records.size() >= MaximumPendingRecords)
+            {
+                _dropped.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
             _records.push_back(record);
             return true;
         }

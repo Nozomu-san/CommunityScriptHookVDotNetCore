@@ -47,9 +47,9 @@ internal sealed class RuntimeExtensionManager(
     private readonly List<PendingRuntimeExtension> _initializing = [];
     private readonly List<RuntimeExtensionDescriptor> _pendingInitialization = [];
     private readonly HashSet<string> _availableCapabilities =
-        new(CoreCapabilities, StringComparer.OrdinalIgnoreCase);
+        [with(CoreCapabilities, StringComparer.OrdinalIgnoreCase)];
     private readonly HashSet<string> _unavailableAssemblies =
-        new(StringComparer.OrdinalIgnoreCase);
+        [with(StringComparer.OrdinalIgnoreCase)];
     private readonly Queue<string> _newlyUnavailableAssemblies = [];
     private RootAssemblyResolver? _resolver;
     private bool _initializationPrepared;
@@ -82,14 +82,14 @@ internal sealed class RuntimeExtensionManager(
             ContractAssembly,
             log);
 
-        Dictionary<string, string> declaredProviders = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> declaredProviders = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach (string capability in CoreCapabilities)
         {
             declaredProviders[capability] = "CommunityScriptHookVDotNetCore";
         }
 
-        HashSet<string> rejected = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> rejected = [with(StringComparer.OrdinalIgnoreCase)];
         foreach (RuntimeExtensionDescriptor descriptor in discovered)
         {
             foreach (string capability in descriptor.Provides)
@@ -355,8 +355,8 @@ internal sealed class RuntimeExtensionManager(
         IReadOnlyList<RuntimeExtensionDescriptor> discovered,
         HashSet<string> rejected)
     {
-        Dictionary<string, RuntimeExtensionDescriptor> rootsByAssembly = new(
-            StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, RuntimeExtensionDescriptor> rootsByAssembly = [with(
+            StringComparer.OrdinalIgnoreCase)];
         foreach (RuntimeExtensionDescriptor descriptor in discovered)
         {
             rootsByAssembly.TryAdd(descriptor.AssemblyName, descriptor);
@@ -371,7 +371,7 @@ internal sealed class RuntimeExtensionManager(
         foreach (RuntimeExtensionDescriptor consumer in discovered)
         {
             Queue<string> pending = new(consumer.ReferencedAssemblyNames);
-            HashSet<string> visited = new(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> visited = [with(StringComparer.OrdinalIgnoreCase)];
             while (pending.TryDequeue(out string? reference))
             {
                 if (!visited.Add(reference) ||
@@ -447,7 +447,7 @@ internal sealed class RuntimeExtensionManager(
         }
 
         MetadataReader metadata = pe.GetMetadataReader();
-        HashSet<string> references = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> references = [with(StringComparer.OrdinalIgnoreCase)];
         foreach (AssemblyReferenceHandle handle in metadata.AssemblyReferences)
         {
             AssemblyReference reference = metadata.GetAssemblyReference(handle);
@@ -604,13 +604,12 @@ internal sealed class RuntimeExtensionManager(
 
     private void Quarantine(string extensionId, string reason)
     {
-        HashSet<string> extensionIds = new(
-            StringComparer.OrdinalIgnoreCase)
-        {
+        HashSet<string> extensionIds =
+        [
+            with(StringComparer.OrdinalIgnoreCase),
             extensionId
-        };
-        HashSet<string> removedCapabilities = new(
-            StringComparer.OrdinalIgnoreCase);
+        ];
+        HashSet<string> removedCapabilities = [with(StringComparer.OrdinalIgnoreCase)];
 
         bool changed;
         do
@@ -775,7 +774,7 @@ internal sealed class RuntimeExtensionManager(
         public IScript4RuntimeExtension Instance { get; } = instance;
         public ManagedLifecycleAuthority Authority { get; } = authority;
         public HashSet<string> RuntimeRequirements { get; } =
-            new(StringComparer.OrdinalIgnoreCase);
+            [with(StringComparer.OrdinalIgnoreCase)];
         public bool Unavailable { get; set; }
     }
 
@@ -1112,7 +1111,7 @@ internal sealed class RootAssemblySnapshot
         ArgumentNullException.ThrowIfNull(log);
 
         Dictionary<string, RootAssemblyImage> images =
-            new(StringComparer.OrdinalIgnoreCase);
+            [with(StringComparer.OrdinalIgnoreCase)];
         foreach (string path in Directory
                      .EnumerateFiles(
                          rootDirectory,

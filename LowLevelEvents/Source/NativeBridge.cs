@@ -1,7 +1,9 @@
 #pragma warning disable SYSLIB1054
+#pragma warning disable CA2101
 
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace LowLevelEvents.Source;
 
@@ -11,6 +13,8 @@ internal sealed class NativeBridge : IDisposable
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(3);
 
     private readonly nint _buffer;
+    private readonly GameEventDescriptor[] _catalog;
+    private readonly Dictionary<string, GameEventDescriptor> _catalogByName;
     private bool _disposed;
 
     private NativeBridge()
@@ -21,6 +25,10 @@ internal sealed class NativeBridge : IDisposable
                 "CEventGenerator event-record size is incompatible with LowLevelEvents.");
         }
 
+        _catalog = LoadCatalog();
+        _catalogByName = _catalog.ToDictionary(
+            descriptor => descriptor.Name,
+            StringComparer.Ordinal);
         _buffer = Marshal.AllocHGlobal(NativeAbi.RecordSize);
     }
 
@@ -32,6 +40,54 @@ internal sealed class NativeBridge : IDisposable
     internal static LowLevelEventBridgeStatus Status =>
         (LowLevelEventBridgeStatus)GetStatus();
     internal nint Buffer => _buffer;
+    internal IReadOnlyList<GameEventDescriptor> Catalog => _catalog;
+
+    internal bool TryResolveCatalogEvent(
+        string eventName,
+        out GameEventDescriptor descriptor)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(eventName);
+        return _catalogByName.TryGetValue(eventName, out descriptor);
+    }
+
+
+    internal string? ResolveCatalogEventName(uint catalogEventId)
+    {
+        if (catalogEventId == 0 || catalogEventId > _catalog.Length)
+        {
+            return null;
+        }
+
+        return _catalog[checked((int)catalogEventId - 1)].Name;
+    }
+
+    private static GameEventDescriptor[] LoadCatalog()
+    {
+        uint count = GetCatalogEventCount();
+        if (count == 0 || count > 4096)
+        {
+            throw new InvalidOperationException(
+                $"CEventGenerator exposed an invalid game-event catalog size: {count}.");
+        }
+
+        int catalogCount = checked((int)count);
+        GameEventDescriptor[] catalog = new GameEventDescriptor[catalogCount];
+        for (uint id = 1; id <= count; ++id)
+        {
+            StringBuilder name = new(256);
+            uint required = GetCatalogEventName(id, name, 256);
+            if (required == 0 || required > 256 || name.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"CEventGenerator exposed an invalid catalog entry at id {id}.");
+            }
+
+            catalog[checked((int)id - 1)] = new(id, name.ToString());
+        }
+
+        return catalog;
+    }
+
 
     internal static async Task<NativeBridge> OpenAsync(
         string rootDirectory,
@@ -120,6 +176,43 @@ internal sealed class NativeBridge : IDisposable
         }
     }
 
+    internal void ReplaceCaptureStreamMasks(
+        IEnumerable<KeyValuePair<uint, uint>> rules)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(rules);
+
+        ClearCaptureStreamMasks();
+        foreach (KeyValuePair<uint, uint> rule in rules)
+        {
+            if (SetCaptureStreamMask(rule.Key, rule.Value) == 0)
+            {
+                ClearCaptureStreamMasks();
+                throw new InvalidOperationException(
+                    $"CEventGenerator cannot configure capture policy for event id {rule.Key}.");
+            }
+        }
+    }
+
+    internal void ReplaceCatalogCaptureStreamMasks(
+        IEnumerable<KeyValuePair<uint, uint>> rules)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(rules);
+
+        ClearCatalogCaptureStreamMasks();
+        foreach (KeyValuePair<uint, uint> rule in rules)
+        {
+            if (SetCatalogCaptureStreamMask(rule.Key, rule.Value) == 0)
+            {
+                ClearCatalogCaptureStreamMasks();
+                throw new InvalidOperationException(
+                    $"CEventGenerator cannot configure catalog capture policy for catalog id {rule.Key}.");
+            }
+        }
+    }
+
+
     public void Dispose()
     {
         if (_disposed)
@@ -190,6 +283,24 @@ internal sealed class NativeBridge : IDisposable
 
     [DllImport(
         ModuleName,
+        EntryPoint = "CEG_GetCatalogEventCount",
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern uint GetCatalogEventCount();
+
+    [DllImport(
+        ModuleName,
+        EntryPoint = "CEG_GetCatalogEventName",
+        CallingConvention = CallingConvention.Cdecl,
+        CharSet = CharSet.Ansi,
+        ExactSpelling = true)]
+    private static extern uint GetCatalogEventName(
+        uint catalogEventId,
+        StringBuilder destination,
+        uint destinationSize);
+
+    [DllImport(
+        ModuleName,
         EntryPoint = "CEG_TryDequeue",
         CallingConvention = CallingConvention.Cdecl,
         ExactSpelling = true)]
@@ -210,6 +321,40 @@ internal sealed class NativeBridge : IDisposable
         CallingConvention = CallingConvention.Cdecl,
         ExactSpelling = true)]
     private static extern uint AddDetailedEventId(uint eventId);
+
+    [DllImport(
+        ModuleName,
+        EntryPoint = "CEG_ClearCaptureStreamMasks",
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern void ClearCaptureStreamMasks();
+
+    [DllImport(
+        ModuleName,
+        EntryPoint = "CEG_SetCaptureStreamMask",
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern uint SetCaptureStreamMask(
+        uint eventId,
+        uint streamMask);
+
+    [DllImport(
+        ModuleName,
+        EntryPoint = "CEG_ClearCatalogCaptureStreamMasks",
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern void ClearCatalogCaptureStreamMasks();
+
+    [DllImport(
+        ModuleName,
+        EntryPoint = "CEG_SetCatalogCaptureStreamMask",
+        CallingConvention = CallingConvention.Cdecl,
+        ExactSpelling = true)]
+    private static extern uint SetCatalogCaptureStreamMask(
+        uint catalogEventId,
+        uint streamMask);
+
 }
 
+#pragma warning restore CA2101
 #pragma warning restore SYSLIB1054

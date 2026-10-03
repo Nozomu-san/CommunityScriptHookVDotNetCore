@@ -178,7 +178,7 @@ internal sealed class VehicleOperations(
             ? StandardNatives.IS_PLANE_LANDING_GEAR_INTACT(native)
             : null;
 
-        return new VehicleVitals(
+        return new(
             StandardNatives.GET_VEHICLE_BODY_HEALTH(native),
             StandardNatives.GET_VEHICLE_ENGINE_HEALTH(native),
             StandardNatives.GET_VEHICLE_PETROL_TANK_HEALTH(native),

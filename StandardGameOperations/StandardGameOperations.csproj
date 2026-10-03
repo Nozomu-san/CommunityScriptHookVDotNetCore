@@ -1,11 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFramework>net11.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
-    <AssemblyVersion>09.09.2026.0</AssemblyVersion>
-    <FileVersion>09.09.2026.0</FileVersion>
+    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
+    <FileVersion>04.10.2026.0</FileVersion>
     <AssemblyTitle>Standard Game Operations</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
   </PropertyGroup>
@@ -13,8 +13,14 @@
     <Folder Include="Source\" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Alloc8orStandardNatives\Alloc8orStandardNatives.csproj" />
-    <ProjectReference Include="..\CommunityScriptHookVDotNetCore\CommunityScriptHookVDotNetCore.csproj" />
-    <ProjectReference Include="..\LocalNativeMemories\LocalNativeMemories.csproj" />
+    <Reference Include="Alloc8orStandardNatives">
+      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net11.0\Alloc8orStandardNatives.dll</HintPath>
+    </Reference>
+    <Reference Include="CommunityScriptHookVDotNetCore">
+      <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
+    </Reference>
+    <Reference Include="LocalNativeMemories">
+      <HintPath>..\LocalNativeMemories\bin\x64\Release\net11.0\LocalNativeMemories.dll</HintPath>
+    </Reference>
   </ItemGroup>
 </Project>
