@@ -28,15 +28,15 @@
 - Độ quan trọng: Dựa trên mã code
 - Vai trò: Các nội dung mở rộng trước đây từng thấy ở [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), giờ đây đã được chia thành nhiều nội dung và loại khác nhau để vận hành.
 
-### Dynamic Library (Thư viện động)
+### Thư viện động
 - Độ quan trọng: Dựa trên mã code
 - Vai trò: Vẫn như trước đây với [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), đây là nơi bạn muốn sử dụng chung các nội dung.
 
-### Inherited Class (Lớp kế thừa)
+### Lớp kế thừa
 - Độ quan trọng: Dựa trên mã code
 - Vai trò: Nội dung chính trong modding, vẫn như trước đây với [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced).
 
-### Human Readables (Dữ liệu con người đọc được)
+### Dữ liệu con người đọc được
 - Độ quan trọng: Tùy chọn
 - Vai trò: Các tệp có thể đọc được như json, log, ini, v.v... mà mod có thể đọc để vận hành hoặc chỉ ở dạng chỉ đọc.
 
