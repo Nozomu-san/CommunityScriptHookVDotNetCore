@@ -8,7 +8,7 @@
 - Đảm bảo không có bản build không an toàn (unsafe).
 
 ## Vai trò
-- Community Script Hook V .Net Core được phát triển với mô hình một chiều gồm 6 cơ sở hạ tầng: *(Máy chủ) - Bộ não trung tâm - Nội dung mở rộng - Thư viện động - Lớp kế thừa - Dữ liệu con người đọc được*.
+- Community Script Hook V .Net Core được phát triển với mô hình một chiều gồm 6 cơ sở hạ tầng: *Chủ nhà - Bộ não trung tâm - Nội dung mở rộng - Thư viện động - Lớp kế thừa - Dữ liệu con người đọc được*.
 - Dựa trên vai trò, không dựa trên ngôn ngữ. Điều này có nghĩa là nếu bạn viết cho Community Script Hook V .Net Core bằng bất kỳ ngôn ngữ nào, bạn chỉ cần các hợp đồng và runtime phù hợp để được nhận diện.
 - Các cơ sở hạ tầng phía sau hoàn toàn không biết về sự tồn tại của các cơ sở hạ tầng phía trước, nhưng phần phía trước lại tạo điều kiện để phần phía sau tồn tại. Điều này có nghĩa là, việc sửa đổi từ bất kỳ cơ sở hạ tầng nào thường sẽ không ảnh hưởng đến các phần đứng trước nó.
 - Host và Central Brain mỗi phần chỉ có 1 thành viên, nhưng như vậy là đủ để vận hành toàn bộ hệ sinh thái .NET Core trên GTA V.
