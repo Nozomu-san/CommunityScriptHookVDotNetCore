@@ -112,7 +112,7 @@
 
 ### As Co-Developers
 - [Visual Studio 2026](https://visualstudio.microsoft.com) or [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
-- [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (only requires on Previews, for Release is already part of Visual Studio Installer).
+- [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet).
 
 ## Installation
 
