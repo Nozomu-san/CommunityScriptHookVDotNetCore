@@ -63,7 +63,7 @@
 1. Based as Alloc8or's native executable website. You can now develop your native executables based on the website on either [Legacy](https://alloc8or.re/gta5/nativedb) or [Enhanced](https://alloc8or.re/gta5/nativedb/enhanced), so no more manual declarations or direct usage.
 2. You don't need to list all codes just to update native catalog, Run built PowerShell file and it will be done. It's completely synchronous with the website.
 3. 64-bit Native Executables are compressed with Brotli algorithm for compressing build size.
-4. In order to update the catalog, you need to have [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) or [PowerShell Preview]()https://apps.microsoft.com/detail/9p95zzktnrn4) to execute.
+4. In order to update the catalog, you need to have [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) or [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) to execute.
 
 ### ScriptHookInput (Script Hook V Input)
 - Language Target: `F# 7`
