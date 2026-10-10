@@ -111,7 +111,7 @@
 
 2. Giải pháp tất cả trong một (All-in-one): [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (chỉ yêu cầu đối với các bản Preview, đối với bản Release thì đã được tích hợp sẵn trong Visual Studio Installer).
 
-### Dành cho Đồng phát triển (Khuyên dùng vì tôi luôn bận rộn)
+### Dành cho Đồng phát triển
 - [Visual Studio 2026](https://visualstudio.microsoft.com) hoặc [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
 - [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (chỉ yêu cầu đối với bản Preview, đối với bản Release đã có sẵn trong Visual Studio Installer).
 
