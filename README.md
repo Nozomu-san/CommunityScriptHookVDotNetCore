@@ -108,11 +108,11 @@
 * [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
 * [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (target-driven, based on requirements).
 
-2. All-in-one solution: [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (only requires on Previews, for Release is already part of Visual Studio Installer).
+2. All-in-one solution: [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet).
 
 ### As Co-Developers
 - [Visual Studio 2026](https://visualstudio.microsoft.com) or [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
-- [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet).
+- [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (only requires on Previews, for Release is already part of Visual Studio Installer).
 
 ## Installation
 
