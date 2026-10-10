@@ -16,33 +16,33 @@
 - Contract based design: In order to recognise other infrastructures, contracts are mode to be recognised instead of naming, so naming no longer matter.
 
 ### Host
-- Importance: Mandatory
-- Maximum Components: 1
+- Importance: **Mandatory**
+- Maximum Components: **1**
 - Role: Work as a powerhouse for .NET Core and some low level executions from original Script Hook V, serve as one-time written, many-times reused . The main role on this level is just call low level executions & host .NET Core.
 
 ### Central Brain
-- Importance: Mandatory
-- Maximum Components: 1
+- Importance: **Mandatory**
+- Maximum Components: **1**
 - Role: Use tickrates to manage lifetime of inherited classes. If classes shouldever fail, they will be retired and no longer available on lifetime. Starting with scripts4 folder, any file .dll does not have any inherited class are recognied as library, 1 or more classes will be recognised as inherited classes. However collapse ecosystem is managed on class-designed, rather than entire content from file .dll fails. If classes fail, any other classes does not require from collapsed still work normally. Same it does with extension at extensions folder.
 
 ### Extended Contents
-- Importance: Code-based
-- Maximum Components: No limits
+- Importance: **Code-based**
+- Maximum Components: **No limits**
 - Role: Extended contents formerly seen [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), now been split on many contents & types to operate.
 
 ### Dynamic Library
-- Importance: Code-based
-- Maximum Components: Code-based
+- Importance: **Code-based**
+- Maximum Components: **Code-based**
 - Role: Same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), this is where you want to commonize contents.
 
 ### Inherited Class
-- Importance: Code-based
-- Maximum Components: No limits
+- Importance: **Code-based**
+- Maximum Components: **No limits**
 - Role: Main contents on modding, same as ever with [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) and [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced).
 
 ### Human Readables
-- Importance: Optional
-- Maximum Components: Code-based
+- Importance: **Optional**
+- Maximum Components: **Code-based**
 - Role: Such as readable files like json, log, ini, etc... which mod can either read to operate or read-only kind.
 
 ## Components
@@ -58,7 +58,7 @@
 - Descriptions: Responsible for mods lifetime, tickrates and so on.
 
 ### Alloc8orStandardNatives (Alloc8or's Standard Native Executables)
-- Language Target: `C# 15 Preview & Embedded C# 15 Preview on PowerShell`
+- Language Target: `C# 15 Preview` & `Embedded C# 15 Preview on PowerShell`
 - Descriptions:
 * Based as Alloc8or's native executable website. You can now develop your native executables based on the website on either [Legacy](https://alloc8or.re/gta5/nativedb) or [Enhanced](https://alloc8or.re/gta5/nativedb/enhanced), so no more manual declarations or direct usage.
 * You don't need to list all codes just to update native catalog, Run built PowerShell file and it will be done. It's completely synchronous with the website.
