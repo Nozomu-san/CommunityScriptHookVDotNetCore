@@ -28,11 +28,11 @@ type Scripts4Lifecycle
     ) =
 
     let settleWindow = TimeSpan.FromMilliseconds 150.0
-    let mutable watcher: Scripts4Watcher option = None
+    let mutable watcher: ReloadWatcher option = None
     let mutable manualInput: IManualReloadInput option = None
     let mutable activeOperation: ScriptLifecycleTransitionOperationId option = None
     let mutable lastOperationState: ScriptLifecycleTransitionOperationState option = None
-    let mutable automaticDirty = false
+    let mutable synchronizedDirty = false
     let mutable lastDirtyTimestamp = 0L
     let mutable explicitReloadPending = false
     let mutable shutdown = false
@@ -69,7 +69,7 @@ type Scripts4Lifecycle
             activeOperation <- Some operation
             lastOperationState <- None
             log.Information(
-                $"scripts4 reconcile '{formatOperationId operation}' requested; " +
+                $"global reload '{formatOperationId operation}' requested; " +
                 $"reason={reason}.")
             true
 
@@ -109,7 +109,7 @@ type Scripts4Lifecycle
             match current with
             | None ->
                 log.Error(
-                    $"scripts4 reconcile '{formatOperationId operationId}' " +
+                    $"global reload '{formatOperationId operationId}' " +
                     "disappeared before reaching a terminal state.")
                 activeOperation <- None
                 lastOperationState <- None
@@ -117,7 +117,7 @@ type Scripts4Lifecycle
                 if lastOperationState <> Some snapshot.State then
                     lastOperationState <- Some snapshot.State
                     log.Information(
-                        $"scripts4 reconcile '{formatOperationId operationId}' " +
+                        $"global reload '{formatOperationId operationId}' " +
                         $"state -> {snapshot.State}.")
 
                 if snapshot.IsTerminal then
@@ -133,29 +133,29 @@ type Scripts4Lifecycle
             match value.ConsumeError() with
             | Some message ->
                 log.Warning(
-                    "The scripts4 watcher lost reliable event history: " + message)
+                    "The reload watcher lost reliable event history: " + message)
                 if value.Recover() then
-                    automaticDirty <- true
+                    synchronizedDirty <- true
                     lastDirtyTimestamp <- Stopwatch.GetTimestamp()
                     log.Information(
-                        "The scripts4 watcher was recreated; a full CSHVDNC " +
+                        "The reload watcher was recreated; a full CSHVDNC " +
                         "reconcile will be requested after stabilization.")
                 else
-                    log.Error("The scripts4 watcher could not be recreated.")
+                    log.Error("The reload watcher could not be recreated.")
             | None -> ()
 
             if value.ConsumeSignal() then
-                automaticDirty <- true
+                synchronizedDirty <- true
                 lastDirtyTimestamp <- Stopwatch.GetTimestamp()
 
-    let advanceAutomatic() =
-        if config.Mode = ReloadMode.Automatic &&
-           automaticDirty &&
+    let advanceSynchronized() =
+        if config.Mode = ReloadMode.Synchronized &&
+           synchronizedDirty &&
            activeOperation.IsNone &&
            lastDirtyTimestamp <> 0L &&
            Stopwatch.GetElapsedTime(lastDirtyTimestamp) >= settleWindow then
             if request ScriptLifecycleTransitionReason.AutomaticReload then
-                automaticDirty <- false
+                synchronizedDirty <- false
 
     let advanceManualInput() =
         if config.Mode = ReloadMode.Manual then
@@ -176,7 +176,7 @@ type Scripts4Lifecycle
         if explicitReloadPending && activeOperation.IsNone then
             if request ScriptLifecycleTransitionReason.ManualReload then
                 explicitReloadPending <- false
-                automaticDirty <- false
+                synchronizedDirty <- false
 
     member _.Initialize() =
         if shutdown then
@@ -187,12 +187,16 @@ type Scripts4Lifecycle
             log.Information(
                 $"Script4Reload Manual mode is active with input " +
                 $"'{config.ReloadInput}'.")
-        | ReloadMode.Automatic ->
-            watcher <- Some(new Scripts4Watcher(context.ScriptsDirectory))
+        | ReloadMode.Synchronized ->
+            watcher <- Some(
+                new ReloadWatcher(
+                    context.RootDirectory,
+                    context.ExtensionsDirectory,
+                    context.ScriptsDirectory))
             log.Information(
-                "Script4Reload Automatic mode is active. Filesystem events " +
-                "only mark disk state dirty; CSHVDNC owns capture, validation, " +
-                "RAM staging, diffing, and the global lifecycle barrier.")
+                "Script4Reload Synchronized mode is active for root extensions, extensions, and scripts4. " +
+                "Filesystem events only mark disk state dirty; CSHVDNC owns capture, " +
+                "validation, RAM staging, ordered reload, and the global lifecycle barrier.")
 
     member _.RequestExplicitReload(reason: string) =
         if shutdown then
@@ -212,12 +216,12 @@ type Scripts4Lifecycle
             if activeOperation.IsNone then
                 match config.Mode with
                 | ReloadMode.Manual -> advanceManualInput()
-                | ReloadMode.Automatic -> advanceWatcher()
+                | ReloadMode.Synchronized -> advanceWatcher()
 
                 advanceExplicitReload()
 
-                if activeOperation.IsNone && config.Mode = ReloadMode.Automatic then
-                    advanceAutomatic()
+                if activeOperation.IsNone && config.Mode = ReloadMode.Synchronized then
+                    advanceSynchronized()
 
     member _.Shutdown() =
         if not shutdown then
@@ -226,5 +230,5 @@ type Scripts4Lifecycle
             watcher
             |> Option.iter (fun value -> (value :> IDisposable).Dispose())
             watcher <- None
-            automaticDirty <- false
+            synchronizedDirty <- false
             explicitReloadPending <- false

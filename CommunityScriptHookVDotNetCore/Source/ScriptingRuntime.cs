@@ -40,7 +40,10 @@ public readonly record struct ScriptStartContext(
     ScriptStartReason Reason,
     ulong LifecycleEpoch,
     CancellationToken LifetimeToken,
-    CancellationToken CancellationToken);
+    CancellationToken CancellationToken)
+{
+    public IRuntimeDiagnosticReader? Diagnostics { get; init; }
+}
 
 public readonly record struct ScriptTickContext(
     ulong TickIndex,

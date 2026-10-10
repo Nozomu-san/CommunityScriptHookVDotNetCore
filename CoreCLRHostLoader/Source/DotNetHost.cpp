@@ -10,6 +10,8 @@
 #include <utility>
 #include <vector>
 
+#pragma comment(lib, "Advapi32.lib")
+
 namespace CoreCLRHostLoader
 {
     namespace
@@ -417,20 +419,226 @@ namespace CoreCLRHostLoader
             return left.Prerelease.size() < right.Prerelease.size() ? -1 : 1;
         }
 
+        struct NetHostLocation final
+        {
+            std::filesystem::path Library;
+            std::filesystem::path DotNetRoot;
+            HostFxrVersion Version;
+        };
+
+        [[nodiscard]]
+        std::optional<std::filesystem::path> EnvironmentPath(
+            const wchar_t* name)
+        {
+            const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
+            if (required == 0)
+            {
+                return std::nullopt;
+            }
+
+            std::wstring value(required, L'\0');
+            const DWORD written = GetEnvironmentVariableW(
+                name,
+                value.data(),
+                required);
+            if (written == 0 || written >= required)
+            {
+                return std::nullopt;
+            }
+            value.resize(written);
+            return std::filesystem::path(std::move(value));
+        }
+
+        [[nodiscard]]
+        std::optional<std::filesystem::path> RegisteredDotNetRoot()
+        {
+            constexpr wchar_t Key[] =
+                L"SOFTWARE\\dotnet\\Setup\\InstalledVersions\\x64";
+            DWORD bytes = 0;
+            const LSTATUS sizeStatus = RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                Key,
+                L"InstallLocation",
+                RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                nullptr,
+                nullptr,
+                &bytes);
+            if (sizeStatus != ERROR_SUCCESS || bytes < sizeof(wchar_t))
+            {
+                return std::nullopt;
+            }
+
+            std::wstring value(bytes / sizeof(wchar_t), L'\0');
+            DWORD readBytes = bytes;
+            const LSTATUS readStatus = RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                Key,
+                L"InstallLocation",
+                RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+                nullptr,
+                value.data(),
+                &readBytes);
+            if (readStatus != ERROR_SUCCESS)
+            {
+                return std::nullopt;
+            }
+
+            while (!value.empty() && value.back() == L'\0')
+            {
+                value.pop_back();
+            }
+            return value.empty()
+                ? std::nullopt
+                : std::optional<std::filesystem::path>(
+                    std::filesystem::path(std::move(value)));
+        }
+
+        [[nodiscard]]
+        std::optional<std::filesystem::path> LocateDotNetRoot()
+        {
+            std::array<std::optional<std::filesystem::path>, 4> candidates
+            {
+                EnvironmentPath(L"DOTNET_ROOT_X64"),
+                EnvironmentPath(L"DOTNET_ROOT"),
+                RegisteredDotNetRoot(),
+                std::nullopt
+            };
+
+            if (auto programFiles = EnvironmentPath(L"ProgramFiles"))
+            {
+                candidates.back() = *programFiles / L"dotnet";
+            }
+
+            std::error_code error;
+            for (const auto& candidate : candidates)
+            {
+                if (candidate &&
+                    std::filesystem::is_directory(*candidate, error))
+                {
+                    std::filesystem::path normalized =
+                        std::filesystem::weakly_canonical(*candidate, error);
+                    if (!error)
+                    {
+                        return normalized;
+                    }
+                    error.clear();
+                    return *candidate;
+                }
+                error.clear();
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]]
+        std::optional<NetHostLocation> LocateSdkNetHost(
+            RuntimeChannel channel)
+        {
+            auto dotnetRoot = LocateDotNetRoot();
+            if (!dotnetRoot)
+            {
+                return std::nullopt;
+            }
+
+            const std::filesystem::path packRoot =
+                *dotnetRoot /
+                L"packs" /
+                L"Microsoft.NETCore.App.Host.win-x64";
+            std::error_code error;
+            if (!std::filesystem::is_directory(packRoot, error))
+            {
+                return std::nullopt;
+            }
+
+            std::optional<NetHostLocation> selected;
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     packRoot,
+                     std::filesystem::directory_options::skip_permission_denied,
+                     error))
+            {
+                if (error)
+                {
+                    return std::nullopt;
+                }
+                if (!entry.is_directory(error))
+                {
+                    error.clear();
+                    continue;
+                }
+
+                auto version =
+                    ParseHostFxrVersion(entry.path().filename().wstring());
+                if (!version ||
+                    (channel == RuntimeChannel::Release &&
+                     !version->Prerelease.empty()))
+                {
+                    continue;
+                }
+
+                const std::filesystem::path candidate =
+                    entry.path() /
+                    L"runtimes" /
+                    L"win-x64" /
+                    L"native" /
+                    L"nethost.dll";
+                if (!std::filesystem::is_regular_file(candidate, error))
+                {
+                    error.clear();
+                    continue;
+                }
+
+                if (!selected ||
+                    CompareHostFxrVersion(
+                        *version,
+                        selected->Version) > 0)
+                {
+                    selected = NetHostLocation
+                    {
+                        candidate,
+                        *dotnetRoot,
+                        std::move(*version)
+                    };
+                }
+            }
+            return selected;
+        }
+
         [[nodiscard]]
         HostResult<std::filesystem::path> LocateDefaultHostFxr(
-            const ManagedBrain& brain)
+            const ManagedBrain& brain,
+            RuntimeChannel channel)
         {
-            LoadedLibrary nethost(LoadLibraryExW(
+            HMODULE rawNetHost = LoadLibraryExW(
                 L"nethost.dll",
                 nullptr,
                 LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
-                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
-            if (nethost.Get() == nullptr)
+                    LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+            std::optional<NetHostLocation> sdkNetHost;
+            if (rawNetHost == nullptr)
+            {
+                sdkNetHost = LocateSdkNetHost(channel);
+                if (sdkNetHost)
+                {
+                    rawNetHost = LoadLibraryExW(
+                        sdkNetHost->Library.c_str(),
+                        nullptr,
+                        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                            LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+                }
+            }
+            if (rawNetHost == nullptr)
             {
                 return std::unexpected(
-                    L"nethost.dll could not be loaded. Deploy the Microsoft "
-                    L"native hosting resolver beside CoreCLRHostLoader.");
+                    L"nethost.dll could not be loaded from the game root or "
+                    L"the selected installed .NET SDK host pack.");
+            }
+
+            LoadedLibrary nethost(rawNetHost);
+            if (sdkNetHost)
+            {
+                WriteLog(
+                    LogLevel::Information,
+                    L"nethost.dll selected from installed SDK host pack: " +
+                        sdkNetHost->Library.wstring());
             }
 
             const auto getHostFxrPath = reinterpret_cast<get_hostfxr_path_fn>(
@@ -442,8 +650,14 @@ namespace CoreCLRHostLoader
             }
 
             const std::wstring assemblyPath = brain.Assembly.wstring();
+            const std::wstring sdkRoot = sdkNetHost
+                ? sdkNetHost->DotNetRoot.wstring()
+                : std::wstring{};
             get_hostfxr_parameters parameters{};
             parameters.assembly_path = assemblyPath.c_str();
+            parameters.dotnet_root = sdkRoot.empty()
+                ? nullptr
+                : sdkRoot.c_str();
 
             std::size_t required = 0;
             std::int32_t status = getHostFxrPath(nullptr, &required, &parameters);
@@ -470,7 +684,7 @@ namespace CoreCLRHostLoader
             const ManagedBrain& brain,
             RuntimeChannel channel)
         {
-            auto located = LocateDefaultHostFxr(brain);
+            auto located = LocateDefaultHostFxr(brain, channel);
             if (!located)
             {
                 return std::unexpected(located.error());

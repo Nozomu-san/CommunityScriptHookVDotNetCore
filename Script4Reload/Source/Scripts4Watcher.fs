@@ -5,12 +5,19 @@ open System.IO
 open System.Threading
 
 [<Sealed>]
-type Scripts4Watcher(scriptsRoot: string) =
-    let root = Path.GetFullPath scriptsRoot
-    let mutable watcher: FileSystemWatcher option = None
+type ReloadWatcher(rootDirectory: string, extensionsRoot: string, scriptsRoot: string) =
+    let roots =
+        [|
+            Path.GetFullPath rootDirectory
+            Path.GetFullPath extensionsRoot
+            Path.GetFullPath scriptsRoot
+        |]
+        |> Array.distinctBy (fun value -> value.ToUpperInvariant())
+
+    let gate = obj()
+    let mutable watchers : FileSystemWatcher array = [||]
     let mutable dirty = 0
     let mutable errorMessage: string option = None
-    let gate = obj()
 
     let markDirty() =
         Interlocked.Exchange(&dirty, 1) |> ignore
@@ -21,15 +28,17 @@ type Scripts4Watcher(scriptsRoot: string) =
     let renamed (_: obj) (_: RenamedEventArgs) =
         markDirty()
 
+    let disableWatchers() =
+        for watcher in watchers do
+            watcher.EnableRaisingEvents <- false
+
     let error (_: obj) (args: ErrorEventArgs) =
         lock gate (fun () ->
             errorMessage <- Some(args.GetException().Message)
-            watcher
-            |> Option.iter (fun value ->
-                value.EnableRaisingEvents <- false))
+            disableWatchers())
         markDirty()
 
-    let createWatcher() =
+    let createWatcher root =
         let value = new FileSystemWatcher(root, "*.dll")
         value.IncludeSubdirectories <- false
         value.NotifyFilter <-
@@ -44,7 +53,13 @@ type Scripts4Watcher(scriptsRoot: string) =
         value.EnableRaisingEvents <- true
         value
 
-    do watcher <- Some(createWatcher())
+    let replaceWatchers() =
+        for watcher in watchers do
+            watcher.EnableRaisingEvents <- false
+            watcher.Dispose()
+        watchers <- roots |> Array.map createWatcher
+
+    do replaceWatchers()
 
     member _.ConsumeSignal() =
         Interlocked.Exchange(&dirty, 0) <> 0
@@ -58,23 +73,23 @@ type Scripts4Watcher(scriptsRoot: string) =
     member _.Recover() =
         lock gate (fun () ->
             try
-                watcher
-                |> Option.iter (fun value ->
-                    value.EnableRaisingEvents <- false
-                    value.Dispose())
-                watcher <- Some(createWatcher())
+                replaceWatchers()
                 errorMessage <- None
                 true
             with exceptionValue ->
-                watcher <- None
+                for watcher in watchers do
+                    try
+                        watcher.EnableRaisingEvents <- false
+                        watcher.Dispose()
+                    with _ -> ()
+                watchers <- [||]
                 errorMessage <- Some exceptionValue.Message
                 false)
 
     interface IDisposable with
         member _.Dispose() =
             lock gate (fun () ->
-                watcher
-                |> Option.iter (fun value ->
-                    value.EnableRaisingEvents <- false
-                    value.Dispose())
-                watcher <- None)
+                for watcher in watchers do
+                    watcher.EnableRaisingEvents <- false
+                    watcher.Dispose()
+                watchers <- [||])

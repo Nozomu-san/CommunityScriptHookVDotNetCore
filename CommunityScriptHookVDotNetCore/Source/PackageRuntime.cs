@@ -25,6 +25,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     private readonly string _scriptsDirectory;
     private readonly IScriptServices _services;
     private readonly RuntimeLog _log;
+    private readonly RuntimeDiagnosticHub _diagnostics;
     private readonly List<ScriptPackage> _packages = [];
     private readonly List<RetiringPackage> _retiringPackages = [];
     private readonly Queue<LifecycleTransitionOperation> _pendingOperations = [];
@@ -58,15 +59,18 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     public PackageManager(
         string scriptsDirectory,
         IScriptServices services,
-        RuntimeLog log)
+        RuntimeLog log,
+        RuntimeDiagnosticHub diagnostics)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(scriptsDirectory);
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(log);
+        ArgumentNullException.ThrowIfNull(diagnostics);
 
         _scriptsDirectory = scriptsDirectory;
         _services = services;
         _log = log;
+        _diagnostics = diagnostics;
     }
 
     public void BeginInitialActivation()
@@ -241,7 +245,11 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                     valid = false;
                     _log.Error(
                         $"Initial package '{image.Descriptor.Name}' could not " +
-                        $"materialize passive dependency '{dependencyName}'.");
+                        $"materialize passive dependency '{dependencyName}'.",
+                        source: image.Descriptor.Name,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Package '{image.Descriptor.Name}' could not start because a required library is unavailable.");
                     break;
                 }
                 dependencies.Add(dependency);
@@ -253,6 +261,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                     dependencies.AsReadOnly(),
                     _services,
                     _log,
+                    _diagnostics,
                     NextPackageGeneration())
                 : null;
             if (package is not null)
@@ -352,7 +361,10 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         _initialActivationLifetime = null;
         _log.Error(
             $"Initial scripts4 activation failed without killing the managed " +
-            $"runtime session: {diagnostic}");
+            $"runtime session: {diagnostic}",
+            impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+            summary:
+                "Initial scripts4 activation failed and affected mod lifecycles were stopped.");
         _initialActivationCompleted = true;
     }
 
@@ -410,7 +422,11 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             _log.Error(
                 $"Script package '{package.Name}' is permanently unavailable for " +
                 "this GTA session because a required root runtime-extension " +
-                "reference became unavailable.");
+                "reference became unavailable.",
+                source: package.Name,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Script package '{package.Name}' was stopped because a required extension became unavailable.");
         }
     }
 
@@ -429,6 +445,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         if (_activeOperation is null && _pendingOperations.Count != 0)
         {
             _activeOperation = _pendingOperations.Dequeue();
+            _activeOperation.BeginDiagnosticEpoch();
         }
 
         _activeOperation?.Advance(this);
@@ -636,6 +653,7 @@ internal sealed class ScriptPackage
     private readonly PackageDescriptor _descriptor;
     private readonly RuntimeLog _log;
     private readonly IScriptServices _services;
+    private readonly RuntimeDiagnosticHub _diagnostics;
     private AssemblyLoadContext? _loadContext;
     private Assembly? _entryAssembly;
     private Type[] _scriptTypes;
@@ -651,6 +669,7 @@ internal sealed class ScriptPackage
         PackageDescriptor descriptor,
         RuntimeLog log,
         IScriptServices services,
+        RuntimeDiagnosticHub diagnostics,
         AssemblyLoadContext loadContext,
         Assembly entryAssembly,
         Type[] scriptTypes,
@@ -659,6 +678,7 @@ internal sealed class ScriptPackage
         _descriptor = descriptor;
         _log = log;
         _services = services;
+        _diagnostics = diagnostics;
         _loadContext = loadContext;
         _entryAssembly = entryAssembly;
         _scriptTypes = scriptTypes;
@@ -682,6 +702,7 @@ internal sealed class ScriptPackage
         IReadOnlyList<StagedPackageImage> dependencies,
         IScriptServices services,
         RuntimeLog log,
+        RuntimeDiagnosticHub diagnostics,
         ulong generationId)
     {
         PackageDescriptor descriptor = staged.Descriptor;
@@ -699,6 +720,7 @@ internal sealed class ScriptPackage
                 descriptor,
                 services,
                 log,
+                diagnostics,
                 context,
                 assembly,
                 generationId);
@@ -707,7 +729,11 @@ internal sealed class ScriptPackage
         {
             log.Error(
                 $"Package '{descriptor.Name}' could not be prepared from its " +
-                $"captured image: {exception}");
+                $"captured image: {exception}",
+                source: descriptor.Name,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Package '{descriptor.Name}' could not be prepared and no lifecycle was started.");
             context?.Unload();
             return null;
         }
@@ -717,6 +743,7 @@ internal sealed class ScriptPackage
         PackageDescriptor descriptor,
         IScriptServices services,
         RuntimeLog log,
+        RuntimeDiagnosticHub diagnostics,
         AssemblyLoadContext context,
         Assembly assembly,
         ulong generationId)
@@ -736,7 +763,11 @@ internal sealed class ScriptPackage
         {
             log.Error(
                 $"Package '{descriptor.Name}' contains no loadable Script4 " +
-                "executable type.");
+                "executable type.",
+                source: descriptor.Name,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Package '{descriptor.Name}' contains no loadable Script4 executable.");
             context.Unload();
             return null;
         }
@@ -750,6 +781,7 @@ internal sealed class ScriptPackage
             descriptor,
             log,
             services,
+            diagnostics,
             context,
             assembly,
             scriptTypes,
@@ -814,6 +846,7 @@ internal sealed class ScriptPackage
                     script,
                     Name,
                     _services,
+                    _diagnostics.CreateReader(),
                     _log,
                     _startEpoch);
                 instance.BeginStart(_startReason);
@@ -833,7 +866,11 @@ internal sealed class ScriptPackage
         {
             _log.Error(
                 $"Package '{Name}' contains no Script4 executable that could " +
-                $"start in lifecycle epoch {_startEpoch}.");
+                $"start in lifecycle epoch {_startEpoch}.",
+                source: Name,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Package '{Name}' could not start any Script4 lifecycle.");
             return PackageLifecycleProgress.Failed;
         }
 
@@ -1028,6 +1065,7 @@ internal sealed class ScriptInstance(
     Script4 script,
     string packageName,
     IScriptServices services,
+    IRuntimeDiagnosticReader diagnostics,
     RuntimeLog log,
     ulong lifecycleEpoch)
 {
@@ -1066,7 +1104,10 @@ internal sealed class ScriptInstance(
                 reason,
                 lifecycleEpoch,
                 _lifetime.Token,
-                token)),
+                token)
+            {
+                Diagnostics = diagnostics
+            }),
             StartupDeadline,
             _lifetime.Token);
     }
@@ -1107,7 +1148,12 @@ internal sealed class ScriptInstance(
                 log.Error(
                     $"Script executable '{script.GetType().FullName}' exceeded its " +
                     $"{StartupDeadline.TotalSeconds:0.###} second startup deadline " +
-                    "and was made unavailable.");
+                    "and was made unavailable.",
+                    source: packageName,
+                    origin: script.GetType().FullName,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Script '{script.GetType().FullName}' timed out during startup and was stopped.");
                 return PackageLifecycleProgress.Failed;
 
             case ManagedLifecycleOperationStatus.Cancelled:
@@ -1118,7 +1164,12 @@ internal sealed class ScriptInstance(
                     startupCompletion);
                 log.Error(
                     $"Script executable '{script.GetType().FullName}' startup was " +
-                    $"cancelled in lifecycle epoch {lifecycleEpoch}.");
+                    $"cancelled in lifecycle epoch {lifecycleEpoch}.",
+                    source: packageName,
+                    origin: script.GetType().FullName,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Script '{script.GetType().FullName}' could not start and its lifecycle is unavailable.");
                 return PackageLifecycleProgress.Failed;
 
             case ManagedLifecycleOperationStatus.Faulted:
@@ -1129,7 +1180,12 @@ internal sealed class ScriptInstance(
                     startupCompletion);
                 log.Error(
                     $"Script executable '{script.GetType().FullName}' failed during " +
-                    $"startup in lifecycle epoch {lifecycleEpoch}: {snapshot.Exception}");
+                    $"startup in lifecycle epoch {lifecycleEpoch}: {snapshot.Exception}",
+                    source: packageName,
+                    origin: script.GetType().FullName,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Script '{script.GetType().FullName}' faulted during startup and was stopped.");
                 return PackageLifecycleProgress.Failed;
 
             default:
@@ -1183,7 +1239,12 @@ internal sealed class ScriptInstance(
                 : string.Empty;
             log.Error(
                 $"Script executable '{script.GetType().FullName}' faulted " +
-                $"at tick {context.TickIndex}:{diagnostic} {exception}");
+                $"at tick {context.TickIndex}:{diagnostic} {exception}",
+                source: packageName,
+                origin: script.GetType().FullName,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Script '{script.GetType().FullName}' faulted at tick {context.TickIndex} and its lifecycle was stopped.");
             BeginStop(ScriptStopReason.PackageFault);
         }
     }
@@ -1308,16 +1369,11 @@ internal abstract class SharedScriptPackageLoadContext(
             return SharedRuntimeAssembly;
         }
 
-        foreach (Assembly assembly in SharedLoadContext.Assemblies)
+        if (RuntimeExtensionAssemblyRegistry.TryGet(
+                requested.Name,
+                out Assembly? extensionAssembly))
         {
-            AssemblyName identity = assembly.GetName();
-            if (identity.Name?.Equals(
-                    requested.Name,
-                    StringComparison.OrdinalIgnoreCase) == true &&
-                IsRootRuntimeExtension(assembly))
-            {
-                return assembly;
-            }
+            return extensionAssembly;
         }
 
         if (!PlatformSharedAssemblyNames.Contains(requested.Name))
@@ -1325,18 +1381,7 @@ internal abstract class SharedScriptPackageLoadContext(
             return null;
         }
 
-        try
-        {
-            return SharedLoadContext.LoadFromAssemblyName(requested);
-        }
-        catch (FileNotFoundException)
-        {
-            return null;
-        }
-        catch (FileLoadException)
-        {
-            return null;
-        }
+        return RuntimeDependencyResolver.TryResolve(requested);
     }
 
     protected static Assembly LoadImage(
@@ -1353,24 +1398,7 @@ internal abstract class SharedScriptPackageLoadContext(
         return context.LoadFromStream(assemblyStream, symbolStream);
     }
 
-    private static bool IsRootRuntimeExtension(Assembly assembly)
-    {
-        foreach (AssemblyMetadataAttribute metadata in
-                 assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
-        {
-            if (metadata.Key.Equals(
-                    RuntimeExtensionMetadataKeys.Role,
-                    StringComparison.OrdinalIgnoreCase) &&
-                metadata.Value?.Equals(
-                    RuntimeExtensionMetadataKeys.RuntimeExtensionRole,
-                    StringComparison.OrdinalIgnoreCase) == true)
-            {
-                return true;
-            }
-        }
 
-        return false;
-    }
 }
 
 internal sealed class StagedScriptPackageLoadContext :

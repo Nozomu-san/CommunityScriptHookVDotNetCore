@@ -8,6 +8,53 @@
 
 namespace CEventGenerator
 {
+    inline constexpr std::uint32_t BridgeAbiVersion = 2;
+    inline constexpr std::uint32_t BridgeCapabilityCatalogIdentity = 1u << 0;
+    inline constexpr std::uint32_t BridgeCapabilityRuntimeEventVirtualLayout = 1u << 1;
+    inline constexpr std::uint32_t BridgeCapabilityLocatorDiagnostics = 1u << 2;
+    inline constexpr std::uint32_t BridgeCapabilityDispatchCalleeDiagnostics = 1u << 3;
+    inline constexpr std::uint32_t BridgeCapabilityDispatchTopologyDiagnostics = 1u << 4;
+    inline constexpr std::uint32_t BridgeCapabilityDispatchForwardDiagnostics = 1u << 5;
+    inline constexpr std::uint32_t BridgeCapabilityEventConsumerDiagnostics = 1u << 6;
+    inline constexpr std::uint32_t BridgeCapabilityLeafConsumerRecovery = 1u << 7;
+    inline constexpr std::uint32_t BridgeCapabilityEventConsumerTailChain = 1u << 8;
+    inline constexpr std::uint32_t BridgeCapabilityIndirectTailResolution = 1u << 9;
+    inline constexpr std::uint32_t BridgeCapabilityRegisterTailResolution = 1u << 10;
+    inline constexpr std::uint32_t BridgeCapabilityMemoryTailResolution = 1u << 11;
+    inline constexpr std::uint32_t BridgeCapabilityFanoutDiagnostics = 1u << 12;
+    inline constexpr std::uint32_t BridgeCapabilityVirtualSlotDiagnostics = 1u << 13;
+    inline constexpr std::uint32_t BridgeCapabilityTailSlotDiagnostics = 1u << 14;
+    inline constexpr std::uint32_t BridgeCapabilityConvergedDiagnostics = 1u << 15;
+    inline constexpr std::uint32_t BridgeCapabilityVirtualSemanticDiagnostics = 1u << 16;
+    inline constexpr std::uint32_t BridgeCapabilityVirtualInputDiagnostics = 1u << 17;
+    inline constexpr std::uint32_t BridgeCapabilityAllInDiagnostics = 1u << 18;
+    inline constexpr std::uint32_t BridgeCapabilityDynamicGroundTruth = 1u << 19;
+    inline constexpr std::uint32_t BridgeCapabilityDynamicPathAbi = 1u << 20;
+    inline constexpr std::uint32_t BridgeCapabilityEventGatedDynamicCorrelation = 1u << 21;
+    inline constexpr std::uint32_t LocatorRevision = 2000;
+    inline constexpr std::uint32_t BridgeCapabilities =
+        BridgeCapabilityCatalogIdentity |
+        BridgeCapabilityRuntimeEventVirtualLayout |
+        BridgeCapabilityLocatorDiagnostics |
+        BridgeCapabilityDispatchCalleeDiagnostics |
+        BridgeCapabilityDispatchTopologyDiagnostics |
+        BridgeCapabilityDispatchForwardDiagnostics |
+        BridgeCapabilityEventConsumerDiagnostics |
+        BridgeCapabilityLeafConsumerRecovery |
+        BridgeCapabilityEventConsumerTailChain |
+        BridgeCapabilityIndirectTailResolution |
+        BridgeCapabilityRegisterTailResolution |
+        BridgeCapabilityMemoryTailResolution |
+        BridgeCapabilityFanoutDiagnostics |
+        BridgeCapabilityVirtualSlotDiagnostics |
+        BridgeCapabilityTailSlotDiagnostics |
+        BridgeCapabilityConvergedDiagnostics |
+        BridgeCapabilityVirtualSemanticDiagnostics |
+        BridgeCapabilityVirtualInputDiagnostics |
+        BridgeCapabilityAllInDiagnostics |
+        BridgeCapabilityDynamicGroundTruth |
+        BridgeCapabilityDynamicPathAbi |
+        BridgeCapabilityEventGatedDynamicCorrelation;
     inline constexpr std::uint32_t ArgumentCapacity = 48;
     inline constexpr std::uint32_t ProbeCapacity = 576;
     inline constexpr std::uint32_t EntityDamageMetadataEventId = 0xFFFF0001u;
@@ -22,6 +69,29 @@ namespace CEventGenerator
         HookInstallationFailed = 5,
         Stopping = 6,
         Stopped = 7
+    };
+
+    enum class LocatorFailure : std::uint32_t
+    {
+        None = 0,
+        ImageUnavailable = 1,
+        PedMatchCount = 2,
+        GlobalMatchCount = 3,
+        DamageMatchCount = 4,
+        TargetInvalid = 5,
+        EnhancedCEventCountAnchor = 6,
+        EnhancedCEventStackAnchor = 7,
+        EnhancedEventTypeAnchor = 8,
+        EnhancedStructureInvalid = 9,
+        EnhancedDispatchUnresolved = 10,
+        EditionUnsupported = 11
+    };
+
+    enum class GameEdition : std::uint32_t
+    {
+        Unknown = 0,
+        Legacy = 1,
+        Enhanced = 2
     };
 
     enum class EventStream : std::uint32_t

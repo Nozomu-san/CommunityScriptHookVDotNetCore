@@ -13,6 +13,9 @@
   <Project Path="LocalNativeMemories/LocalNativeMemories.csproj" Id="8d5cad39-1ecb-42a5-800d-bde307480739">
     <Platform Project="x64" />
   </Project>
+  <Project Path="LocalUserDebug/LocalUserDebug.csproj" Id="8be2c5d8-d8de-42b9-b9cd-4c6ee2ab9957">
+    <Platform Solution="Release|*" Project="x64" />
+  </Project>
   <Project Path="LowLevelEvents/LowLevelEvents.csproj" Id="2b17f437-8db6-4a4a-bf2b-fd16f5d6bbcf">
     <Platform Solution="Release|*" Project="x64" />
   </Project>

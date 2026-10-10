@@ -6,7 +6,7 @@
     <Platforms>x64</Platforms>
     <Authors>Nozomu-san</Authors>
     <AssemblyTitle>Community Script Hook V .NET Core</AssemblyTitle>
-    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
-    <FileVersion>04.10.2026.0</FileVersion>
+    <AssemblyVersion>10.10.2026.0</AssemblyVersion>
+    <FileVersion>10.10.2026.0</FileVersion>
   </PropertyGroup>
 </Project>

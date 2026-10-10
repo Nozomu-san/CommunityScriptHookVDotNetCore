@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Metadata;
@@ -6,11 +7,47 @@ using System.Runtime.Loader;
 
 namespace CommunityScriptHookVDotNetCore.Source;
 
+internal enum RuntimeExtensionReloadState
+{
+    Idle,
+    Retiring,
+    Initializing,
+    Completed,
+    Failed
+}
+
+internal sealed record RuntimeExtensionReloadPlan(
+    RootAssemblySnapshot Snapshot,
+    IReadOnlyList<RuntimeExtensionDescriptor> NextDescriptors,
+    IReadOnlyList<RuntimeExtensionDescriptor> PreviousDescriptors,
+    IReadOnlyList<string> TargetIds);
+
+internal readonly record struct RuntimeExtensionReloadSnapshot(
+    RuntimeExtensionReloadState State,
+    int TargetCount,
+    string? Diagnostic)
+{
+    public bool IsTerminal =>
+        State is RuntimeExtensionReloadState.Completed or
+            RuntimeExtensionReloadState.Failed;
+}
+
+internal interface IRuntimeExtensionReloadController
+{
+    RuntimeExtensionReloadPlan CaptureReloadPlan();
+    void BeginReload(RuntimeExtensionReloadPlan plan);
+    void AdvanceReload();
+    RuntimeExtensionReloadSnapshot ReloadSnapshot { get; }
+    IReadOnlyCollection<string> UnavailableAssemblyNames { get; }
+}
+
 internal sealed class RuntimeExtensionManager(
     string rootDirectory,
+    string extensionsDirectory,
     string scriptsDirectory,
     RuntimeServiceRegistry services,
-    RuntimeLog log) : IDisposable
+    RuntimeLog log,
+    RuntimeDiagnosticHub diagnostics) : IDisposable, IRuntimeExtensionReloadController
 {
     private static readonly TimeSpan RootInitializationTimeout =
         TimeSpan.FromSeconds(5);
@@ -22,14 +59,11 @@ internal sealed class RuntimeExtensionManager(
         ContractAssembly.GetName().Name
         ?? throw new InvalidOperationException(
             "The runtime-extension contract assembly has no simple name.");
-    private static readonly AssemblyLoadContext ContractLoadContext =
-        AssemblyLoadContext.GetLoadContext(ContractAssembly)
-        ?? throw new InvalidOperationException(
-            "The runtime-extension contract assembly has no AssemblyLoadContext.");
 
     private static readonly string[] CoreCapabilities =
     [
         RuntimeCapabilities.RuntimeServices,
+        RuntimeCapabilities.RuntimeDiagnostics,
         RuntimeCapabilities.HostFrame,
         RuntimeCapabilities.RawNative,
         RuntimeCapabilities.NativeAdmissionControl,
@@ -52,6 +86,9 @@ internal sealed class RuntimeExtensionManager(
         [with(StringComparer.OrdinalIgnoreCase)];
     private readonly Queue<string> _newlyUnavailableAssemblies = [];
     private RootAssemblyResolver? _resolver;
+    private RuntimeExtensionReloadPlan? _reloadPlan;
+    private RuntimeExtensionReloadState _reloadState;
+    private string? _reloadDiagnostic;
     private bool _initializationPrepared;
     private bool _initializationCompleted;
     private bool _shutdown;
@@ -61,6 +98,15 @@ internal sealed class RuntimeExtensionManager(
 
     internal bool InitializationCompleted => _initializationCompleted;
 
+    RuntimeExtensionReloadSnapshot IRuntimeExtensionReloadController.ReloadSnapshot =>
+        new(
+            _reloadState,
+            _reloadPlan?.TargetIds.Count ?? 0,
+            _reloadDiagnostic);
+
+    IReadOnlyCollection<string> IRuntimeExtensionReloadController.UnavailableAssemblyNames =>
+        _unavailableAssemblies;
+
     public void PrepareInitialization()
     {
         if (_initializationPrepared)
@@ -69,18 +115,206 @@ internal sealed class RuntimeExtensionManager(
                 "Runtime-extension initialization was already prepared.");
         }
 
-        RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
+        RuntimeExtensionPlacement.Reconcile(
             rootDirectory,
+            extensionsDirectory,
+            log);
+        RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
+            extensionsDirectory,
             ContractAssemblyName,
             log);
         IReadOnlyList<RuntimeExtensionDescriptor> discovered =
             RuntimeExtensionDiscovery.Discover(snapshot, log);
+        PrepareGeneration(snapshot, discovered, reviveOwners: false);
 
-        _resolver = new(
-            snapshot,
-            ContractLoadContext,
-            ContractAssembly,
+        _initializationPrepared = true;
+        log.Information(
+            $"Prepared {_pendingInitialization.Count} runtime extension(s) " +
+            $"from '{extensionsDirectory}' with at most " +
+            $"{MaximumConcurrentInitializations} concurrent lifecycle operation(s).");
+    }
+
+    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureReloadPlan()
+    {
+        EnsureRuntimeThread();
+        if (!_initializationCompleted || _reloadState is not RuntimeExtensionReloadState.Idle and
+            not RuntimeExtensionReloadState.Completed and not RuntimeExtensionReloadState.Failed)
+        {
+            throw new InvalidOperationException(
+                "Runtime extensions cannot be captured while another lifecycle operation is active.");
+        }
+
+        RuntimeExtensionPlacement.Reconcile(
+            rootDirectory,
+            extensionsDirectory,
             log);
+        RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
+            extensionsDirectory,
+            ContractAssemblyName,
+            log);
+        IReadOnlyList<RuntimeExtensionDescriptor> discovered =
+            RuntimeExtensionDiscovery.Discover(snapshot, log);
+        IReadOnlyList<RuntimeExtensionDescriptor> previous =
+            Array.AsReadOnly([.. _active.Select(value => value.Descriptor)]);
+        IReadOnlyList<string> targets = Array.AsReadOnly(
+            [.. previous.Select(value => value.Id)
+                .Concat(discovered.Select(value => value.Id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)]);
+        return new(snapshot, discovered, previous, targets);
+    }
+
+    void IRuntimeExtensionReloadController.BeginReload(
+        RuntimeExtensionReloadPlan plan)
+    {
+        EnsureRuntimeThread();
+        ArgumentNullException.ThrowIfNull(plan);
+        if (!_shutdown)
+        {
+            if (_reloadState is RuntimeExtensionReloadState.Retiring or
+                RuntimeExtensionReloadState.Initializing)
+            {
+                throw new InvalidOperationException(
+                    "A runtime-extension reload is already active.");
+            }
+            if (_initializing.Count != 0 || _pendingInitialization.Count != 0)
+            {
+                throw new InvalidOperationException(
+                    "Runtime-extension initialization is not quiescent.");
+            }
+
+            _reloadPlan = plan;
+            _reloadDiagnostic = null;
+            _reloadState = RuntimeExtensionReloadState.Retiring;
+
+            Task? predecessor = null;
+            ActiveRuntimeExtension[] retiring = [.. _active.AsEnumerable().Reverse()];
+            foreach (ActiveRuntimeExtension active in retiring)
+            {
+                active.Unavailable = true;
+                active.Authority.ForceRevoke();
+                foreach (string capability in active.Descriptor.Provides)
+                {
+                    _availableCapabilities.Remove(capability);
+                }
+                services.RevokeOwner(active.Descriptor.Id);
+                predecessor = BeginRetirement(
+                    active.Descriptor,
+                    active.Instance,
+                    "runtime-extension reload",
+                    predecessor);
+            }
+            _active.Clear();
+            log.Information(
+                $"Runtime-extension reload queued {plan.TargetIds.Count} extension index(es). " +
+                "All extension binaries were captured before retirement began.");
+        }
+        else
+        {
+            throw new ObjectDisposedException(nameof(RuntimeExtensionManager));
+        }
+    }
+
+    void IRuntimeExtensionReloadController.AdvanceReload()
+    {
+        EnsureRuntimeThread();
+        try
+        {
+            AdvanceReloadCore();
+        }
+        catch (Exception exception)
+        {
+            _reloadDiagnostic = exception.ToString();
+            _reloadState = RuntimeExtensionReloadState.Failed;
+            log.Error(
+                $"Runtime-extension reload failed: {exception}",
+                source: "CommunityScriptHookVDotNetCore",
+                origin: nameof(AdvanceReloadCore));
+        }
+    }
+
+    private void AdvanceReloadCore()
+    {
+        if (_reloadState is RuntimeExtensionReloadState.Idle or
+            RuntimeExtensionReloadState.Completed or
+            RuntimeExtensionReloadState.Failed)
+        {
+            return;
+        }
+
+        ObserveRetirements();
+        if (_reloadState is RuntimeExtensionReloadState.Retiring)
+        {
+            if (_retiring.Count != 0)
+            {
+                return;
+            }
+
+            RuntimeExtensionReloadPlan plan = _reloadPlan
+                ?? throw new InvalidOperationException(
+                    "The runtime-extension reload plan is unavailable.");
+            _resolver?.Dispose();
+            _resolver = null;
+
+            HashSet<string> nextIds = [with(
+                plan.NextDescriptors.Select(value => value.Id),
+                StringComparer.OrdinalIgnoreCase)];
+            foreach (RuntimeExtensionDescriptor previous in plan.PreviousDescriptors)
+            {
+                if (!nextIds.Contains(previous.Id))
+                {
+                    MarkUnavailable(previous);
+                }
+            }
+
+            PrepareGeneration(
+                plan.Snapshot,
+                plan.NextDescriptors,
+                reviveOwners: true);
+            _reloadState = RuntimeExtensionReloadState.Initializing;
+        }
+
+        if (_reloadState is not RuntimeExtensionReloadState.Initializing)
+        {
+            return;
+        }
+
+        ObserveInitializing();
+        StartReadyInitializations();
+        ObserveInitializing();
+        if (_initializing.Count != 0)
+        {
+            return;
+        }
+        if (_pendingInitialization.Count != 0)
+        {
+            QuarantineUnsatisfiedPending();
+        }
+        if (_pendingInitialization.Count != 0)
+        {
+            return;
+        }
+
+        _reloadState = RuntimeExtensionReloadState.Completed;
+        log.Information(
+            $"Runtime-extension reload completed with {_active.Count} active extension(s). ");
+    }
+
+    private void PrepareGeneration(
+        RootAssemblySnapshot snapshot,
+        IReadOnlyList<RuntimeExtensionDescriptor> discovered,
+        bool reviveOwners)
+    {
+        if (reviveOwners)
+        {
+            foreach (RuntimeExtensionDescriptor descriptor in discovered)
+            {
+                services.ResetOwner(descriptor.Id);
+                _unavailableAssemblies.Remove(descriptor.AssemblyName);
+            }
+        }
+
+        _resolver = new(snapshot, ContractAssembly, log);
 
         Dictionary<string, string> declaredProviders = [with(
             StringComparer.OrdinalIgnoreCase)];
@@ -102,8 +336,10 @@ internal sealed class RuntimeExtensionManager(
                 string existing = declaredProviders[capability];
                 log.Error(
                     $"Runtime capability '{capability}' has ambiguous providers " +
-                    $"'{existing}' and '{descriptor.Id}'. Both extension roots are " +
-                    "quarantined for this GTA session.");
+                    $"'{existing}' and '{descriptor.Id}'. Both extensions are quarantined.",
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Runtime capability '{capability}' has multiple providers; conflicting extensions were quarantined.");
                 rejected.Add(descriptor.Id);
                 if (!existing.Equals(
                         "CommunityScriptHookVDotNetCore",
@@ -115,7 +351,6 @@ internal sealed class RuntimeExtensionManager(
         }
 
         RejectUndeclaredRootReferences(snapshot, discovered, rejected);
-
         foreach (RuntimeExtensionDescriptor descriptor in discovered)
         {
             if (rejected.Contains(descriptor.Id))
@@ -128,12 +363,15 @@ internal sealed class RuntimeExtensionManager(
             discovered
                 .Where(value => !rejected.Contains(value.Id))
                 .OrderBy(value => value.Id, StringComparer.OrdinalIgnoreCase));
+    }
 
-        _initializationPrepared = true;
-        log.Information(
-            $"Prepared {_pendingInitialization.Count} root runtime extension(s) " +
-            $"for frame-driven initialization with at most " +
-            $"{MaximumConcurrentInitializations} concurrent lifecycle operation(s).");
+    private void EnsureRuntimeThread()
+    {
+        if (Environment.CurrentManagedThreadId != _runtimeThreadId)
+        {
+            throw new InvalidOperationException(
+                "Runtime-extension lifecycle operations require the managed runtime frame thread.");
+        }
     }
 
     public void AdvanceInitialization()
@@ -215,7 +453,12 @@ internal sealed class RuntimeExtensionManager(
                     log.Error(
                         $"Runtime extension '{pending.Descriptor.Id}' exceeded its " +
                         $"{RootInitializationTimeout.TotalSeconds:0.###} second " +
-                        "initialization deadline and was quarantined independently.");
+                        "initialization deadline and was quarantined independently.",
+                        source: pending.Descriptor.Id,
+                        origin: pending.Descriptor.EntryType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Runtime extension '{pending.Descriptor.Id}' timed out during initialization and was quarantined.");
                     break;
 
                 case ManagedLifecycleOperationStatus.Cancelled:
@@ -227,7 +470,12 @@ internal sealed class RuntimeExtensionManager(
                         initializationCompletion);
                     log.Error(
                         $"Runtime extension '{pending.Descriptor.Id}' initialization " +
-                        "was cancelled and the extension was quarantined.");
+                        "was cancelled and the extension was quarantined.",
+                        source: pending.Descriptor.Id,
+                        origin: pending.Descriptor.EntryType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Runtime extension '{pending.Descriptor.Id}' could not start and was quarantined.");
                     break;
 
                 case ManagedLifecycleOperationStatus.Faulted:
@@ -238,9 +486,13 @@ internal sealed class RuntimeExtensionManager(
                         "initialization fault",
                         initializationCompletion);
                     log.Error(
-                        $"Runtime extension '{pending.Descriptor.Id}' could not " +
-                        "initialize and will not be retried before the game restarts: " +
-                        snapshot.Exception);
+                        $"Runtime extension '{pending.Descriptor.Id}' could not initialize: " +
+                        snapshot.Exception,
+                        source: pending.Descriptor.Id,
+                        origin: pending.Descriptor.EntryType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Runtime extension '{pending.Descriptor.Id}' faulted during initialization and was quarantined.");
                     break;
             }
         }
@@ -306,9 +558,11 @@ internal sealed class RuntimeExtensionManager(
                 gameThreadFunctionAuthority);
             RuntimeExtensionContext context = new(
                 rootDirectory,
+                extensionsDirectory,
                 scriptsDirectory,
                 ownerServices,
-                new RuntimeExtensionDependencyScope(this, descriptor.Id));
+                new RuntimeExtensionDependencyScope(this, descriptor.Id),
+                diagnostics.CreateReader());
 
             ManagedLifecycleOperation operation = ManagedLifecycleOperation.Start(
                 token => instance.InitializeAsync(context, token),
@@ -328,8 +582,12 @@ internal sealed class RuntimeExtensionManager(
                 BeginRetirement(descriptor, instance, "initialization setup fault");
             }
             log.Error(
-                $"Runtime extension '{descriptor.Id}' could not begin initialization " +
-                $"and will not be retried before the game restarts: {exception}");
+                $"Runtime extension '{descriptor.Id}' could not begin initialization: {exception}",
+                source: descriptor.Id,
+                origin: descriptor.EntryType,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Runtime extension '{descriptor.Id}' could not begin initialization and was quarantined.");
             return null;
         }
     }
@@ -343,8 +601,13 @@ internal sealed class RuntimeExtensionManager(
                 descriptor.Requires.Where(requirement =>
                     !_availableCapabilities.Contains(requirement)));
             log.Error(
-                $"Runtime extension '{descriptor.Id}' is quarantined for " +
-                $"this GTA session. Unsatisfied capabilities: {missing}.");
+                $"Runtime extension '{descriptor.Id}' is quarantined. " +
+                $"Unsatisfied capabilities: {missing}.",
+                source: descriptor.Id,
+                origin: descriptor.EntryType,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Runtime extension '{descriptor.Id}' was quarantined because required capabilities are unavailable.");
             MarkUnavailable(descriptor);
         }
         _pendingInitialization.Clear();
@@ -417,7 +680,12 @@ internal sealed class RuntimeExtensionManager(
                         "a static or conditional capability dependency on that provider. " +
                         $"Provider capabilities: [{capabilities}]. The consumer is " +
                         "quarantined so helper assemblies cannot bypass the " +
-                        "declared dependency lifecycle graph.");
+                        "declared dependency lifecycle graph.",
+                        source: consumer.Id,
+                        origin: consumer.EntryType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Runtime extension '{consumer.Id}' was quarantined because its dependency declaration is incomplete.");
                     break;
                 }
 
@@ -489,7 +757,12 @@ internal sealed class RuntimeExtensionManager(
             {
                 log.Error(
                     $"Runtime extension '{active.Descriptor.Id}' faulted while " +
-                    $"advancing a host frame: {exception}");
+                    $"advancing a host frame: {exception}",
+                    source: active.Descriptor.Id,
+                    origin: active.Descriptor.EntryType,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Runtime extension '{active.Descriptor.Id}' faulted and its lifecycle was stopped.");
                 Quarantine(active.Descriptor.Id, "host-frame fault");
             }
         }
@@ -518,7 +791,7 @@ internal sealed class RuntimeExtensionManager(
                 pending.Operation.Cancel();
                 pending.Operation.Dispose();
                 MarkUnavailable(pending.Descriptor);
-                BeginRetirement(
+                _ = BeginRetirement(
                     pending.Descriptor,
                     pending.Instance,
                     "runtime shutdown during initialization",
@@ -547,7 +820,7 @@ internal sealed class RuntimeExtensionManager(
 
             foreach (ActiveRuntimeExtension extension in active)
             {
-                BeginRetirement(
+                _ = BeginRetirement(
                     extension.Descriptor,
                     extension.Instance,
                     "runtime shutdown");
@@ -669,9 +942,25 @@ internal sealed class RuntimeExtensionManager(
         foreach (ActiveRuntimeExtension active in affected)
         {
             BeginRetirement(active.Descriptor, active.Instance, reason);
-            log.Error(
-                $"Runtime extension '{active.Descriptor.Id}' is permanently " +
-                "unavailable until GTA restarts.");
+            if (active.Descriptor.Id.Equals(
+                    extensionId,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                log.Information(
+                    $"Runtime extension '{active.Descriptor.Id}' is unavailable until a " +
+                    "later successful extension reload.");
+            }
+            else
+            {
+                log.Error(
+                    $"Runtime extension '{active.Descriptor.Id}' is unavailable until a " +
+                    "later successful extension reload.",
+                    source: active.Descriptor.Id,
+                    origin: active.Descriptor.EntryType,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Runtime extension '{active.Descriptor.Id}' was stopped because a required extension became unavailable.");
+            }
         }
     }
 
@@ -684,28 +973,29 @@ internal sealed class RuntimeExtensionManager(
         services.RevokeOwner(descriptor.Id);
     }
 
-    private void BeginRetirement(
+    private Task BeginRetirement(
         RuntimeExtensionDescriptor descriptor,
         IScript4RuntimeExtension instance,
         string reason,
         Task? predecessor = null)
     {
-        if (_retiring.Any(value => value.Descriptor.Id.Equals(
+        RetiringRuntimeExtension? existing = _retiring.FirstOrDefault(value =>
+            value.Descriptor.Id.Equals(
                 descriptor.Id,
-                StringComparison.OrdinalIgnoreCase)))
+                StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
         {
-            return;
+            return existing.Operation.Completion;
         }
 
-        _retiring.Add(new(
-            descriptor,
-            reason,
-            ManagedRetirementOperation.Start(
-                instance.ShutdownAsync,
-                predecessor)));
+        ManagedRetirementOperation operation = ManagedRetirementOperation.Start(
+            instance.ShutdownAsync,
+            predecessor);
+        _retiring.Add(new(descriptor, reason, operation));
         log.Information(
             $"Runtime extension '{descriptor.Id}' entered asynchronous retirement; " +
             $"reason={reason}.");
+        return operation.Completion;
     }
 
     private void ObserveRetirements()
@@ -730,7 +1020,9 @@ internal sealed class RuntimeExtensionManager(
 
             log.Error(
                 $"Runtime extension '{retiring.Descriptor.Id}' cleanup faulted after " +
-                $"retirement; reason={retiring.Reason}: {snapshot.Exception}");
+                $"retirement; reason={retiring.Reason}: {snapshot.Exception}",
+                source: retiring.Descriptor.Id,
+                origin: retiring.Descriptor.EntryType);
         }
     }
 
@@ -1083,6 +1375,246 @@ internal sealed record RootAssemblyImage(
     byte[] Assembly,
     byte[]? Symbols);
 
+internal static class RuntimeExtensionPlacement
+{
+    private static readonly string[] SidecarExtensions =
+        [".pdb", ".ini", ".log"];
+
+    public static void Reconcile(
+        string rootDirectory,
+        string extensionsDirectory,
+        RuntimeLog log)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(extensionsDirectory);
+        ArgumentNullException.ThrowIfNull(log);
+
+        string root = Path.GetFullPath(rootDirectory);
+        string extensions = Path.GetFullPath(extensionsDirectory);
+        if (root.Equals(extensions, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(extensions);
+        string[] candidates =
+        [
+            .. Directory
+                .EnumerateFiles(root, "*.dll", SearchOption.TopDirectoryOnly)
+                .OrderBy(
+                    value => value,
+                    StringComparer.OrdinalIgnoreCase)
+        ];
+
+        foreach (string source in candidates)
+        {
+            try
+            {
+                if (!IsRuntimeExtension(source))
+                {
+                    continue;
+                }
+
+                string destination = Path.Combine(
+                    extensions,
+                    Path.GetFileName(source));
+                ReconcileAssembly(source, destination, log);
+            }
+            catch (Exception exception) when (
+                exception is IOException or
+                    UnauthorizedAccessException or
+                    BadImageFormatException or
+                    ArgumentException or
+                    NotSupportedException)
+            {
+                log.Warning(
+                    $"Root extension '{Path.GetFileName(source)}' could not be " +
+                    $"reconciled into '{extensions}': {exception.Message}");
+            }
+        }
+    }
+
+    private static bool IsRuntimeExtension(string path)
+    {
+        using FileStream stream = new(
+            path,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read | FileShare.Delete);
+        using PEReader pe = new(
+            stream,
+            PEStreamOptions.PrefetchMetadata);
+        if (!pe.HasMetadata)
+        {
+            return false;
+        }
+
+        MetadataReader metadata = pe.GetMetadataReader();
+        return ManagedAssemblyMetadata.Declares(
+            metadata,
+            RuntimeExtensionMetadataKeys.Role,
+            RuntimeExtensionMetadataKeys.RuntimeExtensionRole);
+    }
+
+    private static void ReconcileAssembly(
+        string source,
+        string destination,
+        RuntimeLog log)
+    {
+        bool sourceWins =
+            !File.Exists(destination) ||
+            CompareCandidates(source, destination) > 0;
+
+        if (sourceWins)
+        {
+            File.Move(source, destination, overwrite: true);
+            log.Information(
+                $"Root extension '{Path.GetFileName(source)}' was moved to " +
+                $"'{Path.GetDirectoryName(destination)}'.");
+        }
+        else
+        {
+            File.Delete(source);
+            log.Information(
+                $"Root extension '{Path.GetFileName(source)}' was discarded " +
+                "because the extensions-directory copy is newer or equivalent.");
+        }
+
+        foreach (string extension in SidecarExtensions)
+        {
+            ReconcileSidecar(source, destination, extension);
+        }
+    }
+
+    private static void ReconcileSidecar(
+        string sourceAssembly,
+        string destinationAssembly,
+        string extension)
+    {
+        string source = Path.ChangeExtension(sourceAssembly, extension);
+        if (!File.Exists(source))
+        {
+            return;
+        }
+
+        string destination =
+            Path.ChangeExtension(destinationAssembly, extension);
+        if (!File.Exists(destination) ||
+            File.GetLastWriteTimeUtc(source) >
+                File.GetLastWriteTimeUtc(destination))
+        {
+            File.Move(source, destination, overwrite: true);
+            return;
+        }
+
+        File.Delete(source);
+    }
+
+    private static int CompareCandidates(
+        string left,
+        string right)
+    {
+        if (TryReadDatedVersion(left, out DatedVersion leftVersion) &&
+            TryReadDatedVersion(right, out DatedVersion rightVersion))
+        {
+            int versionComparison = leftVersion.CompareTo(rightVersion);
+            if (versionComparison != 0)
+            {
+                return versionComparison;
+            }
+        }
+
+        return File.GetLastWriteTimeUtc(left)
+            .CompareTo(File.GetLastWriteTimeUtc(right));
+    }
+
+    private static bool TryReadDatedVersion(
+        string path,
+        out DatedVersion version)
+    {
+        version = default;
+        try
+        {
+            using (FileStream stream = new(
+                       path,
+                       FileMode.Open,
+                       FileAccess.Read,
+                       FileShare.Read | FileShare.Delete))
+            using (PEReader pe = new(
+                       stream,
+                       PEStreamOptions.PrefetchMetadata))
+            {
+                if (pe.HasMetadata)
+                {
+                    Version assemblyVersion =
+                        pe.GetMetadataReader()
+                            .GetAssemblyDefinition()
+                            .Version;
+                    if (TryConvertVersion(assemblyVersion, out version))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            string? fileVersion =
+                FileVersionInfo.GetVersionInfo(path).FileVersion;
+            return Version.TryParse(fileVersion, out Version? parsed) &&
+                TryConvertVersion(parsed, out version);
+        }
+        catch (Exception exception) when (
+            exception is IOException or
+                UnauthorizedAccessException or
+                BadImageFormatException or
+                ArgumentException or
+                NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryConvertVersion(
+        Version value,
+        out DatedVersion version)
+    {
+        version = default;
+        if (value.Major <= 0 ||
+            value.Minor <= 0 ||
+            value.Build <= 0 ||
+            value.Revision < 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            DateOnly date = new(
+                value.Build,
+                value.Minor,
+                value.Major);
+            version = new(date, value.Revision);
+            return true;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return false;
+        }
+    }
+
+    private readonly record struct DatedVersion(
+        DateOnly Date,
+        int Variant) : IComparable<DatedVersion>
+    {
+        public int CompareTo(DatedVersion other)
+        {
+            int dateComparison = Date.CompareTo(other.Date);
+            return dateComparison != 0
+                ? dateComparison
+                : Variant.CompareTo(other.Variant);
+        }
+    }
+}
+
 internal sealed class RootAssemblySnapshot
 {
     private readonly Dictionary<string, RootAssemblyImage> _images;
@@ -1225,6 +1757,56 @@ internal sealed class RootAssemblySnapshot
     }
 }
 
+internal static class RuntimeExtensionAssemblyRegistry
+{
+    private static readonly Lock Gate = new();
+    private static readonly Dictionary<string, Assembly> Assemblies =
+        [with(StringComparer.OrdinalIgnoreCase)];
+
+    public static bool TryGet(
+        string simpleName,
+        [NotNullWhen(true)] out Assembly? assembly)
+    {
+        lock (Gate)
+        {
+            return Assemblies.TryGetValue(simpleName, out assembly);
+        }
+    }
+
+    public static void Register(Assembly assembly)
+    {
+        string? name = assembly.GetName().Name;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+        lock (Gate)
+        {
+            Assemblies[name] = assembly;
+        }
+    }
+
+    public static void Unregister(IEnumerable<Assembly> assemblies)
+    {
+        lock (Gate)
+        {
+            foreach (Assembly assembly in assemblies)
+            {
+                string? name = assembly.GetName().Name;
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    continue;
+                }
+                if (Assemblies.TryGetValue(name, out Assembly? current) &&
+                    ReferenceEquals(current, assembly))
+                {
+                    Assemblies.Remove(name);
+                }
+            }
+        }
+    }
+}
+
 internal sealed class RootAssemblyResolver : IDisposable
 {
     private readonly AssemblyLoadContext _context;
@@ -1237,26 +1819,25 @@ internal sealed class RootAssemblyResolver : IDisposable
 
     public RootAssemblyResolver(
         RootAssemblySnapshot snapshot,
-        AssemblyLoadContext context,
         Assembly contractAssembly,
         RuntimeLog log)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
-        ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(contractAssembly);
         ArgumentNullException.ThrowIfNull(log);
 
-        _context = context;
+        _context = new AssemblyLoadContext(
+            $"CSHVDNC.Extensions.{Guid.NewGuid():N}",
+            isCollectible: true);
         _contractAssembly = contractAssembly;
         _contractAssemblyName = contractAssembly.GetName().Name
             ?? throw new InvalidOperationException(
                 "The runtime-extension contract assembly has no simple name.");
         _log = log;
         _snapshot = snapshot;
-
         _context.Resolving += Resolve;
         _log.Information(
-            $"Root resolver activated from {snapshot.Images.Count} committed RAM image(s).");
+            $"Extension resolver activated from {snapshot.Images.Count} committed RAM image(s).");
     }
 
     public Assembly LoadRootAssembly(string simpleName)
@@ -1273,7 +1854,7 @@ internal sealed class RootAssemblyResolver : IDisposable
         if (!snapshot.TryGet(simpleName, out RootAssemblyImage? image))
         {
             throw new FileNotFoundException(
-                $"Root managed assembly '{simpleName}' is absent from the RAM snapshot.");
+                $"Runtime extension assembly '{simpleName}' is absent from the RAM snapshot.");
         }
         return LoadImage(image);
     }
@@ -1286,7 +1867,10 @@ internal sealed class RootAssemblyResolver : IDisposable
         }
         _disposed = true;
         _context.Resolving -= Resolve;
+        Assembly[] loaded = [.. _context.Assemblies];
+        RuntimeExtensionAssemblyRegistry.Unregister(loaded);
         _snapshot = null;
+        _context.Unload();
     }
 
     private Assembly? Resolve(AssemblyLoadContext context, AssemblyName requested)
@@ -1307,43 +1891,76 @@ internal sealed class RootAssemblyResolver : IDisposable
         {
             return loaded;
         }
+
         RootAssemblySnapshot? snapshot = _snapshot;
-        if (snapshot is null ||
-            !snapshot.TryGet(requested.Name, out RootAssemblyImage? image))
+        if (snapshot is not null &&
+            snapshot.TryGet(requested.Name, out RootAssemblyImage? image))
+        {
+            lock (_gate)
+            {
+                loaded = FindLoaded(requested.Name);
+                if (loaded is not null)
+                {
+                    return loaded;
+                }
+                try
+                {
+                    return LoadImage(image);
+                }
+                catch (Exception exception)
+                {
+                    _log.Error(
+                        $"Extension dependency '{requested}' could not be loaded from its committed RAM image: {exception.Message}");
+                    return null;
+                }
+            }
+        }
+
+        Assembly? runtimeDependency = RuntimeDependencyResolver.TryResolve(requested);
+        if (runtimeDependency is not null ||
+            requested.Name.Equals(
+                "FSharp.Core",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return runtimeDependency;
+        }
+
+        foreach (Assembly shared in AssemblyLoadContext.Default.Assemblies)
+        {
+            if (shared.GetName().Name?.Equals(
+                    requested.Name,
+                    StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return shared;
+            }
+        }
+
+        try
+        {
+            return AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
+        }
+        catch (FileNotFoundException)
         {
             return null;
         }
-
-        lock (_gate)
+        catch (FileLoadException)
         {
-            loaded = FindLoaded(requested.Name);
-            if (loaded is not null)
-            {
-                return loaded;
-            }
-            try
-            {
-                return LoadImage(image);
-            }
-            catch (Exception exception)
-            {
-                _log.Error(
-                    $"Root dependency '{requested}' could not be loaded from its " +
-                    $"committed RAM image: {exception.Message}");
-                return null;
-            }
+            return null;
         }
     }
 
     private Assembly LoadImage(RootAssemblyImage image)
     {
+        Assembly loaded;
         if (image.Symbols is not null)
         {
             try
             {
                 using MemoryStream assembly = new(image.Assembly, writable: false);
                 using MemoryStream symbols = new(image.Symbols, writable: false);
-                return _context.LoadFromStream(assembly, symbols);
+                loaded = _context.LoadFromStream(assembly, symbols);
+                RuntimeExtensionAssemblyRegistry.Register(loaded);
+                return loaded;
             }
             catch (BadImageFormatException)
             {
@@ -1351,7 +1968,9 @@ internal sealed class RootAssemblyResolver : IDisposable
         }
 
         using MemoryStream imageStream = new(image.Assembly, writable: false);
-        return _context.LoadFromStream(imageStream);
+        loaded = _context.LoadFromStream(imageStream);
+        RuntimeExtensionAssemblyRegistry.Register(loaded);
+        return loaded;
     }
 
     private Assembly? FindLoaded(string simpleName) =>

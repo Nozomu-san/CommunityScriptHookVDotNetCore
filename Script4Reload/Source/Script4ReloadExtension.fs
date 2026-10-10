@@ -24,11 +24,17 @@ type Script4ReloadExtension() =
                 invalidOp "Script4Reload is already initialized."
 
             let config, diagnostic =
-                ReloadConfiguration.loadOrCreate context.RootDirectory
-            let log = new ReloadLog(context.RootDirectory)
+                ReloadConfiguration.loadOrCreate context.ExtensionsDirectory
+            let diagnostics =
+                context.Services.GetRequired<IRuntimeDiagnosticSink>()
+            let log =
+                new ReloadLog(
+                    context.ExtensionsDirectory,
+                    config.LogEnabled,
+                    diagnostics)
             reloadLog <- Some log
 
-            diagnostic |> Option.iter (fun message -> log.Warning message)
+            diagnostic |> Option.iter log.Warning
 
             let host = context.Services.GetRequired<IReloadRuntimeHost>()
             let instance = Scripts4Lifecycle(context, host, config, log)

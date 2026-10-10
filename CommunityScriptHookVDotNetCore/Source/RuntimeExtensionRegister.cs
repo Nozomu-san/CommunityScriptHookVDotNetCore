@@ -28,6 +28,7 @@ public static class RuntimeCapabilities
     public const string PackageLifecycle = "package.lifecycle";
     public const string PackageTransitionHost = "package.lifecycle.transition";
     public const string ScriptScheduler = "script.scheduler";
+    public const string RuntimeDiagnostics = "runtime.diagnostics";
 }
 
 public enum RawNativeCallStatus
@@ -158,20 +159,26 @@ public sealed class RuntimeExtensionContext
 {
     internal RuntimeExtensionContext(
         string rootDirectory,
+        string extensionsDirectory,
         string scriptsDirectory,
         IRuntimeServiceRegistry services,
-        IRuntimeExtensionDependencies dependencies)
+        IRuntimeExtensionDependencies dependencies,
+        IRuntimeDiagnosticReader diagnostics)
     {
         RootDirectory = rootDirectory;
+        ExtensionsDirectory = extensionsDirectory;
         ScriptsDirectory = scriptsDirectory;
         Services = services;
         Dependencies = dependencies;
+        Diagnostics = diagnostics;
     }
 
     public string RootDirectory { get; }
+    public string ExtensionsDirectory { get; }
     public string ScriptsDirectory { get; }
     public IRuntimeServiceRegistry Services { get; }
     public IRuntimeExtensionDependencies Dependencies { get; }
+    public IRuntimeDiagnosticReader Diagnostics { get; }
 }
 
 public interface IScript4RuntimeExtension
@@ -218,6 +225,7 @@ public enum ScriptLifecycleTransitionOperationState
     CapturingImages,
     ReadyInMemory,
     StoppingLifecycle,
+    ReloadingExtensions,
     ReplacingBinaries,
     RecreatingInstances,
     StartingLifecycle,
@@ -267,6 +275,8 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
     private readonly Dictionary<Type, Registration> _services = [];
     private readonly HashSet<string> _revokedOwners =
         [with(StringComparer.OrdinalIgnoreCase)];
+    private readonly Dictionary<string, int> _ownerEpochs =
+        [with(StringComparer.OrdinalIgnoreCase)];
 
     internal RuntimeServiceRegistry()
     {
@@ -281,18 +291,20 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
         bool allowGameThreadFunctions)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+        int epoch;
         lock (_gate)
         {
             if (_revokedOwners.Contains(owner))
             {
                 throw new InvalidOperationException(
-                    $"Runtime extension owner '{owner}' is permanently revoked " +
-                    "for this GTA process.");
+                    $"Runtime extension owner '{owner}' is currently revoked.");
             }
+            epoch = _ownerEpochs.GetValueOrDefault(owner);
         }
         return new OwnerServiceView(
             this,
             owner,
+            epoch,
             allowNativeAuthority,
             allowGameThreadFunctions);
     }
@@ -303,15 +315,47 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
         lock (_gate)
         {
             _revokedOwners.Add(owner);
-            Type[] contracts = [.. _services
-                .Where(pair => pair.Value.Owner.Equals(
-                    owner,
-                    StringComparison.OrdinalIgnoreCase))
-                .Select(pair => pair.Key)];
-            foreach (Type contract in contracts)
-            {
-                _services.Remove(contract);
-            }
+            IncrementOwnerEpoch(owner);
+            RemoveOwnerServices(owner);
+        }
+    }
+
+    internal void ResetOwner(string owner)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(owner);
+        lock (_gate)
+        {
+            _revokedOwners.Remove(owner);
+            IncrementOwnerEpoch(owner);
+            RemoveOwnerServices(owner);
+        }
+    }
+
+
+    private void RemoveOwnerServices(string owner)
+    {
+        Type[] contracts = [.. _services
+            .Where(pair => pair.Value.Owner.Equals(
+                owner,
+                StringComparison.OrdinalIgnoreCase))
+            .Select(pair => pair.Key)];
+        foreach (Type contract in contracts)
+        {
+            _services.Remove(contract);
+        }
+    }
+
+    private void IncrementOwnerEpoch(string owner)
+    {
+        _ownerEpochs[owner] = checked(_ownerEpochs.GetValueOrDefault(owner) + 1);
+    }
+
+    private bool IsOwnerScopeActive(string owner, int epoch)
+    {
+        lock (_gate)
+        {
+            return !_revokedOwners.Contains(owner) &&
+                _ownerEpochs.GetValueOrDefault(owner) == epoch;
         }
     }
 
@@ -352,8 +396,7 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
             if (_revokedOwners.Contains(owner))
             {
                 throw new InvalidOperationException(
-                    $"Runtime extension owner '{owner}' is permanently revoked " +
-                    "for this GTA process.");
+                    $"Runtime extension owner '{owner}' is currently revoked.");
             }
 
             Type contract = typeof(TService);
@@ -419,6 +462,7 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
     private sealed class OwnerServiceView(
         RuntimeServiceRegistry owner,
         string ownerId,
+        int ownerEpoch,
         bool allowNativeAuthority,
         bool allowGameThreadFunctions) : IRuntimeServiceRegistry
     {
@@ -426,6 +470,11 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
             [NotNullWhen(true)] out TService? service)
             where TService : class
         {
+            if (!owner.IsOwnerScopeActive(ownerId, ownerEpoch))
+            {
+                service = null;
+                return false;
+            }
             Type contract = typeof(TService);
             if ((!allowNativeAuthority && IsNativeAuthorityContract(contract)) ||
                 (!allowGameThreadFunctions &&
@@ -446,12 +495,26 @@ internal sealed class RuntimeServiceRegistry : IRuntimeServiceRegistry
                     $"to extension '{ownerId}'.");
 
         public void Register<TService>(TService service)
-            where TService : class =>
+            where TService : class
+        {
+            if (!owner.IsOwnerScopeActive(ownerId, ownerEpoch))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime extension owner scope '{ownerId}' is no longer active.");
+            }
             owner.RegisterOwned(ownerId, service, scriptVisible: true);
+        }
 
         public void RegisterRuntimeOnly<TService>(TService service)
-            where TService : class =>
+            where TService : class
+        {
+            if (!owner.IsOwnerScopeActive(ownerId, ownerEpoch))
+            {
+                throw new InvalidOperationException(
+                    $"Runtime extension owner scope '{ownerId}' is no longer active.");
+            }
             owner.RegisterOwned(ownerId, service, scriptVisible: false);
+        }
     }
 
     private sealed class ScriptServiceView(

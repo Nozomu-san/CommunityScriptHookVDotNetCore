@@ -200,7 +200,7 @@ type internal DeviceInputReader() =
             if not foreground then
                 cursorBaseline <- false
                 pointerState <- PointerState.Unavailable frame.FrameIndex
-                Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
+                Array.Clear(controllerAvailable)
             else
                 let mutable point = NativePoint()
                 if NativeDeviceInput.GetCursorPos(&point) then
@@ -237,8 +237,8 @@ type internal DeviceInputReader() =
             captureControllers()
             controllersCaptured <- true
         elif not controllerDemand then
-            Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
-            Array.Clear(controllerNextProbe, 0, controllerNextProbe.Length)
+            Array.Clear(controllerAvailable)
+            Array.Clear(controllerNextProbe)
 
     let readControllerButton (control: DeviceControl) =
         let mask = controllerMask control.Code
@@ -347,8 +347,8 @@ type internal DeviceInputReader() =
                 if not disposed then
                     disposed <- true
                     pointerState <- PointerState.Unavailable capturedFrame
-                    Array.Clear(controllerAvailable, 0, controllerAvailable.Length)
-                    Array.Clear(controllerNextProbe, 0, controllerNextProbe.Length))
+                    Array.Clear(controllerAvailable)
+                    Array.Clear(controllerNextProbe))
 
     static member IsCurrentProcessForeground() =
         NativeDeviceInput.isCurrentProcessForeground()

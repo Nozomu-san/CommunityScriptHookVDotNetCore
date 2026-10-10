@@ -24,8 +24,9 @@ internal static class Runtime
 
         try
         {
-            using RuntimeFiles files = RuntimeFiles.Open();
-            using RuntimeSession session = new(host, files);
+            using RuntimeDiagnosticHub diagnostics = new();
+            using RuntimeFiles files = RuntimeFiles.Open(diagnostics);
+            using RuntimeSession session = new(host, files, diagnostics);
 
             files.Log.Information(
                 $"Managed runtime thread: {Environment.CurrentManagedThreadId}.");
@@ -58,14 +59,19 @@ internal sealed class RuntimeSession : IDisposable
     private readonly EventWaitHandle _stopRequested;
     private readonly TickScheduler _scheduler;
     private readonly RuntimeServiceRegistry _services = new();
+    private readonly RuntimeDiagnosticHub _diagnostics;
     private readonly NativeTransport _native;
     private readonly PackageManager _packages;
     private readonly RuntimeExtensionManager _extensions;
     private bool _rootInitializationCommitted;
+    private bool _initialDiagnosticEpochSealed;
     private bool _initialized;
     private bool _shutdown;
 
-    public RuntimeSession(HostRunRequest request, RuntimeFiles files)
+    public RuntimeSession(
+        HostRunRequest request,
+        RuntimeFiles files,
+        RuntimeDiagnosticHub diagnostics)
     {
         _request = request;
         _log = files.Log;
@@ -80,6 +86,8 @@ internal sealed class RuntimeSession : IDisposable
             request.StopRequestedEvent,
             EventResetMode.ManualReset);
         _scheduler = new(files.Log);
+        _diagnostics = diagnostics;
+        _services.Register<IRuntimeDiagnosticSink>(_diagnostics);
         _native = new(
             request.NativeCall,
             BorrowEvent(request.NativeRequestedEvent, EventResetMode.AutoReset),
@@ -91,12 +99,16 @@ internal sealed class RuntimeSession : IDisposable
         _packages = new(
             files.ScriptsDirectory,
             _services.ScriptServices,
-            files.Log);
+            files.Log,
+            _diagnostics);
         _extensions = new(
             files.RootDirectory,
+            files.ExtensionsDirectory,
             files.ScriptsDirectory,
             _services,
-            files.Log);
+            files.Log,
+            _diagnostics);
+        _packages.AttachExtensionReloadController(_extensions);
 
         _services.RegisterRuntimeOnly<IRawNativeTransport>(_native);
         _services.RegisterRuntimeOnly<INativeCallAdmissionControl>(_native);
@@ -112,6 +124,7 @@ internal sealed class RuntimeSession : IDisposable
                 "The managed runtime session is already initialized.");
         }
 
+        _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Extensions);
         _extensions.PrepareInitialization();
         _initialized = true;
     }
@@ -193,6 +206,7 @@ internal sealed class RuntimeSession : IDisposable
                 _packages.SetUnavailableRuntimeAssemblies(
                     _extensions.UnavailableAssemblyNames);
                 _ = _extensions.DrainNewUnavailableAssemblyNames();
+                _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
                 _packages.BeginInitialActivation();
                 _rootInitializationCommitted = true;
             }
@@ -200,6 +214,13 @@ internal sealed class RuntimeSession : IDisposable
             _packages.AdvanceInitialActivation(frame.FrameIndex);
             if (!_packages.InitialActivationCompleted)
             {
+                return;
+            }
+
+            if (!_initialDiagnosticEpochSealed)
+            {
+                _diagnostics.SealEpoch();
+                _initialDiagnosticEpochSealed = true;
                 return;
             }
 

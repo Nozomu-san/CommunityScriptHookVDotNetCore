@@ -661,7 +661,7 @@ internal sealed class NativeCatalog : INativeCatalog, INativeDatabaseInfo
     {
         _entries = entries;
         Identity = identity;
-        _byName = new(entries.Length, StringComparer.Ordinal);
+        _byName = [with(entries.Length, StringComparer.Ordinal)];
         _byHash = [with(entries.Length)];
 
         foreach (NativeDescriptor descriptor in entries)

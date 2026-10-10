@@ -4,17 +4,17 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
-    <FileVersion>10.10.2026.0</FileVersion>
+    <AssemblyTitle>In-game Logging tool</AssemblyTitle>
     <AssemblyVersion>10.10.2026.0</AssemblyVersion>
-    <AssemblyTitle>Low Level In-Game Events</AssemblyTitle>
+    <FileVersion>10.10.2026.0</FileVersion>
     <Authors>Nozomu-san</Authors>
   </PropertyGroup>
   <ItemGroup>
     <Reference Include="CommunityScriptHookVDotNetCore">
       <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
     </Reference>
-    <Reference Include="LocalNativeMemories">
-      <HintPath>..\LocalNativeMemories\bin\x64\Release\net11.0\LocalNativeMemories.dll</HintPath>
+    <Reference Include="StandardGameOperations">
+      <HintPath>..\StandardGameOperations\bin\x64\Release\net11.0\StandardGameOperations.dll</HintPath>
     </Reference>
   </ItemGroup>
 </Project>

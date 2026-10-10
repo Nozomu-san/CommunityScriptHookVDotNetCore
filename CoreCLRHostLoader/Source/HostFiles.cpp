@@ -20,6 +20,7 @@ namespace CoreCLRHostLoader
         {
             HostConfiguration Value;
             bool IsValid = false;
+            bool NeedsRewrite = false;
         };
 
         enum class ConfigurationSection
@@ -257,6 +258,13 @@ namespace CoreCLRHostLoader
             return {};
         }
 
+        void CloseLog() noexcept
+        {
+            std::scoped_lock lock(g_logMutex);
+            g_log.close();
+            g_log.clear();
+        }
+
         [[nodiscard]]
         HostResult<std::string> ReadUtf8File(const std::filesystem::path& path)
         {
@@ -348,147 +356,16 @@ namespace CoreCLRHostLoader
         }
 
         [[nodiscard]]
-        HostResult<std::string> ReplaceBrainAssemblyInput(
-            std::string_view text,
-            std::wstring_view assemblyName)
-        {
-            std::wstring wide = Utf8ToWide(text);
-            if (wide.empty() && !text.empty())
-            {
-                return std::unexpected(
-                    L"CoreCLRHostLoader.ini is not valid UTF-8.");
-            }
-
-            ConfigurationSection section = ConfigurationSection::None;
-            std::wstring updated;
-            updated.reserve(wide.size() + assemblyName.size());
-            bool replaced = false;
-
-            std::size_t offset = 0;
-            while (offset < wide.size())
-            {
-                const std::size_t newline = wide.find(L'\n', offset);
-                const std::size_t lineEnd =
-                    newline == std::wstring::npos ? wide.size() : newline;
-                const std::wstring_view rawLine(
-                    wide.data() + offset,
-                    lineEnd - offset);
-
-                std::size_t contentEnd = rawLine.size();
-                if (contentEnd != 0 && rawLine[contentEnd - 1] == L'\r')
-                {
-                    --contentEnd;
-                }
-
-                const std::wstring trimmed =
-                    Trim(std::wstring(rawLine.substr(0, contentEnd)));
-
-                bool assemblyInput = false;
-                std::size_t valueStart = 0;
-                std::size_t valueEnd = 0;
-
-                if (!trimmed.empty() &&
-                    trimmed.front() != L';' &&
-                    trimmed.front() != L'#')
-                {
-                    if (trimmed.size() >= 2 &&
-                        trimmed.front() == L'[' &&
-                        trimmed.back() == L']')
-                    {
-                        const std::wstring name =
-                            Trim(trimmed.substr(1, trimmed.size() - 2));
-                        if (EqualsIgnoreCase(name, L"Runtime"))
-                        {
-                            section = ConfigurationSection::Runtime;
-                        }
-                        else if (EqualsIgnoreCase(name, L"Brain"))
-                        {
-                            section = ConfigurationSection::Brain;
-                        }
-                        else
-                        {
-                            section = ConfigurationSection::Unknown;
-                        }
-                    }
-                    else if (section == ConfigurationSection::Brain)
-                    {
-                        const std::size_t equals =
-                            rawLine.substr(0, contentEnd).find(L'=');
-                        if (equals != std::wstring_view::npos)
-                        {
-                            const std::wstring key = Trim(
-                                std::wstring(
-                                    rawLine.substr(0, equals)));
-                            if (EqualsIgnoreCase(key, L"Assembly"))
-                            {
-                                assemblyInput = true;
-                                valueStart = equals + 1;
-                                while (valueStart < contentEnd &&
-                                    std::iswspace(rawLine[valueStart]) != 0)
-                                {
-                                    ++valueStart;
-                                }
-
-                                valueEnd = contentEnd;
-                                while (valueEnd > valueStart &&
-                                    std::iswspace(rawLine[valueEnd - 1]) != 0)
-                                {
-                                    --valueEnd;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if (assemblyInput)
-                {
-                    updated.append(rawLine.substr(0, valueStart));
-                    updated.append(assemblyName.data(), assemblyName.size());
-                    updated.append(rawLine.substr(valueEnd));
-                    replaced = true;
-                }
-                else
-                {
-                    updated.append(rawLine);
-                }
-
-                if (newline != std::wstring::npos)
-                {
-                    updated.push_back(L'\n');
-                    offset = newline + 1;
-                }
-                else
-                {
-                    offset = wide.size();
-                }
-            }
-
-            if (!replaced)
-            {
-                return std::unexpected(
-                    L"The [Brain] Assembly input could not be located.");
-            }
-
-            const std::string encoded = WideToUtf8(updated);
-            if (encoded.empty() && !updated.empty())
-            {
-                return std::unexpected(
-                    L"CoreCLRHostLoader.ini could not be encoded as UTF-8.");
-            }
-            return encoded;
-        }
-
-        [[nodiscard]]
         ParsedConfiguration ParseConfiguration(std::string_view text)
         {
             ParsedConfiguration parsed{};
             ConfigurationSection section = ConfigurationSection::None;
             std::optional<RuntimeChannel> runtimeValue;
+            std::optional<bool> logValue;
             std::optional<std::wstring> brainValue;
             bool runtimeInvalid = false;
+            bool logInvalid = false;
             bool brainInvalid = false;
-            bool runtimeConflict = false;
-            bool brainConflict = false;
 
             std::wstring wide = Utf8ToWide(text);
             if (wide.empty() && !text.empty())
@@ -534,7 +411,7 @@ namespace CoreCLRHostLoader
                 }
 
                 const std::size_t equals = line.find(L'=');
-                if (equals == std::wstring::npos)
+                if (equals == std::wstring::npos || equals == 0)
                 {
                     continue;
                 }
@@ -545,28 +422,47 @@ namespace CoreCLRHostLoader
                 if (section == ConfigurationSection::Runtime &&
                     EqualsIgnoreCase(key, L"Channel"))
                 {
-                    std::optional<RuntimeChannel> candidate;
+                    if (runtimeValue || runtimeInvalid)
+                    {
+                        runtimeValue.reset();
+                        runtimeInvalid = true;
+                        continue;
+                    }
                     if (EqualsIgnoreCase(value, L"Release"))
                     {
-                        candidate = RuntimeChannel::Release;
+                        runtimeValue = RuntimeChannel::Release;
                     }
                     else if (EqualsIgnoreCase(value, L"Preview"))
                     {
-                        candidate = RuntimeChannel::Preview;
+                        runtimeValue = RuntimeChannel::Preview;
                     }
                     else
                     {
                         runtimeInvalid = true;
+                    }
+                    continue;
+                }
+
+                if (section == ConfigurationSection::Runtime &&
+                    EqualsIgnoreCase(key, L"LogEnabled"))
+                {
+                    if (logValue || logInvalid)
+                    {
+                        logValue.reset();
+                        logInvalid = true;
                         continue;
                     }
-
-                    if (!runtimeValue)
+                    if (EqualsIgnoreCase(value, L"true"))
                     {
-                        runtimeValue = *candidate;
+                        logValue = true;
                     }
-                    else if (*runtimeValue != *candidate)
+                    else if (EqualsIgnoreCase(value, L"false"))
                     {
-                        runtimeConflict = true;
+                        logValue = false;
+                    }
+                    else
+                    {
+                        logInvalid = true;
                     }
                     continue;
                 }
@@ -574,36 +470,41 @@ namespace CoreCLRHostLoader
                 if (section == ConfigurationSection::Brain &&
                     EqualsIgnoreCase(key, L"Assembly"))
                 {
+                    if (brainValue || brainInvalid)
+                    {
+                        brainValue.reset();
+                        brainInvalid = true;
+                        continue;
+                    }
                     if (EndsWithIgnoreCase(value, L".dll"))
                     {
                         value.resize(value.size() - 4);
                     }
-
                     if (!value.empty() && !IsSimpleAssemblyName(value))
                     {
                         brainInvalid = true;
                         continue;
                     }
-
-                    if (!brainValue)
-                    {
-                        brainValue = std::move(value);
-                    }
-                    else if (!EqualsIgnoreCase(*brainValue, value))
-                    {
-                        brainConflict = true;
-                    }
+                    brainValue = std::move(value);
                 }
             }
 
-            if (!runtimeValue || runtimeInvalid || runtimeConflict ||
-                !brainValue || brainInvalid || brainConflict)
-            {
-                return parsed;
-            }
-
-            parsed.Value.Channel = *runtimeValue;
-            parsed.Value.BrainAssembly = std::move(*brainValue);
+            parsed.Value.Channel = !runtimeInvalid && runtimeValue
+                ? *runtimeValue
+                : RuntimeChannel::Release;
+            parsed.Value.LogEnabled = !logInvalid && logValue
+                ? *logValue
+                : true;
+            parsed.Value.BrainAssembly = !brainInvalid && brainValue
+                ? std::move(*brainValue)
+                : std::wstring{};
+            parsed.NeedsRewrite =
+                runtimeInvalid ||
+                logInvalid ||
+                brainInvalid ||
+                !runtimeValue ||
+                !logValue ||
+                !brainValue;
             parsed.IsValid = true;
             return parsed;
         }
@@ -613,14 +514,19 @@ namespace CoreCLRHostLoader
         {
             std::ostringstream output;
             output
-                << "; Choose between 'Release' or 'Preview'. For early access Runtimes only.\r\n"
                 << "[Runtime]\r\n"
+                << "; Preview or Release.\r\n"
                 << "Channel="
                 << (configuration.Channel == RuntimeChannel::Preview
                     ? "Preview"
                     : "Release")
-                << "\r\n\r\n"
+                << "\r\n"
+                << "; If you wish to toggle your logs.\r\n"
+                << "LogEnabled="
+                << (configuration.LogEnabled ? "true" : "false")
+                << "\r\n"
                 << "[Brain]\r\n"
+                << "; Auto-generated a name if detected. Will use this on later boots.\r\n"
                 << "Assembly="
                 << WideToUtf8(configuration.BrainAssembly)
                 << "\r\n";
@@ -688,31 +594,14 @@ namespace CoreCLRHostLoader
                 return false;
             }
 
-            auto content = ReadUtf8File(state.Paths.Configuration);
-            if (!content)
-            {
-                return std::unexpected(
-                    L"CoreCLRHostLoader.ini could not be read while caching "
-                    L"the managed brain selection: " + content.error());
-            }
-
-            auto updated = ReplaceBrainAssemblyInput(*content, assemblyName);
-            if (!updated)
-            {
-                return std::unexpected(updated.error());
-            }
-
-            auto written = WriteUtf8Atomically(
-                state.Paths.Configuration,
-                *updated);
-            if (!written)
+            state.Configuration.BrainAssembly = std::wstring(assemblyName);
+            auto saved = SaveHostConfiguration(state);
+            if (!saved)
             {
                 return std::unexpected(
                     L"CoreCLRHostLoader.ini could not cache the managed brain "
-                    L"selection: " + written.error());
+                    L"selection: " + saved.error());
             }
-
-            state.Configuration.BrainAssembly = std::wstring(assemblyName);
             return true;
         }
         catch (const std::exception& exception)
@@ -746,59 +635,75 @@ namespace CoreCLRHostLoader
             state.Paths.Log =
                 state.Paths.Directory / L"CoreCLRHostLoader.log";
 
-            auto opened = OpenLog(state.Paths.Log);
-            if (!opened)
-            {
-                return std::unexpected(opened.error());
-            }
-
-            WriteLog(
-                LogLevel::Information,
-                std::wstring(ProductName) + L" initialized.");
-
             const bool configurationExists =
                 std::filesystem::exists(state.Paths.Configuration);
             bool configurationNeedsWrite = !configurationExists;
+            bool configurationUsesDefaults = !configurationExists;
 
             if (configurationExists)
             {
                 auto content = ReadUtf8File(state.Paths.Configuration);
-                if (!content)
+                if (content)
                 {
-                    return std::unexpected(
-                        L"CoreCLRHostLoader.ini exists but could not be read: " +
-                        content.error());
-                }
-
-                ParsedConfiguration parsed = ParseConfiguration(*content);
-                if (parsed.IsValid)
-                {
-                    state.Configuration = std::move(parsed.Value);
-                    configurationNeedsWrite = false;
+                    ParsedConfiguration parsed = ParseConfiguration(*content);
+                    if (parsed.IsValid)
+                    {
+                        state.Configuration = std::move(parsed.Value);
+                        configurationNeedsWrite = parsed.NeedsRewrite;
+                        configurationUsesDefaults = false;
+                    }
+                    else
+                    {
+                        configurationNeedsWrite = true;
+                        configurationUsesDefaults = true;
+                    }
                 }
                 else
                 {
                     configurationNeedsWrite = true;
+                    configurationUsesDefaults = true;
                 }
             }
 
             if (configurationNeedsWrite)
             {
+                if (configurationUsesDefaults)
+                {
+                    state.Configuration = HostConfiguration{};
+                }
                 auto saved = SaveHostConfiguration(state);
                 if (!saved)
                 {
                     return std::unexpected(saved.error());
                 }
-                WriteLog(
-                    LogLevel::Warning,
-                    configurationExists
-                        ? L"CoreCLRHostLoader.ini was replaced with the default "
-                          L"configuration because its required inputs were missing, "
-                          L"invalid, or ambiguous."
-                        : L"CoreCLRHostLoader.ini was created with the default "
-                          L"configuration.");
             }
 
+            if (state.Configuration.LogEnabled)
+            {
+                auto opened = OpenLog(state.Paths.Log);
+                if (!opened)
+                {
+                    return std::unexpected(opened.error());
+                }
+            }
+            else
+            {
+                CloseLog();
+            }
+
+            WriteLog(
+                LogLevel::Information,
+                std::wstring(ProductName) + L" initialized.");
+            if (configurationNeedsWrite)
+            {
+                WriteLog(
+                    LogLevel::Warning,
+                    configurationUsesDefaults
+                        ? (configurationExists
+                            ? L"CoreCLRHostLoader.ini was replaced with the default configuration."
+                            : L"CoreCLRHostLoader.ini was created with the default configuration.")
+                        : L"CoreCLRHostLoader.ini was normalized without changing its effective configuration.");
+            }
             WriteLog(
                 LogLevel::Information,
                 L"Configuration is ready: " +

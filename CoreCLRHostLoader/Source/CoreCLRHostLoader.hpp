@@ -106,6 +106,7 @@ namespace CoreCLRHostLoader
     {
         RuntimeChannel Channel = RuntimeChannel::Release;
         std::wstring BrainAssembly;
+        bool LogEnabled = true;
     };
 
     struct HostState final

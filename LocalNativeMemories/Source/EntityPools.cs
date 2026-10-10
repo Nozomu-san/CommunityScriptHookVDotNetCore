@@ -4,11 +4,7 @@ using CommunityScriptHookVDotNetCore.Source;
 
 namespace LocalNativeMemories.Source;
 
-internal sealed class EntityPools(
-    ILocalMemory memory,
-    PoolBackendResolver backends,
-    PoolVerification verification,
-    IGameThreadFunctionTransport gameThread) : ILocalEntityPools, ILocalEntityIdentity
+internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 {
     private const int LocalSlotsPerHostFrame = 32;
     private const int MaximumHandleResolutionsPerHostFrame = 8;
@@ -26,21 +22,17 @@ internal sealed class EntityPools(
     private static readonly long IdentityFailureLifetimeTicks =
         Math.Max(1L, Stopwatch.Frequency / 4L);
 
-    private readonly ILocalMemory _memory =
-        memory ?? throw new ArgumentNullException(nameof(memory));
-    private readonly PoolBackendResolver _backends =
-        backends ?? throw new ArgumentNullException(nameof(backends));
-    private readonly PoolVerification _verification =
-        verification ?? throw new ArgumentNullException(nameof(verification));
-    private readonly IGameThreadFunctionTransport _gameThread =
-        gameThread ?? throw new ArgumentNullException(nameof(gameThread));
+    private readonly ILocalMemory _memory;
+    private readonly PoolBackendResolver _backends;
+    private readonly PoolVerification _verification;
+    private readonly IGameThreadFunctionTransport _gameThread;
     private readonly Lock _gate = new();
     private readonly Dictionary<LocalPoolKinds, PublishedPool> _published = [];
     private readonly Dictionary<LocalPoolKinds, PublishedStatistics> _statistics = [];
     private readonly Dictionary<LocalPoolKinds, PoolRefreshState> _refreshes = [];
     private readonly Dictionary<LocalPoolKinds, long> _nextRefreshAt = [];
     private readonly Dictionary<LocalPoolKinds, long> _nextStatisticsAt = [];
-    private readonly Queue<nint> _identityRequests = new(MaximumIdentityQueue);
+    private readonly Queue<nint> _identityRequests = [with(MaximumIdentityQueue)];
     private readonly HashSet<nint> _identityPending = [];
     private readonly Dictionary<nint, CachedIdentity> _identityCache = [];
     private LocalPoolKinds _demanded;
@@ -62,6 +54,19 @@ internal sealed class EntityPools(
     private ulong _identityCallFailed;
     private ulong _identityZeroHandle;
 
+    internal EntityPools(
+        ILocalMemory memory,
+        PoolBackendResolver backends,
+        PoolVerification verification,
+        IGameThreadFunctionTransport gameThread)
+    {
+        _memory = memory ?? throw new ArgumentNullException(nameof(memory));
+        _backends = backends ?? throw new ArgumentNullException(nameof(backends));
+        _verification =
+            verification ?? throw new ArgumentNullException(nameof(verification));
+        _gameThread =
+            gameThread ?? throw new ArgumentNullException(nameof(gameThread));
+    }
 
     public LocalDataResult<LocalPoolStatistics> GetStatistics(
         LocalPoolKinds kind)

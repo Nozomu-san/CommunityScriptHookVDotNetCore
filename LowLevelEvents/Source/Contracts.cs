@@ -8,11 +8,6 @@ public interface ILowLevelSubscription<T> : IDisposable
     bool TryRead([MaybeNullWhen(false)] out T value);
 }
 
-public interface ILowLevelListenerSubscription : IDisposable
-{
-    ulong FaultCount { get; }
-}
-
 public interface ILowLevelEventContinuity
 {
     ulong ContinuityRevision { get; }
@@ -46,9 +41,6 @@ public interface ILowLevelWeaponEventStream : ILowLevelEventContinuity
 {
     ILowLevelSubscription<GunAimedAtEvent> SubscribeGunAimedAt(
         int capacity = 256);
-
-    ILowLevelListenerSubscription ListenGunAimedAt(
-        Action<GunAimedAtEvent> listener);
 
     ILowLevelSubscription<GunShotEvent> SubscribeGunShots(
         int capacity = 256);

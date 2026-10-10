@@ -4,8 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
-    <AssemblyVersion>04.10.2026.0</AssemblyVersion>
-    <FileVersion>04.10.2026.0</FileVersion>
+    <AssemblyVersion>10.10.2026.0</AssemblyVersion>
+    <FileVersion>10.10.2026.0</FileVersion>
     <AssemblyTitle>Standard Game Operations</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
   </PropertyGroup>

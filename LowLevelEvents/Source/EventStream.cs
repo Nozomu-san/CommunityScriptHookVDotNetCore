@@ -35,10 +35,19 @@ internal sealed class EventStream :
     private readonly List<Subscription<EntityDamageEvent>> _damageSubscriptions = [];
     private readonly List<Subscription<MeleeActionEvent>> _meleeActionSubscriptions = [];
     private readonly List<Subscription<GunAimedAtEvent>> _gunAimedAtSubscriptions = [];
-    private readonly List<ListenerSubscription<GunAimedAtEvent>> _gunAimedAtListeners = [];
     private readonly List<Subscription<GunShotEvent>> _gunShotSubscriptions = [];
     private readonly List<Subscription<GunShotWhizzedByEvent>> _gunShotWhizzedBySubscriptions = [];
     private readonly List<Subscription<BulletImpactEvent>> _bulletImpactSubscriptions = [];
+    private KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[]
+        _rawSubscriptionSnapshot = [];
+    private KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[]
+        _catalogSubscriptionSnapshot = [];
+    private Subscription<EntityDamageEvent>[] _damageSubscriptionSnapshot = [];
+    private Subscription<MeleeActionEvent>[] _meleeActionSubscriptionSnapshot = [];
+    private Subscription<GunAimedAtEvent>[] _gunAimedAtSubscriptionSnapshot = [];
+    private Subscription<GunShotEvent>[] _gunShotSubscriptionSnapshot = [];
+    private Subscription<GunShotWhizzedByEvent>[] _gunShotWhizzedBySubscriptionSnapshot = [];
+    private Subscription<BulletImpactEvent>[] _bulletImpactSubscriptionSnapshot = [];
     private readonly Queue<PendingDamageEvent> _pendingDamageEvents = [];
     private readonly Dictionary<ulong, PendingAimEvent> _pendingAimEvents = [];
     private readonly Queue<PendingWhizzedByEvent> _pendingWhizzedByEvents = [];
@@ -177,12 +186,38 @@ internal sealed class EventStream :
                     _damageSubscriptions.Count +
                     _meleeActionSubscriptions.Count +
                     _gunAimedAtSubscriptions.Count +
-                    _gunAimedAtListeners.Count +
                     _gunShotSubscriptions.Count +
                     _gunShotWhizzedBySubscriptions.Count +
                     _bulletImpactSubscriptions.Count;
             }
         }
+    }
+
+    private void RefreshSubscriptionSnapshotsLocked()
+    {
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] raw =
+            [.. _rawSubscriptions];
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] catalog =
+            [.. _catalogSubscriptions];
+        Subscription<EntityDamageEvent>[] damage = [.. _damageSubscriptions];
+        Subscription<MeleeActionEvent>[] meleeActions =
+            [.. _meleeActionSubscriptions];
+        Subscription<GunAimedAtEvent>[] aimedAt =
+            [.. _gunAimedAtSubscriptions];
+        Subscription<GunShotEvent>[] gunShots = [.. _gunShotSubscriptions];
+        Subscription<GunShotWhizzedByEvent>[] whizzedBy =
+            [.. _gunShotWhizzedBySubscriptions];
+        Subscription<BulletImpactEvent>[] impacts =
+            [.. _bulletImpactSubscriptions];
+
+        Volatile.Write(ref _rawSubscriptionSnapshot, raw);
+        Volatile.Write(ref _catalogSubscriptionSnapshot, catalog);
+        Volatile.Write(ref _damageSubscriptionSnapshot, damage);
+        Volatile.Write(ref _meleeActionSubscriptionSnapshot, meleeActions);
+        Volatile.Write(ref _gunAimedAtSubscriptionSnapshot, aimedAt);
+        Volatile.Write(ref _gunShotSubscriptionSnapshot, gunShots);
+        Volatile.Write(ref _gunShotWhizzedBySubscriptionSnapshot, whizzedBy);
+        Volatile.Write(ref _bulletImpactSubscriptionSnapshot, impacts);
     }
 
     internal void ConfigureDetailedEventIds(IEnumerable<uint> eventIds)
@@ -239,8 +274,7 @@ internal sealed class EventStream :
         {
             AddRule(rules, EventCatalog.MeleeAction, AllDispatchStreamMask);
         }
-        if (_gunAimedAtSubscriptions.Count != 0 ||
-            _gunAimedAtListeners.Count != 0)
+        if (_gunAimedAtSubscriptions.Count != 0)
         {
             AddRule(rules, EventCatalog.GunAimedAt, AllDispatchStreamMask);
         }
@@ -364,6 +398,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _rawSubscriptions.Add(subscription, ids);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -405,6 +440,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _catalogSubscriptions.Add(subscription, catalogIds);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
 
@@ -427,6 +463,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _damageSubscriptions.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
         }
         return subscription;
     }
@@ -446,6 +483,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _meleeActionSubscriptions.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -466,26 +504,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _gunAimedAtSubscriptions.Add(subscription);
-            RefreshNativeCapturePolicyLocked();
-        }
-        return subscription;
-    }
-
-    public ILowLevelListenerSubscription ListenGunAimedAt(
-        Action<GunAimedAtEvent> listener)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(listener);
-
-        ListenerSubscription<GunAimedAtEvent>? subscription = null;
-        subscription = new(
-            listener,
-            () => RemoveGunAimedAtListener(subscription!));
-
-        lock (_subscriptionGate)
-        {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            _gunAimedAtListeners.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -506,6 +525,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _gunShotSubscriptions.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -526,6 +546,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _gunShotWhizzedBySubscriptions.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -546,6 +567,7 @@ internal sealed class EventStream :
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             _bulletImpactSubscriptions.Add(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
         return subscription;
@@ -565,7 +587,6 @@ internal sealed class EventStream :
         Subscription<EntityDamageEvent>[] damage;
         Subscription<MeleeActionEvent>[] meleeActions;
         Subscription<GunAimedAtEvent>[] gunAimedAt;
-        ListenerSubscription<GunAimedAtEvent>[] gunAimedAtListeners;
         Subscription<GunShotEvent>[] gunShots;
         Subscription<GunShotWhizzedByEvent>[] whizzedBy;
         Subscription<BulletImpactEvent>[] impacts;
@@ -576,7 +597,6 @@ internal sealed class EventStream :
             damage = [.. _damageSubscriptions];
             meleeActions = [.. _meleeActionSubscriptions];
             gunAimedAt = [.. _gunAimedAtSubscriptions];
-            gunAimedAtListeners = [.. _gunAimedAtListeners];
             gunShots = [.. _gunShotSubscriptions];
             whizzedBy = [.. _gunShotWhizzedBySubscriptions];
             impacts = [.. _bulletImpactSubscriptions];
@@ -585,10 +605,10 @@ internal sealed class EventStream :
             _damageSubscriptions.Clear();
             _meleeActionSubscriptions.Clear();
             _gunAimedAtSubscriptions.Clear();
-            _gunAimedAtListeners.Clear();
             _gunShotSubscriptions.Clear();
             _gunShotWhizzedBySubscriptions.Clear();
             _bulletImpactSubscriptions.Clear();
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
 
@@ -609,10 +629,6 @@ internal sealed class EventStream :
             subscription.Detach();
         }
         foreach (Subscription<GunAimedAtEvent> subscription in gunAimedAt)
-        {
-            subscription.Detach();
-        }
-        foreach (ListenerSubscription<GunAimedAtEvent> subscription in gunAimedAtListeners)
         {
             subscription.Detach();
         }
@@ -1364,13 +1380,10 @@ internal sealed class EventStream :
 
     private ulong PublishRaw(RawLowLevelEvent lowLevelEvent)
     {
-        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] rawSubscriptions;
-        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] catalogSubscriptions;
-        lock (_subscriptionGate)
-        {
-            rawSubscriptions = [.. _rawSubscriptions];
-            catalogSubscriptions = [.. _catalogSubscriptions];
-        }
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] rawSubscriptions =
+            Volatile.Read(ref _rawSubscriptionSnapshot);
+        KeyValuePair<Subscription<RawLowLevelEvent>, HashSet<uint>>[] catalogSubscriptions =
+            Volatile.Read(ref _catalogSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (var pair in rawSubscriptions)
@@ -1398,11 +1411,8 @@ internal sealed class EventStream :
 
     private ulong PublishDamage(EntityDamageEvent damageEvent)
     {
-        Subscription<EntityDamageEvent>[] subscriptions;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _damageSubscriptions];
-        }
+        Subscription<EntityDamageEvent>[] subscriptions =
+            Volatile.Read(ref _damageSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (Subscription<EntityDamageEvent> subscription in subscriptions)
@@ -1417,11 +1427,8 @@ internal sealed class EventStream :
 
     private ulong PublishMeleeAction(MeleeActionEvent meleeAction)
     {
-        Subscription<MeleeActionEvent>[] subscriptions;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _meleeActionSubscriptions];
-        }
+        Subscription<MeleeActionEvent>[] subscriptions =
+            Volatile.Read(ref _meleeActionSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (Subscription<MeleeActionEvent> subscription in subscriptions)
@@ -1436,13 +1443,8 @@ internal sealed class EventStream :
 
     private ulong PublishGunAimedAt(GunAimedAtEvent aimedAt)
     {
-        Subscription<GunAimedAtEvent>[] subscriptions;
-        ListenerSubscription<GunAimedAtEvent>[] listeners;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _gunAimedAtSubscriptions];
-            listeners = [.. _gunAimedAtListeners];
-        }
+        Subscription<GunAimedAtEvent>[] subscriptions =
+            Volatile.Read(ref _gunAimedAtSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (Subscription<GunAimedAtEvent> subscription in subscriptions)
@@ -1452,23 +1454,13 @@ internal sealed class EventStream :
                 ++dropped;
             }
         }
-        foreach (ListenerSubscription<GunAimedAtEvent> listener in listeners)
-        {
-            if (!listener.Publish(aimedAt))
-            {
-                ++dropped;
-            }
-        }
         return dropped;
     }
 
     private ulong PublishGunShot(GunShotEvent gunShot)
     {
-        Subscription<GunShotEvent>[] subscriptions;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _gunShotSubscriptions];
-        }
+        Subscription<GunShotEvent>[] subscriptions =
+            Volatile.Read(ref _gunShotSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (Subscription<GunShotEvent> subscription in subscriptions)
@@ -1484,16 +1476,11 @@ internal sealed class EventStream :
     private ulong PublishGunShotWhizzedBy(
         GunShotWhizzedByEvent whizzedBy)
     {
-        Subscription<GunShotWhizzedByEvent>[] subscriptions;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _gunShotWhizzedBySubscriptions];
-        }
+        Subscription<GunShotWhizzedByEvent>[] subscriptions =
+            Volatile.Read(ref _gunShotWhizzedBySubscriptionSnapshot);
 
         ulong dropped = 0;
-        foreach (
-            Subscription<GunShotWhizzedByEvent> subscription
-            in subscriptions)
+        foreach (Subscription<GunShotWhizzedByEvent> subscription in subscriptions)
         {
             if (!subscription.Publish(whizzedBy))
             {
@@ -1505,11 +1492,8 @@ internal sealed class EventStream :
 
     private ulong PublishBulletImpact(BulletImpactEvent impact)
     {
-        Subscription<BulletImpactEvent>[] subscriptions;
-        lock (_subscriptionGate)
-        {
-            subscriptions = [.. _bulletImpactSubscriptions];
-        }
+        Subscription<BulletImpactEvent>[] subscriptions =
+            Volatile.Read(ref _bulletImpactSubscriptionSnapshot);
 
         ulong dropped = 0;
         foreach (Subscription<BulletImpactEvent> subscription in subscriptions)
@@ -1527,6 +1511,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _rawSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1537,6 +1522,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _catalogSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1548,6 +1534,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _damageSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
         }
     }
 
@@ -1557,6 +1544,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _meleeActionSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1567,16 +1555,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _gunAimedAtSubscriptions.Remove(subscription);
-            RefreshNativeCapturePolicyLocked();
-        }
-    }
-
-    private void RemoveGunAimedAtListener(
-        ListenerSubscription<GunAimedAtEvent> subscription)
-    {
-        lock (_subscriptionGate)
-        {
-            _gunAimedAtListeners.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1586,6 +1565,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _gunShotSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1596,6 +1576,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _gunShotWhizzedBySubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1606,6 +1587,7 @@ internal sealed class EventStream :
         lock (_subscriptionGate)
         {
             _bulletImpactSubscriptions.Remove(subscription);
+            RefreshSubscriptionSnapshotsLocked();
             RefreshNativeCapturePolicyLocked();
         }
     }
@@ -1665,101 +1647,12 @@ internal sealed class EventStream :
         Vector3 ImpactPosition,
         long ExpiresAt);
 
-    private sealed class ListenerSubscription<T>(
-        Action<T> listener,
-        Action onDispose) : ILowLevelListenerSubscription
-    {
-        private readonly Lock _gate = new();
-        private Action<T>? _listener = listener ??
-            throw new ArgumentNullException(nameof(listener));
-        private Action? _onDispose = onDispose ??
-            throw new ArgumentNullException(nameof(onDispose));
-        private ulong _faultCount;
-        private bool _faulted;
-        private bool _disposed;
-
-        public ulong FaultCount
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _faultCount;
-                }
-            }
-        }
-
-        internal bool Publish(T value)
-        {
-            Action<T>? callback;
-            lock (_gate)
-            {
-                if (_disposed || _faulted)
-                {
-                    return true;
-                }
-                callback = _listener;
-            }
-
-            if (callback is null)
-            {
-                return true;
-            }
-
-            try
-            {
-                callback(value);
-                return true;
-            }
-            catch
-            {
-                lock (_gate)
-                {
-                    if (!_disposed)
-                    {
-                        ++_faultCount;
-                        _faulted = true;
-                        _listener = null;
-                    }
-                }
-                return false;
-            }
-        }
-
-        internal void Detach()
-        {
-            lock (_gate)
-            {
-                _disposed = true;
-                _listener = null;
-                _onDispose = null;
-            }
-        }
-
-        public void Dispose()
-        {
-            Action? remove;
-            lock (_gate)
-            {
-                if (_disposed)
-                {
-                    return;
-                }
-
-                _disposed = true;
-                _listener = null;
-                remove = Interlocked.Exchange(ref _onDispose, null);
-            }
-            remove?.Invoke();
-        }
-    }
-
     private sealed class Subscription<T>(
         int capacity,
         Action onDispose) : ILowLevelSubscription<T>
     {
         private readonly Lock _gate = new();
-        private readonly Queue<T> _queue = new(capacity);
+        private readonly Queue<T> _queue = [with(capacity)];
         private Action? _onDispose = onDispose;
         private ulong _dropped;
         private bool _disposed;

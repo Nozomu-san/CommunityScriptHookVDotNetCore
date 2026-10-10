@@ -149,8 +149,8 @@ internal sealed class PedOperations(
         known ?? throw new ArgumentNullException(nameof(known));
     private readonly Lock _populationGate = new();
     private readonly Lock _observationGate = new();
-    private readonly Queue<int> _activeObservationQueue = new();
-    private readonly Queue<int> _backgroundObservationQueue = new();
+    private readonly Queue<int> _activeObservationQueue = [];
+    private readonly Queue<int> _backgroundObservationQueue = [];
     private readonly Dictionary<int, PendingPedObservation> _pendingObservations = [];
     private readonly Dictionary<int, PedObservationSnapshot> _latestObservations = [];
     private PedPopulationSnapshot _population = PedPopulationSnapshot.Empty;

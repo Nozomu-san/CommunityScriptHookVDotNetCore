@@ -335,7 +335,7 @@ public static class CatalogCompiler
                 $"{Path.GetFileName(path)} root must be a JSON object.");
         }
 
-        Dictionary<ulong, SourceEntry> entries = new();
+        Dictionary<ulong, SourceEntry> entries = [];
         foreach (JsonProperty namespaceProperty in
                  document.RootElement.EnumerateObject())
         {
@@ -406,7 +406,7 @@ public static class CatalogCompiler
                 $"{context}: params must be an array.");
         }
 
-        List<NativeParameter> parameters = new();
+        List<NativeParameter> parameters = [];
         foreach (JsonElement item in value.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object)
@@ -497,7 +497,7 @@ public static class CatalogCompiler
             throw new InvalidDataException("The native catalog is empty.");
         }
 
-        HashSet<ulong> hashes = new();
+        HashSet<ulong> hashes = [];
         HashSet<string> names = [with(StringComparer.Ordinal)];
         ulong previous = 0;
         for (int index = 0; index < records.Count; ++index)
@@ -1282,7 +1282,7 @@ public static class CatalogCompiler
         }
 
         Dictionary<string, GeneratedMethod> methods =
-            new(StringComparer.Ordinal);
+            [with(StringComparer.Ordinal)];
         HashSet<string> collisions = [with(StringComparer.Ordinal)];
         foreach (NativeVariant variant in candidates)
         {
@@ -1586,7 +1586,7 @@ public static class CatalogCompiler
     private sealed class StringPool
     {
         private readonly Dictionary<string, int> _indexes =
-            new(StringComparer.Ordinal);
+            [with(StringComparer.Ordinal)];
         private readonly List<string> _values = [];
 
         internal IReadOnlyList<string> Values => _values;
@@ -1609,7 +1609,7 @@ public static class CatalogCompiler
 $typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompiler'
 if ($null -eq ($typeName -as [type])) {
     $compilerOptions = @(
-        '/langversion:15',
+        '/langversion:preview',
         '/nullable:enable',
         '/optimize+',
         '/checked+',
