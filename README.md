@@ -50,8 +50,8 @@
 ### CoreCLRHostLoader (Script Hook V CoreCLR Host Loader)
 - Language Target: `C++ 23`
 - Descriptions:
-* Fully runtime based, means fully-supported Visual Basic, F# & C# (based on which you have on Computer). For F# modders, `FSharp.Core` is required to run. Also usable with preview editions.
-* Future-brain replacements ready without rewriting (In case replacing central brain).
+1. Fully runtime based, means fully-supported Visual Basic, F# & C# (based on which you have on Computer). For F# modders, `FSharp.Core` is required to run. Also usable with preview editions.
+2. Future-brain replacements ready without rewriting (In case replacing central brain).
 
 ### CommunityScriptHookVDotNetCore (Script Hook V .NET Core)
 - Language Target: `C# 15 Preview`
