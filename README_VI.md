@@ -127,7 +127,7 @@
 
 ### Dành cho Đồng phát triển
 1. Cài đặt [Visual Studio 2026](https://visualstudio.microsoft.com) hoặc [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
-2. Tích chọn *.NET Desktop development" và chọn ít nhất 2 thành phần bắt buộc: *Development tools for .NET* & *F# desktop language support*.
+2. Tích chọn *.NET Desktop development* và chọn ít nhất 2 thành phần bắt buộc: *Development tools for .NET* & *F# desktop language support*.
 3. Tích chọn *Desktop development with C++* và chọn ít nhất 2 thành phần bắt buộc: *MSVC Build Tools for x64/x86* & *Windows 11 SDK* (tùy theo lựa chọn của bạn).
 4. Mở phần *Individual components* -> *Code tools* -> *Git for Windows*.
 5. Tiến hành cài đặt IDE.
