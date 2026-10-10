@@ -81,23 +81,23 @@
 
 ### LocalNativeMemories (Pool Memory & Low-level Native Resolver)
 - Language Target: C# 15 Preview
-- Descriptions:
-* This answers what's in the game, such as how many objects, entities, vehicles & peds. Also the backup way if native call does not exist.
+- Descriptions: This answers what's in the game, such as how many objects, entities, vehicles & peds. Also the backup way if native call does not exist.
 
 ### CEventGenerator (Machine Code Event Generator)
 - Language Target: C++ 23
-- Descriptions:
-* Tickrate sync or latency as polling type is completely replaced with event-based, driven via machine codes, removing the performance bottleneck roots.
+- Descriptions: Tickrate sync or latency as polling type is completely replaced with event-based, driven via machine codes, removing the performance bottleneck roots.
 
 ### LowLevelEvents (Low Level Event Resolver)
 - Language Target: C# 15 Preview
-- Descriptions:
-* Extract and convert low level CEvent(s) from machine codes to intermediate standards, which .NET Core projects uses. This also answers where it belongs.
+- Descriptions: Extract and convert low level CEvent(s) from machine codes to intermediate standards, which .NET Core projects uses. This also answers where it belongs.
 
 ### StandardGameOperations (Standard Code Table)
 - Language Target: C# 15 Preview
-- Descriptions:
-* The easiest way to write codes, by using this, you will be bypassed lots of writing, such as declaring native calls manually, locally declaring game database and so on, even multiple operations of native calls, it's all here.
+- Descriptions: The easiest way to write codes, by using this, you will be bypassed lots of writing, such as declaring native calls manually, locally declaring game database and so on, even multiple operations of native calls, it's all here.
+
+### LocalUserDebug (In-game Logging tool)
+- Language Target: C# 15 Preview
+- Descriptions: It's the same logging details, but now in-game, rather than reading log files consecutively.
 
 ## Requirements
 

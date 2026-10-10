@@ -95,6 +95,10 @@
 - Ngôn ngữ mục tiêu: C# 15 Preview
 - Mô tả: Cách dễ nhất để viết mã. Bằng cách sử dụng công cụ này, bạn sẽ bỏ qua được rất nhiều thao tác viết rườm rà như khai báo thủ công các native call, khai báo cục bộ cơ sở dữ liệu game, v.v., thậm chí cả các chuỗi thao tác native call phức tạp.
 
+### LocalUserDebug (Trình log trong game)
+- Ngôn ngữ mục tiêu: C# 15 Preview
+- Mô tả: Vẫn là log nội dung, nhưng ở trong game, thay vì phải đọc liên tục file bên ngoài liên tục.
+
 ## Yêu cầu
 
 ### Dành cho Người dùng cuối
