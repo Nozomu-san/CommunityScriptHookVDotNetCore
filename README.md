@@ -117,11 +117,11 @@
 ## Installation
 
 ### As End-user
-- Small component solution
+- Small component solution:
 1. Install [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet).
 2. From [FSharp.Core](https://www.nuget.org/packages/fsharp.core), get `FSharp.Core.dll`.
 3. From [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64), get `nethost.dll`.
-4. Move FSharp.Core.dll & nethost.dll to GTA V root directory.
+4. Move `FSharp.Core.dll` & `nethost.dll` to GTA V root directory.
 - All-in-one solution: Simply install the SDK. SDK already have `FSharp.Core.dll`, `nethost.dll` and runtime to load.
 
 ### As Co-Developers
