@@ -7,6 +7,7 @@ open CommunityScriptHookVDotNetCore.Source
 [<AllowNullLiteral>]
 type IScript4ReloadControl =
     abstract RequestReload: reason: string -> bool
+    abstract RequestRestart: targetPackages: string array -> bool
 
 [<Sealed>]
 type Script4ReloadExtension() =
@@ -70,6 +71,15 @@ type Script4ReloadExtension() =
                 else
                     match lifecycle with
                     | Some value -> value.RequestExplicitReload(reason)
+                    | None -> false)
+
+        member _.RequestRestart(targetPackages) =
+            lock gate (fun () ->
+                if shutdown then
+                    false
+                else
+                    match lifecycle with
+                    | Some value -> value.RequestExplicitRestart(targetPackages)
                     | None -> false)
 
     interface IScript4RuntimeExtension with

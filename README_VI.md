@@ -7,7 +7,7 @@
 - Đảm bảo không có bản build không an toàn (unsafe).
 
 ## Vai trò
-- Community Script Hook V .Net Core được phát triển với mô hình một chiều gồm 6 cơ sở hạ tầng: *Host (Máy chủ) - Central Brain (Bộ não trung tâm) - Extended Contents (Nội dung mở rộng) - Dynamic Library (Thư viện động) - Inherited Class (Lớp kế thừa) - Human Readables (Dữ liệu con người đọc được)*.
+- Community Script Hook V .Net Core được phát triển với mô hình một chiều gồm 6 cơ sở hạ tầng: *`Máy chủ - Bộ não trung tâm - Nội dung mở rộng - Thư viện động - Lớp kế thừa - Dữ liệu con người đọc được`*.
 - Dựa trên vai trò, không dựa trên ngôn ngữ. Điều này có nghĩa là nếu bạn viết cho Community Script Hook V .Net Core bằng bất kỳ ngôn ngữ nào, bạn chỉ cần các hợp đồng (contracts) và runtime phù hợp để được nhận diện.
 - Các cơ sở hạ tầng phía sau hoàn toàn không biết về sự tồn tại của các cơ sở hạ tầng phía trước, nhưng phần phía trước lại tạo điều kiện để phần phía sau tồn tại. Điều này có nghĩa là, việc sửa đổi từ bất kỳ cơ sở hạ tầng nào thường sẽ không ảnh hưởng đến các phần đứng trước nó.
 - Bạn chỉ cần các thành phần bắt buộc để vận hành.
@@ -15,34 +15,34 @@
 - Sụp đổ Domino: Để ngăn chặn mã zombie hoặc các thực thi không xác định, thiết kế nhánh được tạo ra để vận hành. Khi các gốc thuộc về một cơ sở hạ tầng sụp đổ, bất kỳ phần nào ở phía sau có yêu cầu phần bị sụp đổ đó sẽ bị ảnh hưởng. Tuy nhiên, nếu các phần phía sau không yêu cầu phần bị sụp đổ, chúng vẫn hoạt động bình thường.
 - Thiết kế dựa trên hợp đồng: Để nhận diện các cơ sở hạ tầng khác, các hợp đồng được tạo ra để nhận diện thay vì thông qua việc đặt tên, do đó việc đặt tên không còn quan trọng nữa.
 
-### Host (Máy chủ)
-- Độ quan trọng: **Bắt buộc**
-- Số lượng tối đa: **1**
+### Máy chủ
+- Độ quan trọng: **`Bắt buộc`**
+- Số lượng tối đa: **`1`**
 - Vai trò: Hoạt động như một Powerhouse, cung cấp sức mạnh cho .NET Core và một số lệnh thực thi cấp thấp từ Script Hook V gốc, phục vụ mục đích viết một lần, tái sử dụng nhiều lần. Vai trò chính ở cấp độ này chỉ là gọi các thực thi cấp thấp và lưu trữ .NET Core.
 
-### Central Brain (Bộ não trung tâm)
-- Độ quan trọng: **Bắt buộc**
-- Số lượng tối đa: **1**
+### Bộ não trung tâm
+- Độ quan trọng: **`Bắt buộc`**
+- Số lượng tối đa: **`1`**
 - Vai trò: Sử dụng tần suất tick (tickrate) để quản lý vòng đời của các lớp kế thừa. Nếu các lớp gặp lỗi, chúng sẽ bị gỡ bỏ và không còn khả dụng trong vòng đời. Bắt đầu với thư mục scripts4, bất kỳ tệp .dll nào không có lớp kế thừa nào sẽ được nhận diện là thư viện, 1 hoặc nhiều lớp sẽ được nhận diện là lớp kế thừa. Tuy nhiên, hệ sinh thái sụp đổ được quản lý dựa trên thiết kế lớp, thay vì toàn bộ nội dung từ tệp .dll bị lỗi. Nếu các lớp bị lỗi, bất kỳ lớp nào khác không yêu cầu từ lớp bị sụp đổ vẫn hoạt động bình thường. Tương tự với extension tại thư mục extensions.
 
-### Extended Contents (Nội dung mở rộng)
-- Độ quan trọng: **Dựa trên mã code**
-- Số lượng tối đa: **Không giới hạn**
+### Nội dung mở rộng
+- Độ quan trọng: **`Dựa trên mã code`**
+- Số lượng tối đa: **`Không giới hạn`**
 - Vai trò: Các nội dung mở rộng trước đây từng thấy ở [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), giờ đây đã được chia thành nhiều nội dung và loại khác nhau để vận hành.
 
-### Dynamic Library (Thư viện động)
-- Độ quan trọng: **Dựa trên mã code**
-- Số lượng tối đa: **Dựa trên mã code**
+### Thư viện động
+- Độ quan trọng: **`Dựa trên mã code`**
+- Số lượng tối đa: **`Dựa trên mã code`**
 - Vai trò: Vẫn như trước đây với [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced), đây là nơi bạn muốn sử dụng chung các nội dung.
 
-### Inherited Class (Lớp kế thừa)
-- Độ quan trọng: **Dựa trên mã code**
-- Số lượng tối đa: **Không giới hạn**
+### Lớp kế thừa
+- Độ quan trọng: **`Dựa trên mã code`**
+- Số lượng tối đa: **`Không giới hạn`**
 - Vai trò: Nội dung chính trong modding, vẫn như trước đây với [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced).
 
-### Human Readables (Dữ liệu con người đọc được)
-- Độ quan trọng: **Tùy chọn**
-- Số lượng tối đa: **Dựa trên mã code**
+### Dữ liệu con người đọc được
+- Độ quan trọng: **`Tùy chọn`**
+- Số lượng tối đa: **`Dựa trên mã code`**
 - Vai trò: Các tệp có thể đọc được như json, log, ini, v.v... mà mod có thể đọc để vận hành hoặc chỉ ở dạng chỉ đọc.
 
 ## Các thành phần
@@ -53,7 +53,7 @@
 1. Hoàn toàn dựa trên runtime, nghĩa là hỗ trợ đầy đủ Visual Basic, F# và C# (dựa trên những gì có sẵn trên máy tính của bạn). Đối với các modder sử dụng F#, cần phải có `FSharp.Core` để chạy. Cũng có thể sử dụng với các phiên bản preview.
 2. Có sẵn khả năng thay thế bộ não trung tâm trong tương lai mà không cần viết lại (trong trường hợp thay thế Central Brain).
 
-### CommunityScriptHookVDotNetCore (Script Hook V .NET Core)
+### CommunityScriptHookVDotNetCore (Bộ não trung tâm Script Hook V .NET Core)
 - Ngôn ngữ mục tiêu: `C# 15 Preview`
 - Mô tả: Chịu trách nhiệm quản lý vòng đời của các bản mod, tần suất tick (tickrate), v.v.
 
@@ -65,7 +65,7 @@
 3. Mã 64-bit Native Executable được nén với thuật toán Brotli nhằm tiết kiệm kích thước bản build.
 4. Để cập nhật danh mục, bạn cần có [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) hoặc [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) để thực thi.
 
-### ScriptHookInput (Đầu vào Script Hook V)
+### ScriptHookInput (Thuộc tính Input ở Script Hook V)
 - Ngôn ngữ mục tiêu: `F# 7`
 - Mô tả:
 1. Dựa trên trang web của FiveM, bao gồm 2 loại đầu vào: đầu vào game (game input) và đầu vào thiết bị (device input).
@@ -102,14 +102,13 @@
 ## Yêu cầu
 
 ### Dành cho Người dùng cuối
+- [C++ Redistributable (2022 hoặc mới hơn)](https://github.com/abbodi1406/vcredist/blob/master/source_links/README.md).
 - Bạn chỉ cần lựa chọn 1 trong 2 giải pháp sau để các thành phần bắt buộc hoạt động:
-
 1. Giải pháp thành phần nhỏ:
-* [FSharp.Core](https://www.nuget.org/packages/fsharp.core) (dành cho dự án F#, bao gồm ScriptHookInput & Script4Reload).
-* [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
-* [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (tùy thuộc vào target dựa trên yêu cầu).
-
-2. Giải pháp tất cả trong một (All-in-one): [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet) (chỉ yêu cầu đối với các bản Preview, đối với bản Release thì đã được tích hợp sẵn trong Visual Studio Installer).
+- [FSharp.Core](https://www.nuget.org/packages/fsharp.core) (dành cho dự án F#, bao gồm ScriptHookInput & Script4Reload).
+- [.NET Host](https://www.nuget.org/packages/Microsoft.NETCore.App.Host.win-x64).
+- [.NET Core Runtime](https://dotnet.microsoft.com/en-us/download/dotnet) (tùy thuộc vào target dựa trên yêu cầu).
+2. Giải pháp tất cả trong một (All-in-one): [.NET SDK](https://dotnet.microsoft.com/en-us/download/dotnet).
 
 ### Dành cho Đồng phát triển
 - [Visual Studio 2026](https://visualstudio.microsoft.com) hoặc [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
@@ -127,18 +126,18 @@
 
 ### Dành cho Đồng phát triển
 1. Cài đặt [Visual Studio 2026](https://visualstudio.microsoft.com) hoặc [Visual Studio Insiders](https://visualstudio.microsoft.com/insiders).
-2. Tích chọn *.NET Desktop development* và chọn ít nhất 2 thành phần bắt buộc: *Development tools for .NET* & *F# desktop language support*.
-3. Tích chọn *Desktop development with C++* và chọn ít nhất 2 thành phần bắt buộc: *MSVC Build Tools for x64/x86* & *Windows 11 SDK* (tùy theo lựa chọn của bạn).
-4. Mở phần *Individual components* -> *Code tools* -> *Git for Windows*.
+2. Tích chọn *`.NET Desktop development`* và chọn ít nhất 2 thành phần bắt buộc: *`Development tools for .NET`* & *`F# desktop language support`*.
+3. Tích chọn *`Desktop development with C++`* và chọn ít nhất 2 thành phần bắt buộc: *MSVC Build Tools for x64/x86* & *`Windows 11 SDK`* (tùy theo lựa chọn của bạn). Nếu bạn muốn các plugin tương thích với Visual Studio 2022, bạn có thể chọn mục *`MSVC v143 - VS 2022 C++ x64/x86 build tools`*.
+4. Mở phần *`Individual components`* -> *`Code tools`* -> *`Git for Windows`*. Theo điều muốn ở trên, tích chọn *`MSVC v143 - VS 2022 C++ x64/x86 build tools`*.
 5. Tiến hành cài đặt IDE.
 6. Mở IDE.
-7. Chọn `Clone a repository`, dán đường dẫn sau vào ô *Repository location*:
+7. Chọn `Clone a repository`, dán đường dẫn sau vào ô *`Repository location`*:
 ```text
 https://github.com/Nozomu-san/CommunityScriptHookVDotNetCore
 ```
 8. Nhấn `Clone`.
 9. Mở tệp `CommunityScriptHookVDotNetCore.slnx`.
-10. Hoàn tất. Bạn đã sẵn sàng bắt đầu!
+10. Hoàn tất. Bạn đã sẵn sàng bắt đầu.
 
 ## Câu hỏi: Tôi có thể tiếp tục mod trên [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) hoặc [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced) không?
 - Có. Bạn hoàn toàn có thể tiếp tục mod trên các API đó.

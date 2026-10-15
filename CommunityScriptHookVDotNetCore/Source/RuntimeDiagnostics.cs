@@ -30,6 +30,11 @@ public interface IRuntimeDiagnosticReader
     bool TryRead([MaybeNullWhen(false)] out RuntimeDiagnosticMessage message);
 }
 
+public interface IRuntimeDiagnosticEvents
+{
+    event Action? Available;
+}
+
 public interface IRuntimeDiagnosticSink
 {
     void Warning(string source, string message, string? origin = null);
@@ -55,6 +60,7 @@ internal sealed class RuntimeDiagnosticHub :
 {
     private readonly Lock _gate = new();
     private readonly List<RuntimeDiagnosticMessage> _journal = [];
+    private readonly List<WeakReference<Reader>> _readers = [];
     private RuntimeDiagnosticPhase _phase = RuntimeDiagnosticPhase.Brain;
     private int _readableCount;
     private int _epochStartIndex;
@@ -93,7 +99,9 @@ internal sealed class RuntimeDiagnosticHub :
             int cursor = _epochActive
                 ? _epochStartIndex
                 : _journal.Count;
-            return new Reader(this, cursor);
+            Reader reader = new(this, cursor);
+            _readers.Add(new(reader));
+            return reader;
         }
     }
 
@@ -144,6 +152,7 @@ internal sealed class RuntimeDiagnosticHub :
             _readableCount = _journal.Count;
             _epochActive = false;
         }
+        NotifyReaders();
     }
 
     public void Dispose()
@@ -157,6 +166,7 @@ internal sealed class RuntimeDiagnosticHub :
 
             _disposed = true;
             _journal.Clear();
+            _readers.Clear();
             _readableCount = 0;
             _epochStartIndex = 0;
         }
@@ -200,6 +210,39 @@ internal sealed class RuntimeDiagnosticHub :
                 _readableCount = _journal.Count;
             }
         }
+        if (!_epochActive)
+        {
+            NotifyReaders();
+        }
+    }
+
+    private void NotifyReaders()
+    {
+        Reader[] active;
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            List<Reader> recipients = [];
+            for (int index = _readers.Count - 1; index >= 0; --index)
+            {
+                if (_readers[index].TryGetTarget(out Reader? reader))
+                {
+                    recipients.Add(reader);
+                }
+                else
+                {
+                    _readers.RemoveAt(index);
+                }
+            }
+            active = [.. recipients];
+        }
+        foreach (Reader reader in active)
+        {
+            reader.NotifyAvailable();
+        }
     }
 
     private bool TryRead(
@@ -221,9 +264,26 @@ internal sealed class RuntimeDiagnosticHub :
 
     private sealed class Reader(
         RuntimeDiagnosticHub owner,
-        int cursor) : IRuntimeDiagnosticReader
+        int cursor) : IRuntimeDiagnosticReader, IRuntimeDiagnosticEvents
     {
         private int _cursor = cursor;
+
+        public event Action? Available;
+
+        internal void NotifyAvailable()
+        {
+            Delegate[] listeners = Available?.GetInvocationList() ?? [];
+            foreach (Delegate listener in listeners)
+            {
+                try
+                {
+                    ((Action)listener)();
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
 
         public bool TryRead(
             [MaybeNullWhen(false)] out RuntimeDiagnosticMessage message) =>

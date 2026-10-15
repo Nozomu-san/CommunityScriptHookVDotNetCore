@@ -42,17 +42,17 @@ module internal ReloadConfiguration =
                     RuntimeIniEntry(
                         "Mode",
                         "Manual",
-                        Func<string, string>(fun value -> normalizeMode value),
+                        Func<string, string>(normalizeMode),
                         "Manual or Synchronized")
                     RuntimeIniEntry(
                         "ReloadInput",
                         "F11",
-                        Func<string, string>(fun value -> normalizeInput value),
+                        Func<string, string>(normalizeInput),
                         "Assign your key to reload extensions & mods. Only usable on Manual Mode.")
                     RuntimeIniEntry(
                         "LogEnabled",
                         "true",
-                        Func<string, string>(fun value -> RuntimeIni.NormalizeBoolean(value)),
+                        Func<string, string>(RuntimeIni.NormalizeBoolean),
                         "If you wish to toggle your logs.")
                 |])
 

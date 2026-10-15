@@ -232,6 +232,44 @@ public static class CatalogCompiler
         RequireFile(legacyPath);
         RequireFile(enhancedPath);
         List<NativeRecord> records = ReadAndMerge(legacyPath, enhancedPath);
+
+        // Update decisions depend on the native descriptors stored in the
+        // Brotli catalog, not on the bytes of either generated C# source file
+        // or incidental whitespace/order changes in the JSON inputs.
+        CatalogImage? committed = null;
+        if (File.Exists(dataPath))
+        {
+            try
+            {
+                committed = ReadGeneratedCatalog(dataPath);
+            }
+            catch (InvalidDataException)
+            {
+                // Malformed/corrupt catalog cannot establish equivalence.
+                // Regenerate it from the validated JSON source records.
+            }
+        }
+
+        if (committed is not null &&
+            CatalogRecordsEqual(records, committed.Records))
+        {
+            if (!File.Exists(standardPath))
+            {
+                WriteAtomic(standardPath, RenderStandardNatives(records));
+                Console.WriteLine(
+                    $"Brotli native catalog unchanged ({records.Count} descriptors); " +
+                    "restored missing StandardNatives.cs.");
+            }
+            else
+            {
+                Console.WriteLine(
+                    $"Brotli native catalog unchanged ({records.Count} descriptors); " +
+                    "no generated files were written.");
+            }
+            PrintProofSamples(records);
+            return 0;
+        }
+
         byte[] sourceFingerprint = ComputeSourceFingerprint(
             legacyPath,
             enhancedPath);
@@ -248,11 +286,12 @@ public static class CatalogCompiler
         AssertEquivalent(records, renderedRoundTrip.Records);
 
         string standardSource = RenderStandardNatives(records);
-        WriteAtomic(dataPath, dataSource);
-        WriteAtomic(standardPath, standardSource);
+        bool dataChanged = WriteAtomic(dataPath, dataSource);
+        bool standardChanged = WriteAtomic(standardPath, standardSource);
 
         Console.WriteLine(
-            $"Updated NativeCatalogData.cs and StandardNatives.cs: " +
+            $"NativeCatalogData.cs {(dataChanged ? "updated" : "unchanged")}; " +
+            $"StandardNatives.cs {(standardChanged ? "updated" : "unchanged")}: " +
             $"format {FormatVersion}, {records.Count} descriptors, " +
             $"{catalog.Packed.Length} packed bytes, " +
             $"{catalog.Decoded.Length} decoded bytes, " +
@@ -1044,6 +1083,24 @@ public static class CatalogCompiler
             ? values[index]
             : throw new InvalidDataException("Invalid string-pool index.");
 
+    private static bool CatalogRecordsEqual(
+        IReadOnlyList<NativeRecord> expected,
+        IReadOnlyList<NativeRecord> actual)
+    {
+        if (expected.Count != actual.Count)
+        {
+            return false;
+        }
+        for (int index = 0; index < expected.Count; ++index)
+        {
+            if (!RecordEquals(expected[index], actual[index]))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static void AssertEquivalent(
         IReadOnlyList<NativeRecord> expected,
         IReadOnlyList<NativeRecord> actual)
@@ -1349,11 +1406,25 @@ public static class CatalogCompiler
         }
     }
 
-    private static void WriteAtomic(string path, string content)
+    // Called only after the Brotli catalog differs from the committed
+    // native descriptor list, or when a generated file is missing.
+    private static bool WriteAtomic(string path, string content)
     {
-        string temporary = path + ".tmp";
-        File.WriteAllText(temporary, content, Utf8);
-        File.Move(temporary, path, overwrite: true);
+        byte[] updated = Utf8.GetBytes(content);
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllBytes(temporary, updated);
+            File.Move(temporary, path, overwrite: true);
+            return true;
+        }
+        finally
+        {
+            if (File.Exists(temporary))
+            {
+                File.Delete(temporary);
+            }
+        }
     }
 
     private static NativeRecord ResolveInspection(
@@ -1642,3 +1713,4 @@ if ($null -eq ($typeName -as [type])) {
     $InspectHash,
     $VerifyOnly.IsPresent
 ) | Out-Null
+Pause

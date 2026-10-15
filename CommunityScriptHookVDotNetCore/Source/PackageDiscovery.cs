@@ -362,15 +362,6 @@ internal static class PackageDiscovery
                         $"'{reference}', but its owning package is unavailable.");
                 }
 
-                if (provider.Kind != ScriptPackageKind.Library)
-                {
-                    throw new BadImageFormatException(
-                        $"Package '{package.Name}' references executable package " +
-                        $"'{provider.Name}'. Script4 executables are independent " +
-                        "lifecycle actors and cannot be compile-time dependencies. " +
-                        "Move shared code into a passive library package.");
-                }
-
                 dependencies.Add(provider.Name);
             }
 
@@ -540,13 +531,6 @@ internal static class PackageDiscovery
                 value => value,
                 StringComparer.OrdinalIgnoreCase)]);
         bool executable = inspection.ScriptTypeNames.Count != 0;
-        if (inspection.HasScript4DerivedType && !executable)
-        {
-            throw new BadImageFormatException(
-                $"Package '{assemblyName}' derives from Script4 but contains no " +
-                "concrete Script4 executable. Passive libraries must not derive " +
-                "from Script4, even through an abstract base type.");
-        }
 
         return new(
             assemblyName,

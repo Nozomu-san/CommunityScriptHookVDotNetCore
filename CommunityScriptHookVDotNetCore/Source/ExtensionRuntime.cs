@@ -86,6 +86,8 @@ internal sealed class RuntimeExtensionManager(
         [with(StringComparer.OrdinalIgnoreCase)];
     private readonly Queue<string> _newlyUnavailableAssemblies = [];
     private RootAssemblyResolver? _resolver;
+    private RootAssemblySnapshot? _committedSnapshot;
+    private IReadOnlyList<RuntimeExtensionDescriptor> _committedDescriptors = [];
     private RuntimeExtensionReloadPlan? _reloadPlan;
     private RuntimeExtensionReloadState _reloadState;
     private string? _reloadDiagnostic;
@@ -154,14 +156,96 @@ internal sealed class RuntimeExtensionManager(
             log);
         IReadOnlyList<RuntimeExtensionDescriptor> discovered =
             RuntimeExtensionDiscovery.Discover(snapshot, log);
-        IReadOnlyList<RuntimeExtensionDescriptor> previous =
-            Array.AsReadOnly([.. _active.Select(value => value.Descriptor)]);
-        IReadOnlyList<string> targets = Array.AsReadOnly(
-            [.. previous.Select(value => value.Id)
-                .Concat(discovered.Select(value => value.Id))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)]);
+        IReadOnlyList<RuntimeExtensionDescriptor> previous = _committedDescriptors;
+        IReadOnlyList<string> targets = ComputeReloadTargets(
+            _committedSnapshot, snapshot, previous, discovered);
         return new(snapshot, discovered, previous, targets);
+    }
+
+    private IReadOnlyList<string> ComputeReloadTargets(
+        RootAssemblySnapshot? oldSnapshot,
+        RootAssemblySnapshot nextSnapshot,
+        IReadOnlyList<RuntimeExtensionDescriptor> previous,
+        IReadOnlyList<RuntimeExtensionDescriptor> next)
+    {
+        HashSet<string> changedImages = [with(StringComparer.OrdinalIgnoreCase)];
+        HashSet<string> names = [with(StringComparer.OrdinalIgnoreCase)];
+        if (oldSnapshot is not null)
+            names.UnionWith(oldSnapshot.Images.Select(image => image.AssemblyName));
+        names.UnionWith(nextSnapshot.Images.Select(image => image.AssemblyName));
+        foreach (string name in names)
+        {
+            if (oldSnapshot is null ||
+                !oldSnapshot.TryGet(name, out RootAssemblyImage? oldImage) ||
+                !nextSnapshot.TryGet(name, out RootAssemblyImage? nextImage) ||
+                !oldImage.Assembly.AsSpan().SequenceEqual(nextImage.Assembly) ||
+                (oldImage.Symbols is null) != (nextImage.Symbols is null) ||
+                (oldImage.Symbols is not null &&
+                 !oldImage.Symbols.AsSpan().SequenceEqual(nextImage.Symbols!)))
+            {
+                changedImages.Add(name);
+            }
+        }
+
+        RuntimeExtensionDescriptor[] all = [.. previous.Concat(next)];
+        HashSet<string> targets = [with(StringComparer.OrdinalIgnoreCase)];
+        foreach (RuntimeExtensionDescriptor descriptor in all)
+        {
+            if (_unavailableAssemblies.Contains(descriptor.AssemblyName) ||
+                ReferencesChangedImage(descriptor, changedImages, oldSnapshot) ||
+                ReferencesChangedImage(descriptor, changedImages, nextSnapshot))
+            {
+                targets.Add(descriptor.Id);
+            }
+        }
+        foreach (IGrouping<string, RuntimeExtensionDescriptor> providers in next
+            .SelectMany(d => d.Provides.Select(cap => (cap, d)))
+            .GroupBy(entry => entry.cap, entry => entry.d,
+                StringComparer.OrdinalIgnoreCase))
+        {
+            if (providers.Skip(1).Any() && providers.Any(d => targets.Contains(d.Id)))
+                targets.UnionWith(providers.Select(d => d.Id));
+        }
+
+        bool grew;
+        do
+        {
+            grew = false;
+            HashSet<string> removed = [with(StringComparer.OrdinalIgnoreCase)];
+            foreach (RuntimeExtensionDescriptor descriptor in all)
+                if (targets.Contains(descriptor.Id))
+                    removed.UnionWith(descriptor.Provides);
+            foreach (RuntimeExtensionDescriptor descriptor in all)
+            {
+                if (targets.Contains(descriptor.Id)) continue;
+                ActiveRuntimeExtension? active = _active.FirstOrDefault(e =>
+                    e.Descriptor.Id.Equals(descriptor.Id, StringComparison.OrdinalIgnoreCase));
+                if (descriptor.Requires.Any(removed.Contains) ||
+                    active is not null && active.RuntimeRequirements.Any(removed.Contains))
+                    grew |= targets.Add(descriptor.Id);
+            }
+        }
+        while (grew);
+        return [.. targets.OrderBy(id => id, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    private static bool ReferencesChangedImage(
+        RuntimeExtensionDescriptor descriptor,
+        HashSet<string> changed,
+        RootAssemblySnapshot? snapshot)
+    {
+        if (snapshot is null) return true;
+        Queue<string> queue = new([descriptor.AssemblyName]);
+        HashSet<string> visited = [with(StringComparer.OrdinalIgnoreCase)];
+        while (queue.TryDequeue(out string? name))
+        {
+            if (!visited.Add(name)) continue;
+            if (changed.Contains(name)) return true;
+            if (!snapshot.TryGet(name, out RootAssemblyImage? image)) continue;
+            foreach (string reference in ReadReferencedAssemblyNames(image))
+                queue.Enqueue(reference);
+        }
+        return false;
     }
 
     void IRuntimeExtensionReloadController.BeginReload(
@@ -185,10 +269,18 @@ internal sealed class RuntimeExtensionManager(
 
             _reloadPlan = plan;
             _reloadDiagnostic = null;
+            if (plan.TargetIds.Count == 0)
+            {
+                _reloadState = RuntimeExtensionReloadState.Completed;
+                log.Information("Extension RAM images unchanged; no lifecycle was retired.");
+                return;
+            }
             _reloadState = RuntimeExtensionReloadState.Retiring;
 
+            HashSet<string> targets = [with(plan.TargetIds, StringComparer.OrdinalIgnoreCase)];
             Task? predecessor = null;
-            ActiveRuntimeExtension[] retiring = [.. _active.AsEnumerable().Reverse()];
+            ActiveRuntimeExtension[] retiring = [.. _active.AsEnumerable()
+                .Reverse().Where(e => targets.Contains(e.Descriptor.Id))];
             foreach (ActiveRuntimeExtension active in retiring)
             {
                 active.Unavailable = true;
@@ -204,10 +296,11 @@ internal sealed class RuntimeExtensionManager(
                     "runtime-extension reload",
                     predecessor);
             }
-            _active.Clear();
+            foreach (ActiveRuntimeExtension active in retiring)
+                _active.Remove(active);
             log.Information(
-                $"Runtime-extension reload queued {plan.TargetIds.Count} extension index(es). " +
-                "All extension binaries were captured before retirement began.");
+                $"Runtime-extension reload queued {plan.TargetIds.Count} affected extension(s); " +
+                "independent extensions retain their RAM contexts and services.");
         }
         else
         {
@@ -253,15 +346,13 @@ internal sealed class RuntimeExtensionManager(
             RuntimeExtensionReloadPlan plan = _reloadPlan
                 ?? throw new InvalidOperationException(
                     "The runtime-extension reload plan is unavailable.");
-            _resolver?.Dispose();
-            _resolver = null;
-
             HashSet<string> nextIds = [with(
                 plan.NextDescriptors.Select(value => value.Id),
                 StringComparer.OrdinalIgnoreCase)];
             foreach (RuntimeExtensionDescriptor previous in plan.PreviousDescriptors)
             {
-                if (!nextIds.Contains(previous.Id))
+                if (!nextIds.Contains(previous.Id) &&
+                    plan.TargetIds.Contains(previous.Id, StringComparer.OrdinalIgnoreCase))
                 {
                     MarkUnavailable(previous);
                 }
@@ -270,7 +361,11 @@ internal sealed class RuntimeExtensionManager(
             PrepareGeneration(
                 plan.Snapshot,
                 plan.NextDescriptors,
-                reviveOwners: true);
+                reviveOwners: true,
+                targetIds: new HashSet<string>(
+                    plan.TargetIds,
+                    StringComparer.OrdinalIgnoreCase),
+                previousDescriptors: plan.PreviousDescriptors);
             _reloadState = RuntimeExtensionReloadState.Initializing;
         }
 
@@ -300,21 +395,59 @@ internal sealed class RuntimeExtensionManager(
             $"Runtime-extension reload completed with {_active.Count} active extension(s). ");
     }
 
+    private static bool SameImages(
+        RootAssemblySnapshot left,
+        RootAssemblySnapshot right)
+    {
+        if (left.Images.Count != right.Images.Count)
+        {
+            return false;
+        }
+        foreach (RootAssemblyImage before in left.Images)
+        {
+            if (!right.TryGet(before.AssemblyName, out RootAssemblyImage? after) ||
+                !before.Assembly.AsSpan().SequenceEqual(after.Assembly) ||
+                (before.Symbols is null) != (after.Symbols is null) ||
+                (before.Symbols is not null &&
+                 !before.Symbols.AsSpan().SequenceEqual(after.Symbols!)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private void PrepareGeneration(
         RootAssemblySnapshot snapshot,
         IReadOnlyList<RuntimeExtensionDescriptor> discovered,
-        bool reviveOwners)
+        bool reviveOwners,
+        HashSet<string>? targetIds = null,
+        IReadOnlyList<RuntimeExtensionDescriptor>? previousDescriptors = null)
     {
         if (reviveOwners)
         {
             foreach (RuntimeExtensionDescriptor descriptor in discovered)
             {
+                if (targetIds is null || !targetIds.Contains(descriptor.Id))
+                    continue;
                 services.ResetOwner(descriptor.Id);
                 _unavailableAssemblies.Remove(descriptor.AssemblyName);
             }
+            HashSet<string> roots = [with(StringComparer.OrdinalIgnoreCase)];
+            foreach (RuntimeExtensionDescriptor descriptor in
+                (previousDescriptors ?? []).Concat(discovered))
+            {
+                if (targetIds is not null && targetIds.Contains(descriptor.Id))
+                    roots.Add(descriptor.AssemblyName);
+            }
+            _resolver!.ReplaceSnapshot(snapshot, discovered, roots);
         }
-
-        _resolver = new(snapshot, ContractAssembly, log);
+        else
+        {
+            _resolver = new(snapshot, discovered, ContractAssembly, log);
+        }
+        _committedSnapshot = snapshot;
+        _committedDescriptors = Array.AsReadOnly([.. discovered]);
 
         Dictionary<string, string> declaredProviders = [with(
             StringComparer.OrdinalIgnoreCase)];
@@ -353,7 +486,8 @@ internal sealed class RuntimeExtensionManager(
         RejectUndeclaredRootReferences(snapshot, discovered, rejected);
         foreach (RuntimeExtensionDescriptor descriptor in discovered)
         {
-            if (rejected.Contains(descriptor.Id))
+            if (rejected.Contains(descriptor.Id) &&
+                (targetIds is null || targetIds.Contains(descriptor.Id)))
             {
                 MarkUnavailable(descriptor);
             }
@@ -361,6 +495,7 @@ internal sealed class RuntimeExtensionManager(
 
         _pendingInitialization.AddRange(
             discovered
+                .Where(value => targetIds is null || targetIds.Contains(value.Id))
                 .Where(value => !rejected.Contains(value.Id))
                 .OrderBy(value => value.Id, StringComparer.OrdinalIgnoreCase));
     }
@@ -1809,68 +1944,129 @@ internal static class RuntimeExtensionAssemblyRegistry
 
 internal sealed class RootAssemblyResolver : IDisposable
 {
-    private readonly AssemblyLoadContext _context;
     private readonly Assembly _contractAssembly;
     private readonly string _contractAssemblyName;
     private readonly RuntimeLog _log;
     private readonly Lock _gate = new();
+    private readonly Dictionary<string, RootContext> _roots =
+        [with(StringComparer.OrdinalIgnoreCase)];
+    private HashSet<string> _rootNames;
     private RootAssemblySnapshot? _snapshot;
     private bool _disposed;
 
+    private sealed class RootContext(string name)
+    {
+        internal string Name { get; } = name;
+        internal AssemblyLoadContext Context { get; } = new(
+            $"CSHVDNC.Extension.{name}.{Guid.NewGuid():N}",
+            isCollectible: true);
+    }
+
     public RootAssemblyResolver(
         RootAssemblySnapshot snapshot,
+        IReadOnlyList<RuntimeExtensionDescriptor> descriptors,
         Assembly contractAssembly,
         RuntimeLog log)
     {
         ArgumentNullException.ThrowIfNull(snapshot);
+        ArgumentNullException.ThrowIfNull(descriptors);
         ArgumentNullException.ThrowIfNull(contractAssembly);
         ArgumentNullException.ThrowIfNull(log);
-
-        _context = new AssemblyLoadContext(
-            $"CSHVDNC.Extensions.{Guid.NewGuid():N}",
-            isCollectible: true);
+        _snapshot = snapshot;
+        _rootNames = [with(descriptors.Select(d => d.AssemblyName),
+            StringComparer.OrdinalIgnoreCase)];
         _contractAssembly = contractAssembly;
         _contractAssemblyName = contractAssembly.GetName().Name
-            ?? throw new InvalidOperationException(
-                "The runtime-extension contract assembly has no simple name.");
+            ?? throw new InvalidOperationException("The contract assembly has no name.");
         _log = log;
-        _snapshot = snapshot;
-        _context.Resolving += Resolve;
-        _log.Information(
-            $"Extension resolver activated from {snapshot.Images.Count} committed RAM image(s).");
     }
 
     public Assembly LoadRootAssembly(string simpleName)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(simpleName);
-        ThrowIfDisposed();
-        Assembly? loaded = FindLoaded(simpleName);
-        if (loaded is not null)
+        lock (_gate)
         {
-            return loaded;
+            ThrowIfDisposed();
+            if (!_rootNames.Contains(simpleName))
+            {
+                throw new FileNotFoundException(
+                    $"'{simpleName}' does not declare a registered runtime-extension contract.");
+            }
+            if (_roots.TryGetValue(simpleName, out RootContext? existing))
+            {
+                return FindLoaded(existing.Context, simpleName)
+                    ?? throw new FileLoadException(
+                        $"Extension context '{simpleName}' has no loaded root assembly.");
+            }
+            RootAssemblySnapshot snapshot = _snapshot!;
+            if (!snapshot.TryGet(simpleName, out RootAssemblyImage? image))
+            {
+                throw new FileNotFoundException(
+                    $"Registered extension '{simpleName}' is absent from the RAM snapshot.");
+            }
+            RootContext root = new(simpleName);
+            root.Context.Resolving += Resolve;
+            _roots.Add(simpleName, root);
+            try
+            {
+                return LoadImage(root.Context, image);
+            }
+            catch
+            {
+                _roots.Remove(simpleName);
+                root.Context.Resolving -= Resolve;
+                root.Context.Unload();
+                throw;
+            }
         }
-        RootAssemblySnapshot snapshot = _snapshot
-            ?? throw new ObjectDisposedException(nameof(RootAssemblyResolver));
-        if (!snapshot.TryGet(simpleName, out RootAssemblyImage? image))
+    }
+
+    public void ReplaceSnapshot(
+        RootAssemblySnapshot next,
+        IReadOnlyList<RuntimeExtensionDescriptor> nextDescriptors,
+        IReadOnlyCollection<string> retiringRoots)
+    {
+        ArgumentNullException.ThrowIfNull(next);
+        ArgumentNullException.ThrowIfNull(nextDescriptors);
+        ArgumentNullException.ThrowIfNull(retiringRoots);
+        lock (_gate)
         {
-            throw new FileNotFoundException(
-                $"Runtime extension assembly '{simpleName}' is absent from the RAM snapshot.");
+            ThrowIfDisposed();
+            foreach (string name in retiringRoots)
+            {
+                if (_roots.Remove(name, out RootContext? root))
+                {
+                    ReleaseRoot(root);
+                }
+            }
+            _snapshot = next;
+            _rootNames = [with(nextDescriptors.Select(d => d.AssemblyName),
+                StringComparer.OrdinalIgnoreCase)];
         }
-        return LoadImage(image);
     }
 
     public void Dispose()
     {
-        if (_disposed)
+        lock (_gate)
         {
-            return;
+            if (_disposed) return;
+            _disposed = true;
+            foreach (RootContext root in _roots.Values)
+            {
+                ReleaseRoot(root);
+            }
+            _roots.Clear();
+            _snapshot = null;
+            _rootNames.Clear();
         }
-        _disposed = true;
-        _context.Resolving -= Resolve;
-        Assembly[] loaded = [.. _context.Assemblies];
+    }
+
+    private void ReleaseRoot(RootContext root)
+    {
+        root.Context.Resolving -= Resolve;
+        Assembly[] loaded = [.. root.Context.Assemblies];
         RuntimeExtensionAssemblyRegistry.Unregister(loaded);
-        _snapshot = null;
-        _context.Unload();
+        root.Context.Unload();
     }
 
     private Assembly? Resolve(AssemblyLoadContext context, AssemblyName requested)
@@ -1879,38 +2075,35 @@ internal sealed class RootAssemblyResolver : IDisposable
         {
             return null;
         }
-        if (requested.Name.Equals(
-                _contractAssemblyName,
-                StringComparison.OrdinalIgnoreCase))
+        if (requested.Name.Equals(_contractAssemblyName, StringComparison.OrdinalIgnoreCase))
         {
             return _contractAssembly;
         }
-
-        Assembly? loaded = FindLoaded(requested.Name);
-        if (loaded is not null)
+        lock (_gate)
         {
-            return loaded;
-        }
+            if (_disposed) return null;
+            Assembly? loaded = FindLoaded(context, requested.Name);
+            if (loaded is not null) return loaded;
 
-        RootAssemblySnapshot? snapshot = _snapshot;
-        if (snapshot is not null &&
-            snapshot.TryGet(requested.Name, out RootAssemblyImage? image))
-        {
-            lock (_gate)
+            if (_rootNames.Contains(requested.Name))
             {
-                loaded = FindLoaded(requested.Name);
-                if (loaded is not null)
-                {
-                    return loaded;
-                }
+                return _roots.TryGetValue(requested.Name, out RootContext? provider)
+                    ? FindLoaded(provider.Context, requested.Name)
+                    : null;
+            }
+
+            RootAssemblySnapshot? snapshot = _snapshot;
+            if (snapshot is not null &&
+                snapshot.TryGet(requested.Name, out RootAssemblyImage? helper))
+            {
                 try
                 {
-                    return LoadImage(image);
+                    return LoadImage(context, helper);
                 }
                 catch (Exception exception)
                 {
-                    _log.Error(
-                        $"Extension dependency '{requested}' could not be loaded from its committed RAM image: {exception.Message}");
+                    _log.Error($"Extension helper '{requested}' could not be " +
+                        $"loaded from RAM: {exception.Message}");
                     return null;
                 }
             }
@@ -1918,38 +2111,27 @@ internal sealed class RootAssemblyResolver : IDisposable
 
         Assembly? runtimeDependency = RuntimeDependencyResolver.TryResolve(requested);
         if (runtimeDependency is not null ||
-            requested.Name.Equals(
-                "FSharp.Core",
-                StringComparison.OrdinalIgnoreCase))
+            requested.Name.Equals("FSharp.Core", StringComparison.OrdinalIgnoreCase))
         {
             return runtimeDependency;
         }
-
         foreach (Assembly shared in AssemblyLoadContext.Default.Assemblies)
         {
-            if (shared.GetName().Name?.Equals(
-                    requested.Name,
-                    StringComparison.OrdinalIgnoreCase) == true)
+            if (shared.GetName().Name?.Equals(requested.Name,
+                StringComparison.OrdinalIgnoreCase) == true)
             {
                 return shared;
             }
         }
-
         try
         {
             return AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
         }
-        catch (FileNotFoundException)
-        {
-            return null;
-        }
-        catch (FileLoadException)
-        {
-            return null;
-        }
+        catch (FileNotFoundException) { return null; }
+        catch (FileLoadException) { return null; }
     }
 
-    private Assembly LoadImage(RootAssemblyImage image)
+    private Assembly LoadImage(AssemblyLoadContext context, RootAssemblyImage image)
     {
         Assembly loaded;
         if (image.Symbols is not null)
@@ -1958,33 +2140,27 @@ internal sealed class RootAssemblyResolver : IDisposable
             {
                 using MemoryStream assembly = new(image.Assembly, writable: false);
                 using MemoryStream symbols = new(image.Symbols, writable: false);
-                loaded = _context.LoadFromStream(assembly, symbols);
-                RuntimeExtensionAssemblyRegistry.Register(loaded);
+                loaded = context.LoadFromStream(assembly, symbols);
+                if (_rootNames.Contains(image.AssemblyName))
+                    RuntimeExtensionAssemblyRegistry.Register(loaded);
                 return loaded;
             }
-            catch (BadImageFormatException)
-            {
-            }
+            catch (BadImageFormatException) { }
         }
-
-        using MemoryStream imageStream = new(image.Assembly, writable: false);
-        loaded = _context.LoadFromStream(imageStream);
-        RuntimeExtensionAssemblyRegistry.Register(loaded);
+        using MemoryStream stream = new(image.Assembly, writable: false);
+        loaded = context.LoadFromStream(stream);
+        if (_rootNames.Contains(image.AssemblyName))
+            RuntimeExtensionAssemblyRegistry.Register(loaded);
         return loaded;
     }
 
-    private Assembly? FindLoaded(string simpleName) =>
-        _context.Assemblies.FirstOrDefault(assembly =>
-            assembly.GetName().Name?.Equals(
-                simpleName,
+    private static Assembly? FindLoaded(AssemblyLoadContext context, string name) =>
+        context.Assemblies.FirstOrDefault(assembly =>
+            assembly.GetName().Name?.Equals(name,
                 StringComparison.OrdinalIgnoreCase) == true);
 
     private void ThrowIfDisposed()
     {
-        if (!_disposed)
-        {
-            return;
-        }
-        throw new ObjectDisposedException(nameof(RootAssemblyResolver));
+        ObjectDisposedException.ThrowIf(_disposed, typeof(RootAssemblyResolver));
     }
 }

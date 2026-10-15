@@ -35,6 +35,8 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         [with(StringComparer.OrdinalIgnoreCase)];
     private readonly HashSet<string> _unavailableRuntimeAssemblies =
         [with(StringComparer.OrdinalIgnoreCase)];
+    private readonly HashSet<string> _quarantinedClassTypes =
+        [with(StringComparer.Ordinal)];
     private IReadOnlyList<PackageDescriptor> _catalog = [];
     private LifecycleTransitionOperation? _activeOperation;
     private ulong _lifecycleEpoch;
@@ -220,6 +222,21 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             $"Initial scripts4 RAM image contains {_initialPrepareQueue.Count} executable package(s).");
     }
 
+    private Dictionary<string, Assembly> SharedExecutableAssemblies(
+        IEnumerable<string> dependencies)
+    {
+        Dictionary<string, Assembly> result = [with(StringComparer.OrdinalIgnoreCase)];
+        foreach (string name in dependencies)
+        {
+            ScriptPackage? provider = FindActivePackage(name);
+            if (provider?.EntryAssembly is Assembly assembly)
+            {
+                result[assembly.GetName().Name ?? name] = assembly;
+            }
+        }
+        return result;
+    }
+
     private void AdvanceInitialPreparation()
     {
         if (_initialPrepareQueue is null)
@@ -262,7 +279,8 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                     _services,
                     _log,
                     _diagnostics,
-                    NextPackageGeneration())
+                    NextPackageGeneration(),
+                    SharedExecutableAssemblies(image.Descriptor.DependencyPackageNames))
                 : null;
             if (package is not null)
             {
@@ -273,6 +291,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
 
         _initialPrepareQueue = null;
         _initialStaged = null;
+        PropagateClassFaults();
         _initialStartQueue = new(OrderPackageNames(
             _catalog,
             _packages.Select(value => value.Name),
@@ -293,6 +312,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         {
             PackageLifecycleProgress progress =
                 _initialStartingPackage.AdvanceStartInstances();
+            PropagateClassFaults();
             if (progress is PackageLifecycleProgress.Pending)
             {
                 return;
@@ -300,11 +320,9 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
 
             if (progress is PackageLifecycleProgress.Failed)
             {
-                ScriptPackage failed = _initialStartingPackage;
-                BeginPackageRetirement(
-                    failed,
-                    ScriptStopReason.PackageFault,
-                    "initial package startup failure");
+                _log.Error(
+                    $"Package '{_initialStartingPackage.Name}' has no active " +
+                    "Script4 class; its RAM generation is retained for S4R restart.");
             }
             _initialStartingPackage = null;
         }
@@ -467,17 +485,73 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         for (int index = _packages.Count - 1; index >= 0; --index)
         {
             ScriptPackage package = _packages[index];
-            int activeBeforeTick = package.ActiveScriptCount;
             package.Tick(context);
-            if (activeBeforeTick == 0 || package.ActiveScriptCount != 0)
+            PropagateClassFaults();
+        }
+    }
+
+    private void PropagateClassFaults()
+    {
+        Queue<string> failed = new(_quarantinedClassTypes);
+        foreach (ScriptPackage package in _packages)
+        {
+            foreach (string source in package.DrainFaultedTypes())
+            {
+                if (_quarantinedClassTypes.Add(source))
+                {
+                    failed.Enqueue(source);
+                }
+            }
+        }
+
+        HashSet<string> examined = [with(StringComparer.Ordinal)];
+        while (failed.TryDequeue(out string? unavailable))
+        {
+            if (!examined.Add(unavailable))
             {
                 continue;
             }
+            foreach (ScriptPackage package in _packages)
+            {
+                foreach (ScriptClassDependency edge in package.ClassDependencies)
+                {
+                    if (edge.RequiredType != unavailable)
+                    {
+                        continue;
+                    }
+                    package.QuarantineClass(edge.ConsumerType);
+                    if (!_quarantinedClassTypes.Add(edge.ConsumerType))
+                    {
+                        continue;
+                    }
+                    failed.Enqueue(edge.ConsumerType);
+                    _log.Error(
+                        $"Script4 class '{edge.ConsumerType}' is quarantined " +
+                        $"because required class '{unavailable}' is unavailable.",
+                        source: package.Name,
+                        origin: edge.ConsumerType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: $"A dependent Script4 class was isolated after '{unavailable}' failed.");
+                }
+            }
+        }
+    }
 
-            BeginPackageRetirement(
-                package,
-                ScriptStopReason.PackageFault,
-                "all Script4 executables in the package became unavailable");
+    private void ResetClassQuarantine(IEnumerable<string> packageNames)
+    {
+        HashSet<string> targets = [with(packageNames,
+            StringComparer.OrdinalIgnoreCase)];
+        foreach (ScriptPackage package in _packages)
+        {
+            if (!targets.Contains(package.Name))
+            {
+                continue;
+            }
+            foreach (string type in package.ScriptTypeIdentities)
+            {
+                _quarantinedClassTypes.Remove(type);
+            }
+            package.ResetClassQuarantine();
         }
     }
 
@@ -658,6 +732,9 @@ internal sealed class ScriptPackage
     private Assembly? _entryAssembly;
     private Type[] _scriptTypes;
     private readonly List<ScriptInstance> _scripts = [];
+    private readonly HashSet<string> _disabledClasses = [with(StringComparer.Ordinal)];
+    private readonly HashSet<string> _reportedFaults = [with(StringComparer.Ordinal)];
+    private readonly List<string> _constructionFaults = [];
     private Queue<Type>? _pendingStartTypes;
     private ScriptInstance? _startingScript;
     private ScriptStartReason _startReason;
@@ -687,10 +764,61 @@ internal sealed class ScriptPackage
 
     public string Name => _descriptor.Name;
 
+    internal Assembly? EntryAssembly => _entryAssembly;
+
     public ulong GenerationId { get; }
 
     public int ActiveScriptCount =>
         _scripts.Count(script => script.IsActive);
+
+    internal IReadOnlyList<string> ScriptTypeIdentities =>
+        [.. _scriptTypes.Select(ScriptClassDependency.Identity)];
+
+    internal IReadOnlyList<ScriptClassDependency> ClassDependencies =>
+        [.. _scriptTypes.SelectMany(type =>
+            type.GetCustomAttributes<ScriptLifecycleDependencyAttribute>(inherit: false)
+                .Select(attribute => new ScriptClassDependency(
+                    ScriptClassDependency.Identity(type),
+                    ScriptClassDependency.Identity(attribute.RequiredType))))];
+
+    internal void QuarantineClass(string identity)
+    {
+        _disabledClasses.Add(identity);
+        if (_startingScript is { } starting && starting.TypeIdentity == identity)
+        {
+            starting.BeginStop(ScriptStopReason.DependencyUnavailable);
+            _scripts.Add(starting);
+            _startingScript = null;
+        }
+        foreach (ScriptInstance script in _scripts)
+        {
+            if (script.TypeIdentity == identity)
+            {
+                script.BeginStop(ScriptStopReason.DependencyUnavailable);
+            }
+        }
+    }
+
+    internal void ResetClassQuarantine() => _disabledClasses.Clear();
+
+    internal IReadOnlyList<string> DrainFaultedTypes()
+    {
+        List<string> result = [.. _constructionFaults];
+        _constructionFaults.Clear();
+        foreach (ScriptInstance script in _scripts)
+        {
+            if (script.Faulted && _reportedFaults.Add(script.TypeIdentity))
+            {
+                result.Add(script.TypeIdentity);
+            }
+        }
+        if (_startingScript is { Faulted: true } starting &&
+            _reportedFaults.Add(starting.TypeIdentity))
+        {
+            result.Add(starting.TypeIdentity);
+        }
+        return result;
+    }
 
     public IEnumerable<Task> PendingRetirementTasks =>
         _scripts
@@ -703,7 +831,8 @@ internal sealed class ScriptPackage
         IScriptServices services,
         RuntimeLog log,
         RuntimeDiagnosticHub diagnostics,
-        ulong generationId)
+        ulong generationId,
+        IReadOnlyDictionary<string, Assembly> sharedExecutables)
     {
         PackageDescriptor descriptor = staged.Descriptor;
         if (descriptor.EntryAssembly is null)
@@ -714,7 +843,7 @@ internal sealed class ScriptPackage
         StagedScriptPackageLoadContext? context = null;
         try
         {
-            context = new(staged, dependencies);
+            context = new(staged, dependencies, sharedExecutables);
             Assembly assembly = context.LoadEntryAssembly();
             return Prepare(
                 descriptor,
@@ -758,6 +887,26 @@ internal sealed class ScriptPackage
                 !type.ContainsGenericParameters &&
                 typeof(Script4).IsAssignableFrom(type))
             .OrderBy(type => type.FullName!, StringComparer.Ordinal)];
+
+        foreach (Type type in scriptTypes)
+        {
+            foreach (ScriptLifecycleDependencyAttribute edge in
+                     type.GetCustomAttributes<ScriptLifecycleDependencyAttribute>(
+                         inherit: false))
+            {
+                Type required = edge.RequiredType;
+                if (required is null || required.IsAbstract ||
+                    required.ContainsGenericParameters ||
+                    !typeof(Script4).IsAssignableFrom(required) ||
+                    required == type)
+                {
+                    throw new BadImageFormatException(
+                        $"Script4 class '{type.FullName}' declares an invalid " +
+                        "lifecycle dependency. Required types must be distinct " +
+                        "concrete Script4 executable classes.");
+                }
+            }
+        }
 
         if (scriptTypes.Length == 0)
         {
@@ -805,7 +954,9 @@ internal sealed class ScriptPackage
 
         _startReason = reason;
         _startEpoch = lifecycleEpoch;
-        _pendingStartTypes = new(_scriptTypes);
+        _reportedFaults.Clear();
+        _pendingStartTypes = new(_scriptTypes.Where(type =>
+            !_disabledClasses.Contains(ScriptClassDependency.Identity(type))));
     }
 
     public PackageLifecycleProgress AdvanceStartInstances()
@@ -824,21 +975,39 @@ internal sealed class ScriptPackage
                 return progress;
             }
 
+            if (progress is PackageLifecycleProgress.Failed)
+            {
+                _constructionFaults.Add(_startingScript.TypeIdentity);
+            }
             _scripts.Add(_startingScript);
             _startingScript = null;
+            if (progress is PackageLifecycleProgress.Failed)
+            {
+                return PackageLifecycleProgress.Pending;
+            }
         }
 
         while (_pendingStartTypes.Count != 0)
         {
             Type type = _pendingStartTypes.Dequeue();
+            if (_disabledClasses.Contains(ScriptClassDependency.Identity(type)))
+            {
+                continue;
+            }
             try
             {
                 if (Activator.CreateInstance(type, nonPublic: true) is not
                     Script4 script)
                 {
+                    _constructionFaults.Add(ScriptClassDependency.Identity(type));
                     _log.Error(
                         $"Script type '{type.FullName}' in package '{Name}' " +
-                        "could not be instantiated.");
+                        "could not be instantiated.",
+                        source: Name,
+                        origin: type.FullName,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Script '{type.FullName}' was not activated.");
                     continue;
                 }
 
@@ -855,9 +1024,15 @@ internal sealed class ScriptPackage
             }
             catch (Exception exception)
             {
+                _constructionFaults.Add(ScriptClassDependency.Identity(type));
                 _log.Error(
                     $"Script type '{type.FullName}' in package '{Name}' " +
-                    $"could not begin startup: {exception}");
+                    $"could not begin startup: {exception}",
+                    source: Name,
+                    origin: type.FullName,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary:
+                        $"Script '{type.FullName}' was not activated.");
             }
         }
 
@@ -940,6 +1115,13 @@ internal sealed class ScriptPackage
         {
             script.Tick(context);
         }
+        foreach (ScriptInstance script in frame)
+        {
+            if (script.Faulted && _reportedFaults.Add(script.TypeIdentity))
+            {
+                _constructionFaults.Add(script.TypeIdentity);
+            }
+        }
         ObserveCompletedScriptRetirements();
     }
 
@@ -1000,6 +1182,14 @@ internal sealed class ScriptPackage
             return exception.Types.OfType<Type>();
         }
     }
+}
+
+internal readonly record struct ScriptClassDependency(
+    string ConsumerType,
+    string RequiredType)
+{
+    internal static string Identity(Type type) =>
+        $"{type.Assembly.GetName().Name}:{type.FullName}";
 }
 
 internal sealed class ScriptExecutionMetrics
@@ -1083,6 +1273,10 @@ internal sealed class ScriptInstance(
     private bool _slowTickWarningActive;
 
     public bool IsActive => _started && !_stopped && !_faulted;
+
+    internal string TypeIdentity => ScriptClassDependency.Identity(script.GetType());
+
+    internal bool Faulted => _faulted;
 
     public bool IsRetiring => _stopped && !_stopCompleted;
 
@@ -1408,22 +1602,34 @@ internal sealed class StagedScriptPackageLoadContext :
         [with(StringComparer.OrdinalIgnoreCase)];
     private readonly PackageAssemblyImage _entry;
     private readonly string _entryPath;
+    private readonly IReadOnlyDictionary<string, Assembly> _sharedExecutables;
 
     public StagedScriptPackageLoadContext(
         StagedPackageImage package,
-        IReadOnlyList<StagedPackageImage> dependencies) :
+        IReadOnlyList<StagedPackageImage> dependencies,
+        IReadOnlyDictionary<string, Assembly> sharedExecutables) :
         base($"Script4:{package.Descriptor.Name}")
     {
         string entryPath = package.Descriptor.EntryAssembly
             ?? throw new InvalidOperationException(
                 "A staged executable package has no entry assembly.");
         _entryPath = entryPath;
+        _sharedExecutables = sharedExecutables;
 
         PackageAssemblyImage? entry = null;
         AddImages(package, allowExisting: false, ref entry, entryPath);
         foreach (StagedPackageImage dependency in dependencies)
         {
-            AddImages(dependency, allowExisting: false, ref entry, entryPath);
+            if (dependency.Descriptor.Kind is ScriptPackageKind.Library)
+            {
+                AddImages(dependency, allowExisting: false, ref entry, entryPath);
+            }
+            else if (!_sharedExecutables.ContainsKey(dependency.Descriptor.Name))
+            {
+                throw new InvalidDataException(
+                    $"Executable dependency '{dependency.Descriptor.Name}' " +
+                    "has not been prepared in the shared lifecycle graph.");
+            }
         }
 
         _entry = entry
@@ -1439,6 +1645,11 @@ internal sealed class StagedScriptPackageLoadContext :
         if (shared is not null)
         {
             return shared;
+        }
+        if (assemblyName.Name is not null &&
+            _sharedExecutables.TryGetValue(assemblyName.Name, out Assembly? executable))
+        {
+            return executable;
         }
 
         return !string.IsNullOrWhiteSpace(assemblyName.Name) &&

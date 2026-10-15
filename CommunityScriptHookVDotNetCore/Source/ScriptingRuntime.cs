@@ -56,6 +56,12 @@ public readonly record struct ScriptStopContext(
     ScriptStopReason Reason,
     ulong LifecycleEpoch);
 
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
+public sealed class ScriptLifecycleDependencyAttribute(Type requiredType) : Attribute
+{
+    public Type RequiredType { get; } = requiredType;
+}
+
 public abstract class Script4
 {
     protected abstract Task OnStartAsync(ScriptStartContext context);

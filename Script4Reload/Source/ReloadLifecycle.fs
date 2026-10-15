@@ -35,6 +35,7 @@ type Scripts4Lifecycle
     let mutable synchronizedDirty = false
     let mutable lastDirtyTimestamp = 0L
     let mutable explicitReloadPending = false
+    let mutable explicitRestartPending: string array option = None
     let mutable shutdown = false
 
     let formatOperationId (value: ScriptLifecycleTransitionOperationId) =
@@ -60,18 +61,19 @@ type Scripts4Lifecycle
             with _ -> ())
         manualInput <- None
 
-    let request reason =
+    let requestPlan (plan: ScriptLifecycleTransitionPlan) =
         if activeOperation.IsSome || shutdown then
             false
         else
-            let plan = ScriptLifecycleTransitionPlan(reason)
             let operation = host.RequestTransition plan
             activeOperation <- Some operation
             lastOperationState <- None
             log.Information(
-                $"global reload '{formatOperationId operation}' requested; " +
-                $"reason={reason}.")
+                $"lifecycle transition '{formatOperationId operation}' requested; " +
+                $"reason={plan.Reason}.")
             true
+
+    let request reason = requestPlan (ScriptLifecycleTransitionPlan(reason))
 
     let writeOperationResult (snapshot: ScriptLifecycleTransitionOperationSnapshot) =
         let result = snapshot.Result
@@ -172,8 +174,19 @@ type Scripts4Lifecycle
                     releaseManualInput()
             | None -> ()
 
+    let advanceExplicitRestart() =
+        match explicitRestartPending with
+        | Some targets when activeOperation.IsNone ->
+            let packages = if targets.Length = 0 then null else targets
+            let plan = ScriptLifecycleTransitionPlan(
+                ScriptLifecycleTransitionReason.ManualRestart, packages)
+            if requestPlan plan then
+                explicitRestartPending <- None
+        | _ -> ()
+
     let advanceExplicitReload() =
-        if explicitReloadPending && activeOperation.IsNone then
+        if explicitReloadPending && activeOperation.IsNone &&
+           explicitRestartPending.IsNone then
             if request ScriptLifecycleTransitionReason.ManualReload then
                 explicitReloadPending <- false
                 synchronizedDirty <- false
@@ -196,7 +209,7 @@ type Scripts4Lifecycle
             log.Information(
                 "Script4Reload Synchronized mode is active for root extensions, extensions, and scripts4. " +
                 "Filesystem events only mark disk state dirty; CSHVDNC owns capture, " +
-                "validation, RAM staging, ordered reload, and the global lifecycle barrier.")
+                "validation, RAM staging, and dependency-scoped transitions.")
 
     member _.RequestExplicitReload(reason: string) =
         if shutdown then
@@ -205,9 +218,23 @@ type Scripts4Lifecycle
             explicitReloadPending <- true
             log.Information(
                 if String.IsNullOrWhiteSpace reason then
-                    "An explicit global reload was requested."
+                    "An explicit reload was requested."
                 else
-                    $"An explicit global reload was requested: {reason.Trim()}.")
+                    $"An explicit reload was requested: {reason.Trim()}.")
+            true
+
+    member _.RequestExplicitRestart(targetPackages: string array) =
+        if shutdown then
+            false
+        else
+            let targets =
+                if isNull targetPackages then [||]
+                else targetPackages
+                     |> Array.filter (String.IsNullOrWhiteSpace >> not)
+                     |> Array.map (fun value -> value.Trim())
+                     |> Array.distinct
+            explicitRestartPending <- Some targets
+            log.Information("A RAM-only lifecycle restart was requested.")
             true
 
     member _.AdvanceFrame(_: RuntimeExtensionFrameContext) =
@@ -218,6 +245,7 @@ type Scripts4Lifecycle
                 | ReloadMode.Manual -> advanceManualInput()
                 | ReloadMode.Synchronized -> advanceWatcher()
 
+                advanceExplicitRestart()
                 advanceExplicitReload()
 
                 if activeOperation.IsNone && config.Mode = ReloadMode.Synchronized then
@@ -232,3 +260,4 @@ type Scripts4Lifecycle
             watcher <- None
             synchronizedDirty <- false
             explicitReloadPending <- false
+            explicitRestartPending <- None

@@ -201,11 +201,13 @@ public enum ScriptPackageKind
 public enum ScriptLifecycleTransitionReason
 {
     ManualReload,
-    AutomaticReload
+    AutomaticReload,
+    ManualRestart
 }
 
 public sealed record ScriptLifecycleTransitionPlan(
-    ScriptLifecycleTransitionReason Reason);
+    ScriptLifecycleTransitionReason Reason,
+    IReadOnlyList<string>? TargetPackages = null);
 
 public sealed record ScriptLifecycleTransitionResult(
     ulong LifecycleEpoch,

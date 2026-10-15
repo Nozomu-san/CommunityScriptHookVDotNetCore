@@ -8,6 +8,9 @@ internal sealed class DebugNotificationRuntime : IDisposable
     private readonly INotificationOperations _notifications;
     private readonly IRuntimeDiagnosticReader _diagnostics;
     private RuntimeDiagnosticMessage? _pendingMessage;
+    private readonly IRuntimeDiagnosticEvents? _events;
+    private int _signalRevision = 1;
+    private int _seenRevision;
     private bool _ready;
     private bool _disposed;
 
@@ -19,7 +22,11 @@ internal sealed class DebugNotificationRuntime : IDisposable
         ArgumentNullException.ThrowIfNull(notifications);
         _diagnostics = diagnostics;
         _notifications = notifications;
+        _events = diagnostics as IRuntimeDiagnosticEvents;
+        _events?.Available += OnAvailable;
     }
+
+    private void OnAvailable() => Interlocked.Increment(ref _signalRevision);
 
     internal void Advance()
     {
@@ -31,10 +38,19 @@ internal sealed class DebugNotificationRuntime : IDisposable
             return;
         }
 
-        if (_pendingMessage is null &&
-            !_diagnostics.TryRead(out _pendingMessage))
+        if (_pendingMessage is null)
         {
-            return;
+            if (_events is not null &&
+                Volatile.Read(ref _signalRevision) == _seenRevision)
+            {
+                return;
+            }
+            int revision = Volatile.Read(ref _signalRevision);
+            if (!_diagnostics.TryRead(out _pendingMessage))
+            {
+                _seenRevision = revision;
+                return;
+            }
         }
 
         RuntimeDiagnosticMessage message = _pendingMessage;
@@ -65,6 +81,7 @@ internal sealed class DebugNotificationRuntime : IDisposable
         }
 
         _disposed = true;
+        _events?.Available -= OnAvailable;
         _pendingMessage = null;
     }
 }

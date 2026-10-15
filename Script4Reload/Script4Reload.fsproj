@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFramework>net7.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <Platforms>x64</Platforms>
     <AssemblyTitle>Script4 Reload Tool</AssemblyTitle>
     <Authors>Nozomu-san</Authors>
-    <AssemblyVersion>10.10.2026.0</AssemblyVersion>
-    <FileVersion>10.10.2026.0</FileVersion>
+    <AssemblyVersion>15.10.2026.0</AssemblyVersion>
+    <FileVersion>15.10.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Source\AssemblyMetadata.fs" />
@@ -21,7 +21,7 @@
       <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
     </Reference>
     <Reference Include="ScriptHookInput">
-      <HintPath>..\ScriptHookInput\bin\x64\Release\net7.0\ScriptHookInput.dll</HintPath>
+      <HintPath>..\ScriptHookInput\bin\x64\Release\net8.0\ScriptHookInput.dll</HintPath>
     </Reference>
   </ItemGroup>
 </Project>

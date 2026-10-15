@@ -12,6 +12,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 
 namespace CEventGenerator::Configuration
@@ -56,38 +57,101 @@ namespace CEventGenerator::Configuration
                 "\r\n";
         }
 
-        bool Parse(std::string_view text, bool& enabled)
+        enum class ParseStatus
         {
-            bool seen{};
-            std::size_t start{};
-            while (start < text.size())
+            Valid,
+            Missing,
+            Invalid
+        };
+
+        std::string_view Trim(std::string_view value) noexcept
+        {
+            constexpr std::string_view Whitespace = " \t\v\f\r\n";
+            const std::size_t start = value.find_first_not_of(Whitespace);
+            if (start == std::string_view::npos)
             {
-                const std::size_t newline = text.find('\n', start);
-                const std::size_t end = newline == std::string_view::npos
-                    ? text.size()
-                    : newline;
-                std::string_view line = text.substr(start, end - start);
-                if (!line.empty() && line.back() == '\r')
+                return {};
+            }
+            const std::size_t end = value.find_last_not_of(Whitespace);
+            return value.substr(start, end - start + 1);
+        }
+
+        ParseStatus Parse(std::string_view text, bool& enabled)
+        {
+            if (text.starts_with("\xEF\xBB\xBF"))
+            {
+                text.remove_prefix(3);
+            }
+
+            std::string filtered;
+            filtered.reserve(text.size());
+            bool lineComment = false;
+            bool blockComment = false;
+            for (std::size_t index = 0; index < text.size();)
+            {
+                const char current = text[index];
+                const char next = index + 1 < text.size()
+                    ? text[index + 1]
+                    : '\0';
+                if (blockComment)
                 {
-                    line.remove_suffix(1);
-                }
-                if (line.empty() || line.front() == ';')
-                {
-                    if (newline == std::string_view::npos)
+                    if (current == '*' && next == '/')
                     {
-                        break;
+                        blockComment = false;
+                        index += 2;
+                        continue;
                     }
-                    start = newline + 1;
+                    ++index;
                     continue;
                 }
+                if (lineComment)
+                {
+                    if (current == '\r' || current == '\n')
+                    {
+                        lineComment = false;
+                        filtered.push_back(current);
+                    }
+                    ++index;
+                    continue;
+                }
+                if (current == '/' && next == '*')
+                {
+                    filtered.push_back(' ');
+                    blockComment = true;
+                    index += 2;
+                    continue;
+                }
+                if (current == ';' || current == '#' ||
+                    (current == '/' && next == '/'))
+                {
+                    lineComment = true;
+                    index += current == '/' ? 2 : 1;
+                    continue;
+                }
+                filtered.push_back(current);
+                ++index;
+            }
+            if (blockComment)
+            {
+                return ParseStatus::Invalid;
+            }
+
+            bool seen = false;
+            std::size_t start = 0;
+            for (;;)
+            {
+                const std::size_t end = filtered.find_first_of("\r\n", start);
+                const std::string_view line = Trim(
+                    std::string_view(filtered).substr(start, end - start));
                 if (!line.empty())
                 {
-                    constexpr std::string_view Key = "LogEnabled=";
-                    if (seen || !line.starts_with(Key))
+                    const std::size_t separator = line.find('=');
+                    if (seen || separator == std::string_view::npos ||
+                        Trim(line.substr(0, separator)) != "LogEnabled")
                     {
-                        return false;
+                        return ParseStatus::Invalid;
                     }
-                    const std::string_view value = line.substr(Key.size());
+                    const std::string_view value = Trim(line.substr(separator + 1));
                     if (value == "true")
                     {
                         enabled = true;
@@ -98,17 +162,22 @@ namespace CEventGenerator::Configuration
                     }
                     else
                     {
-                        return false;
+                        return ParseStatus::Invalid;
                     }
                     seen = true;
                 }
-                if (newline == std::string_view::npos)
+                if (end == std::string_view::npos)
                 {
                     break;
                 }
-                start = newline + 1;
+                start = end + 1;
+                if (filtered[end] == '\r' && start < filtered.size() &&
+                    filtered[start] == '\n')
+                {
+                    ++start;
+                }
             }
-            return seen;
+            return seen ? ParseStatus::Valid : ParseStatus::Missing;
         }
 
         void WriteAtomic(
@@ -156,21 +225,29 @@ namespace CEventGenerator::Configuration
         try
         {
             const std::filesystem::path path = ConfigurationPath(module);
-            std::string source;
-            bool rewrite = true;
             if (std::ifstream input(path, std::ios::binary); input.is_open())
             {
                 std::ostringstream buffer;
                 buffer << input.rdbuf();
-                source = buffer.str();
-                rewrite = !Parse(source, enabled);
-                if (rewrite)
+                const std::string source = buffer.str();
+                const ParseStatus status = Parse(source, enabled);
+                if (status == ParseStatus::Missing)
+                {
+                    std::string updated = source;
+                    if (!updated.empty() && updated.back() != '\r' &&
+                        updated.back() != '\n')
+                    {
+                        updated += "\r\n";
+                    }
+                    updated += "LogEnabled=true\r\n";
+                    WriteAtomic(path, updated);
+                }
+                else if (status == ParseStatus::Invalid)
                 {
                     enabled = true;
                 }
             }
-
-            if (rewrite)
+            else if (!std::filesystem::exists(path))
             {
                 WriteAtomic(path, Canonical(enabled));
             }
