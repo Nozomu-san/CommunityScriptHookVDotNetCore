@@ -66,14 +66,14 @@
 4. In order to update the catalog, you need to have [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) or [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) to execute.
 
 ### ScriptHookInput (Script Hook V Input Property)
-- Language Target: `F# 7`
+- Language Target: `F# 8`
 - Descriptions:
 1. Based on FiveM's website, there are concluded 2 types of inputs, game input and device input.
 2. Game input such as `INPUT_TALK`, `INPUT_CONTEXT`, etc. are part of the game, just go to settings and change.
 3. Device input such as controller, keyboard and mouse.
 
 ### Script4Reload (Script4's Reload tool)
-- Language Target: `F# 7`
+- Language Target: `F# 8`
 - Descriptions:
 1. It's the same reload ability from [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced) which modders got used to. However, there are 2 modes. 1 is Manual as ever, 2 is Synchronized, which you can't use manual reload key. That is meant to be done automatically.
 2. No more game freeze, since reload is now moved to asynchronous type.

@@ -66,14 +66,14 @@
 4. Để cập nhật danh mục, bạn cần có [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) hoặc [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) để thực thi.
 
 ### ScriptHookInput (Thuộc tính Input ở Script Hook V)
-- Ngôn ngữ mục tiêu: `F# 7`
+- Ngôn ngữ mục tiêu: `F# 8`
 - Mô tả:
 1. Dựa trên trang web của FiveM, bao gồm 2 loại đầu vào: đầu vào game (game input) và đầu vào thiết bị (device input).
 2. Đầu vào trong game như `INPUT_TALK`, `INPUT_CONTEXT`, v.v. là một phần của game, bạn chỉ cần vào cài đặt để thay đổi.
 3. Đầu vào thiết bị như tay cầm (controller), bàn phím và chuột.
 
 ### Script4Reload (Công cụ tải lại của Script4)
-- Ngôn ngữ mục tiêu: `F# 7`
+- Ngôn ngữ mục tiêu: `F# 8`
 - Mô tả:
 1. Vẫn giữ nguyên khả năng tải lại (reload) quen thuộc từ [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced). Tuy nhiên, có 2 chế độ: 1 là Thủ công (Manual) như trước đây, 2 là Đồng bộ hóa (Synchronized) — trong đó bạn không thể sử dụng phím tải lại thủ công mà quá trình này được thực hiện hoàn toàn tự động.
 2. Không còn hiện tượng treo game (game freeze), do việc tải lại giờ đây đã được chuyển sang kiểu bất đồng bộ (asynchronous).
