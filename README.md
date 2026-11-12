@@ -54,11 +54,11 @@
 2. Future-brain replacements ready without rewriting (In case replacing central brain).
 
 ### CommunityScriptHookVDotNetCore (Script Hook V .NET Core Brain Core)
-- Language Target: `C# 15 Preview`
+- Language Target: `C# 15`
 - Descriptions: Responsible for mods lifetime, tickrates and so on.
 
 ### Alloc8orStandardNatives (Alloc8or's Standard Native Executables)
-- Language Target: `C# 15 Preview` & `Embedded C# 15 Preview on PowerShell`
+- Language Target: `C# 15` & `Embedded C# 15 on PowerShell`
 - Descriptions:
 1. Based as Alloc8or's native executable website. You can now develop your native executables based on the website on either [Legacy](https://alloc8or.re/gta5/nativedb) or [Enhanced](https://alloc8or.re/gta5/nativedb/enhanced), so no more manual declarations or direct usage.
 2. You don't need to list all codes just to update native catalog, Run built PowerShell file and it will be done. It's completely synchronous with the website.
@@ -66,21 +66,21 @@
 4. In order to update the catalog, you need to have [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) or [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) to execute.
 
 ### ScriptHookInput (Script Hook V Input Property)
-- Language Target: `F# 8`
+- Language Target: `F# 10`
 - Descriptions:
 1. Based on FiveM's website, there are concluded 2 types of inputs, game input and device input.
 2. Game input such as `INPUT_TALK`, `INPUT_CONTEXT`, etc. are part of the game, just go to settings and change.
 3. Device input such as controller, keyboard and mouse.
 
 ### Script4Reload (Script4's Reload tool)
-- Language Target: `F# 8`
+- Language Target: `F# 10`
 - Descriptions:
 1. It's the same reload ability from [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced) which modders got used to. However, there are 2 modes. 1 is Manual as ever, 2 is Synchronized, which you can't use manual reload key. That is meant to be done automatically.
 2. No more game freeze, since reload is now moved to asynchronous type.
 3. No more brute-force and all-at-once reload. For modders, having less reload workloads will have the game last longer instead of crash randomly early.
 
 ### LocalNativeMemories (Pool Memory & Low-level Native Resolver)
-- Language Target: `C# 15 Preview`
+- Language Target: `C# 15`
 - Descriptions: This answers what's in the game, such as how many objects, entities, vehicles & peds. Also the backup way if native call does not exist.
 
 ### CEventGenerator (Machine Code Event Generator)
@@ -88,15 +88,15 @@
 - Descriptions: Tickrate sync or latency as polling type is completely replaced with event-based, driven via machine codes, removing the performance bottleneck roots.
 
 ### LowLevelEvents (Low Level Event Resolver)
-- Language Target: `C# 15 Preview`
+- Language Target: `C# 15`
 - Descriptions: Extract and convert low level CEvent(s) from machine codes to intermediate standards, which .NET Core projects uses. This also answers where it belongs.
 
 ### StandardGameOperations (Standard Code Table)
-- Language Target: `C# 15 Preview`
+- Language Target: `C# 15`
 - Descriptions: The easiest way to write codes, by using this, you will be bypassed lots of writing, such as declaring native calls manually, locally declaring game database and so on, even multiple operations of native calls, it's all here.
 
 ### LocalUserDebug (In-game Logging tool)
-- Language Target: `C# 15 Preview`
+- Language Target: `C# 15`
 - Descriptions: It's the same logging details, but now in-game, rather than reading log files consecutively.
 
 ## Requirements

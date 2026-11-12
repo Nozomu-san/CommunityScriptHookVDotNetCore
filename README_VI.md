@@ -54,11 +54,11 @@
 2. Có sẵn khả năng thay thế bộ não trung tâm trong tương lai mà không cần viết lại (trong trường hợp thay thế Central Brain).
 
 ### CommunityScriptHookVDotNetCore (Bộ não trung tâm Script Hook V .NET Core)
-- Ngôn ngữ mục tiêu: `C# 15 Preview`
+- Ngôn ngữ mục tiêu: `C# 15`
 - Mô tả: Chịu trách nhiệm quản lý vòng đời của các bản mod, tần suất tick (tickrate), v.v.
 
 ### Alloc8orStandardNatives (Các tệp thực thi Native chuẩn của Alloc8or)
-- Ngôn ngữ mục tiêu: `C# 15 Preview` & `Embedded C# 15 Preview trên PowerShell`
+- Ngôn ngữ mục tiêu: `C# 15` & `Embedded C# 15 trên PowerShell`
 - Mô tả:
 1. Dựa trên trang web chứa các tệp thực thi native của Alloc8or. Giờ bạn có thể phát triển các tệp thực thi native của mình dựa trên website ở [Legacy](https://alloc8or.re/gta5/nativedb) hoặc [Enhanced](https://alloc8or.re/gta5/nativedb/enhanced), do đó không còn chuyện tự khai báo thủ công hay sử dụng trực tiếp nữa.
 2. Bạn không cần phải liệt kê tất cả các mã chỉ để cập nhật danh mục native; chạy tệp PowerShell đã build và mọi thứ sẽ hoàn tất. Nó hoàn toàn đồng bộ với trang web.
@@ -66,21 +66,21 @@
 4. Để cập nhật danh mục, bạn cần có [PowerShell](https://apps.microsoft.com/detail/9mz1snwt0n5d) hoặc [PowerShell Preview](https://apps.microsoft.com/detail/9p95zzktnrn4) để thực thi.
 
 ### ScriptHookInput (Thuộc tính Input ở Script Hook V)
-- Ngôn ngữ mục tiêu: `F# 8`
+- Ngôn ngữ mục tiêu: `F# 10`
 - Mô tả:
 1. Dựa trên trang web của FiveM, bao gồm 2 loại đầu vào: đầu vào game (game input) và đầu vào thiết bị (device input).
 2. Đầu vào trong game như `INPUT_TALK`, `INPUT_CONTEXT`, v.v. là một phần của game, bạn chỉ cần vào cài đặt để thay đổi.
 3. Đầu vào thiết bị như tay cầm (controller), bàn phím và chuột.
 
 ### Script4Reload (Công cụ tải lại của Script4)
-- Ngôn ngữ mục tiêu: `F# 8`
+- Ngôn ngữ mục tiêu: `F# 10`
 - Mô tả:
 1. Vẫn giữ nguyên khả năng tải lại (reload) quen thuộc từ [Community Script Hook V .NET](https://github.com/scripthookvdotnet/scripthookvdotnet) và [Script Hook V .NET Enhanced](https://github.com/Chiheb-Bacha/ScriptHookVDotNetEnhanced). Tuy nhiên, có 2 chế độ: 1 là Thủ công (Manual) như trước đây, 2 là Đồng bộ hóa (Synchronized) — trong đó bạn không thể sử dụng phím tải lại thủ công mà quá trình này được thực hiện hoàn toàn tự động.
 2. Không còn hiện tượng treo game (game freeze), do việc tải lại giờ đây đã được chuyển sang kiểu bất đồng bộ (asynchronous).
 3. Không còn tình trạng vét cạn (brute-force) và tải lại toàn bộ cùng một lúc. Đối với các modder, việc giảm bớt khối lượng công việc tải lại sẽ giúp trò chơi hoạt động bền bỉ hơn thay vì bị văng ngẫu nhiên từ sớm.
 
 ### LocalNativeMemories (Bộ nhớ Pool & Trình giải quyết Native cấp thấp)
-- Ngôn ngữ mục tiêu: `C# 15 Preview`
+- Ngôn ngữ mục tiêu: `C# 15`
 - Mô tả: Trả lời cho những gì có trong game, chẳng hạn như số lượng object, entity, vehicle và ped, đồng thời là phương án dự phòng nếu native call không tồn tại.
 
 ### CEventGenerator (Trình xuất sự kiện mã máy)
@@ -88,15 +88,15 @@
 - Mô tả: Cơ chế đồng bộ hóa tickrate hoặc độ trễ (latency) dạng polling được thay thế hoàn toàn bằng cơ chế dựa trên sự kiện (event-based), vận hành thông qua mã máy, giúp loại bỏ chuyện gây nghẽn hiệu năng.
 
 ### LowLevelEvents (Trình giải quyết sự kiện cấp thấp)
-- Ngôn ngữ mục tiêu: `C# 15 Preview`
+- Ngôn ngữ mục tiêu: `C# 15`
 - Mô tả: Trích xuất và chuyển đổi các CEvent cấp thấp từ mã máy sang các chuẩn trung gian mà các dự án .NET Core sử dụng, đồng thời xác định rõ sự kiện đó thuộc về đâu.
 
 ### StandardGameOperations (Bảng mã chuẩn)
-- Ngôn ngữ mục tiêu: `C# 15 Preview`
+- Ngôn ngữ mục tiêu: `C# 15`
 - Mô tả: Cách dễ nhất để viết mã. Bằng cách sử dụng công cụ này, bạn sẽ bỏ qua được rất nhiều thao tác viết rườm rà như khai báo thủ công các native call, khai báo cục bộ cơ sở dữ liệu game, v.v., thậm chí cả các chuỗi thao tác native call phức tạp.
 
 ### LocalUserDebug (Trình log trong game)
-- Ngôn ngữ mục tiêu: `C# 15 Preview`
+- Ngôn ngữ mục tiêu: `C# 15`
 - Mô tả: Vẫn là log nội dung, nhưng ở trong game, thay vì phải đọc liên tục file bên ngoài liên tục.
 
 ## Yêu cầu
