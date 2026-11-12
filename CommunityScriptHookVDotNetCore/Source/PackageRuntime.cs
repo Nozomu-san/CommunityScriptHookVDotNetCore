@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Metadata;
@@ -27,6 +28,8 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     private readonly RuntimeLog _log;
     private readonly RuntimeDiagnosticHub _diagnostics;
     private readonly List<ScriptPackage> _packages = [];
+    private readonly ConcurrentDictionary<string, Assembly> _admittedPatternExecutables =
+        new(StringComparer.OrdinalIgnoreCase);
     private readonly List<RetiringPackage> _retiringPackages = [];
     private readonly Queue<LifecycleTransitionOperation> _pendingOperations = [];
     private readonly List<LifecycleTransitionOperation> _operations = [];
@@ -280,11 +283,14 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                     _log,
                     _diagnostics,
                     NextPackageGeneration(),
-                    SharedExecutableAssemblies(image.Descriptor.DependencyPackageNames))
+                    SharedExecutableAssemblies(image.Descriptor.DependencyPackageNames),
+                    [.. _initialStaged!.Packages.Values.Where(value =>
+                        value.Descriptor.Kind == ScriptPackageKind.Library)],
+                    _admittedPatternExecutables)
                 : null;
             if (package is not null)
             {
-                _packages.Add(package);
+                AddPreparedPackage(package);
             }
             return;
         }
@@ -333,6 +339,21 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             ScriptPackage? package = FindActivePackage(name);
             if (package is null)
             {
+                continue;
+            }
+
+            string? admissionFailure = ValidateLifecycleAdmission(package);
+            if (admissionFailure is not null)
+            {
+                BeginPackageRetirement(
+                    package,
+                    ScriptStopReason.DependencyUnavailable,
+                    admissionFailure);
+                _log.Error(
+                    admissionFailure,
+                    source: name,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary: $"Package '{name}' was rejected before initial lifecycle activation.");
                 continue;
             }
 
@@ -389,10 +410,62 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     internal void SetUnavailableRuntimeAssemblies(IEnumerable<string> assemblyNames)
     {
         EnsureRuntimeThread();
-        foreach (string name in assemblyNames.Where(value => !string.IsNullOrWhiteSpace(value)))
+        string[] unavailable = [.. assemblyNames
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+        _unavailableRuntimeAssemblies.Clear();
+        _unavailableRuntimeAssemblies.UnionWith(unavailable);
+    }
+
+    private string? ValidateLifecycleAdmission(ScriptPackage package)
+    {
+        PackageDescriptor? descriptor = _catalog.FirstOrDefault(value =>
+            value.Name.Equals(package.Name, StringComparison.OrdinalIgnoreCase));
+        if (descriptor is null)
         {
-            _unavailableRuntimeAssemblies.Add(name.Trim());
+            return $"Package '{package.Name}' is absent from the committed catalog.";
         }
+        if (_unavailableRuntimeAssemblies.Contains(package.Name) ||
+            descriptor.ReferencedAssemblyNames.Any(
+                _unavailableRuntimeAssemblies.Contains))
+        {
+            return $"Package '{package.Name}' references an unavailable runtime assembly.";
+        }
+        foreach (string requiredName in descriptor.DependencyPackageNames)
+        {
+            PackageDescriptor? required = _catalog.FirstOrDefault(value =>
+                value.Name.Equals(requiredName, StringComparison.OrdinalIgnoreCase));
+            if (required is null)
+            {
+                return $"Package '{package.Name}' requires missing assembly '{requiredName}'.";
+            }
+            if (required.Kind == ScriptPackageKind.Executable &&
+                FindActivePackage(requiredName)?.EntryAssembly is null)
+            {
+                return $"Package '{package.Name}' requires unavailable executable assembly '{requiredName}'.";
+            }
+        }
+        try
+        {
+            foreach (ScriptClassDependency dependency in package.ClassDependencies)
+            {
+                if (_quarantinedClassTypes.Contains(dependency.RequiredType))
+                {
+                    package.QuarantineClass(dependency.ConsumerType);
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is TypeLoadException or
+                BadImageFormatException or
+                System.Reflection.CustomAttributeFormatException or
+                InvalidOperationException)
+        {
+            return $"Package '{package.Name}' has invalid lifecycle dependencies: " +
+                exception.Message;
+        }
+        return null;
     }
 
     internal void QuarantineAssemblyReferences(IEnumerable<string> assemblyNames)
@@ -485,7 +558,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         for (int index = _packages.Count - 1; index >= 0; --index)
         {
             ScriptPackage package = _packages[index];
-            package.Tick(context);
+            package.Tick(context, PropagateClassFaults);
             PropagateClassFaults();
         }
     }
@@ -617,6 +690,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         foreach (ScriptPackage package in affected)
         {
             _packages.Remove(package);
+            _admittedPatternExecutables.TryRemove(package.Name, out _);
         }
         foreach (ScriptPackage package in affected)
         {
@@ -639,6 +713,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         }
         if (_packages.Remove(package))
         {
+            _admittedPatternExecutables.TryRemove(package.Name, out _);
             package.BeginStopInstances(reason);
             _retiringPackages.Add(new(package, reason, diagnostic));
             _log.Information(
@@ -658,6 +733,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         }
 
         _packages.Remove(package);
+        _admittedPatternExecutables.TryRemove(package.Name, out _);
         package.BeginStopInstances(reason);
         _retiringPackages.Add(new(package, reason, diagnostic));
         _log.Information(
@@ -722,6 +798,12 @@ internal enum PackageLifecycleProgress
     Failed
 }
 
+internal readonly record struct ScriptLibraryBindingRecord(
+    string ClassName,
+    string LibraryName,
+    ulong PackageGeneration,
+    ulong LifecycleEpoch);
+
 internal sealed class ScriptPackage
 {
     private readonly PackageDescriptor _descriptor;
@@ -735,6 +817,9 @@ internal sealed class ScriptPackage
     private readonly HashSet<string> _disabledClasses = [with(StringComparer.Ordinal)];
     private readonly HashSet<string> _reportedFaults = [with(StringComparer.Ordinal)];
     private readonly List<string> _constructionFaults = [];
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<
+        (string ClassName, string LibraryName), ScriptLibraryBindingRecord>
+        _activeLibraryBindings = new();
     private Queue<Type>? _pendingStartTypes;
     private ScriptInstance? _startingScript;
     private ScriptStartReason _startReason;
@@ -773,6 +858,16 @@ internal sealed class ScriptPackage
 
     internal IReadOnlyList<string> ScriptTypeIdentities =>
         [.. _scriptTypes.Select(ScriptClassDependency.Identity)];
+
+    internal IReadOnlyList<string> DeclaredLibraryNames =>
+        [.. _scriptTypes.SelectMany(type =>
+                type.GetCustomAttributes<ScriptLibraryPatternAttribute>(inherit: true))
+            .Select(value => value.AssemblyName)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)];
+
+    internal IReadOnlyList<ScriptLibraryBindingRecord> ActiveLibraryBindings =>
+        [.. _activeLibraryBindings.Values];
 
     internal IReadOnlyList<ScriptClassDependency> ClassDependencies =>
         [.. _scriptTypes.SelectMany(type =>
@@ -832,7 +927,9 @@ internal sealed class ScriptPackage
         RuntimeLog log,
         RuntimeDiagnosticHub diagnostics,
         ulong generationId,
-        IReadOnlyDictionary<string, Assembly> sharedExecutables)
+        IReadOnlyDictionary<string, Assembly> sharedExecutables,
+        IReadOnlyList<StagedPackageImage> optionalLibraries,
+        IReadOnlyDictionary<string, Assembly> patternExecutables)
     {
         PackageDescriptor descriptor = staged.Descriptor;
         if (descriptor.EntryAssembly is null)
@@ -843,7 +940,8 @@ internal sealed class ScriptPackage
         StagedScriptPackageLoadContext? context = null;
         try
         {
-            context = new(staged, dependencies, sharedExecutables);
+            context = new(staged, dependencies, sharedExecutables, optionalLibraries,
+                patternExecutables);
             Assembly assembly = context.LoadEntryAssembly();
             return Prepare(
                 descriptor,
@@ -955,8 +1053,96 @@ internal sealed class ScriptPackage
         _startReason = reason;
         _startEpoch = lifecycleEpoch;
         _reportedFaults.Clear();
+        _activeLibraryBindings.Clear();
         _pendingStartTypes = new(_scriptTypes.Where(type =>
             !_disabledClasses.Contains(ScriptClassDependency.Identity(type))));
+    }
+
+    private async Task ApplyLibraryPatternsAsync(
+        Script4 script,
+        CancellationToken cancellationToken)
+    {
+        Type scriptType = script.GetType();
+        ulong bindingEpoch = _startEpoch;
+        ScriptLibraryPatternAttribute[] declarations = [..
+            scriptType.GetCustomAttributes<ScriptLibraryPatternAttribute>(inherit: true)];
+        foreach (IGrouping<string, ScriptLibraryPatternAttribute> group in declarations
+            .GroupBy(value => value.AssemblyName, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(value => value.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string libraryName = group.Key;
+            bool required = group.Any(value => value.Required);
+            if (string.IsNullOrWhiteSpace(libraryName) ||
+                libraryName.Contains('/') || libraryName.Contains('\\'))
+            {
+                throw new BadImageFormatException(
+                    $"Script4 class '{scriptType.FullName}' declares an invalid library name.");
+            }
+
+            Assembly? library = (_loadContext as StagedScriptPackageLoadContext)?
+                .TryLoadOptionalLibrary(libraryName);
+            if (library is null)
+            {
+                if (required)
+                {
+                    throw new FileNotFoundException(
+                        $"Script4 class '{scriptType.FullName}' requires library '{libraryName}'.");
+                }
+                continue;
+            }
+
+            Type[] providers = [.. GetLoadableTypes(library)
+                .Where(type => !type.IsAbstract && !type.ContainsGenericParameters &&
+                    typeof(IScriptLibraryPattern).IsAssignableFrom(type))];
+            if (providers.Length != 1)
+            {
+                if (required)
+                {
+                    throw new InvalidDataException(
+                        $"Required library '{libraryName}' must supply exactly one " +
+                        $"concrete {nameof(IScriptLibraryPattern)} provider.");
+                }
+                continue;
+            }
+
+            if (Activator.CreateInstance(providers[0], nonPublic: true)
+                is not IScriptLibraryPattern provider)
+            {
+                if (required)
+                {
+                    throw new InvalidOperationException(
+                        $"Required library '{libraryName}' cannot be instantiated.");
+                }
+                continue;
+            }
+
+            bool applied = await provider.TryApplyAsync(script, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_startEpoch != bindingEpoch ||
+                (_loadContext as StagedScriptPackageLoadContext)?
+                    .IsCurrentLibrary(libraryName, library) != true)
+            {
+                throw new OperationCanceledException();
+            }
+            if (!applied)
+            {
+                if (required)
+                {
+                    throw new InvalidOperationException(
+                        $"Required library '{libraryName}' rejected class '{scriptType.FullName}'.");
+                }
+                continue;
+            }
+
+            string className = ScriptClassDependency.Identity(scriptType);
+            _activeLibraryBindings[(className, libraryName)] = new(
+                className, libraryName, GenerationId, bindingEpoch);
+            _log.Information(
+                $"Script4 class '{scriptType.FullName}' bound to admitted " +
+                $"library '{libraryName}' at lifecycle epoch {bindingEpoch}.");
+        }
     }
 
     public PackageLifecycleProgress AdvanceStartInstances()
@@ -1017,7 +1203,8 @@ internal sealed class ScriptPackage
                     _services,
                     _diagnostics.CreateReader(),
                     _log,
-                    _startEpoch);
+                    _startEpoch,
+                    ApplyLibraryPatternsAsync);
                 instance.BeginStart(_startReason);
                 _startingScript = instance;
                 return PackageLifecycleProgress.Pending;
@@ -1107,19 +1294,18 @@ internal sealed class ScriptPackage
         return PackageLifecycleProgress.Succeeded;
     }
 
-    public void Tick(ScriptTickContext context)
+    public void Tick(ScriptTickContext context, Action onFault)
     {
+        ArgumentNullException.ThrowIfNull(onFault);
         ObserveCompletedScriptRetirements();
         ScriptInstance[] frame = [.. _scripts];
         foreach (ScriptInstance script in frame)
         {
             script.Tick(context);
-        }
-        foreach (ScriptInstance script in frame)
-        {
             if (script.Faulted && _reportedFaults.Add(script.TypeIdentity))
             {
                 _constructionFaults.Add(script.TypeIdentity);
+                onFault();
             }
         }
         ObserveCompletedScriptRetirements();
@@ -1257,9 +1443,12 @@ internal sealed class ScriptInstance(
     IScriptServices services,
     IRuntimeDiagnosticReader diagnostics,
     RuntimeLog log,
-    ulong lifecycleEpoch)
+    ulong lifecycleEpoch,
+    Func<Script4, CancellationToken, Task> applyLibraryPatterns)
 {
-    private static readonly TimeSpan StartupDeadline = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan StartupDeadline = Timeout.InfiniteTimeSpan;
+    private static readonly long ReadyNoticeTicks = Stopwatch.Frequency;
+    private static readonly long ReadyTimeoutTicks = 2L * Stopwatch.Frequency;
     private readonly CancellationTokenSource _lifetime = new();
     private ManagedLifecycleOperation? _startup;
     private ManagedRetirementOperation? _shutdown;
@@ -1271,6 +1460,9 @@ internal sealed class ScriptInstance(
     private bool _stopCompleted;
     private bool _faulted;
     private bool _slowTickWarningActive;
+    private bool _awaitingReady;
+    private bool _readyNoticeLogged;
+    private long _readyStartedAt;
 
     public bool IsActive => _started && !_stopped && !_faulted;
 
@@ -1292,22 +1484,31 @@ internal sealed class ScriptInstance(
 
         _startReason = reason;
         _startup = ManagedLifecycleOperation.Start(
-            token => script.StartAsync(new(
-                packageName,
-                services,
-                reason,
-                lifecycleEpoch,
-                _lifetime.Token,
-                token)
+            async token =>
             {
-                Diagnostics = diagnostics
-            }),
+                await applyLibraryPatterns(script, token).ConfigureAwait(false);
+                await script.StartAsync(new(
+                    packageName,
+                    services,
+                    reason,
+                    lifecycleEpoch,
+                    _lifetime.Token,
+                    token)
+                {
+                    Diagnostics = diagnostics
+                }).ConfigureAwait(false);
+            },
             StartupDeadline,
             _lifetime.Token);
     }
 
     public PackageLifecycleProgress AdvanceStart()
     {
+        if (_awaitingReady)
+        {
+            return AdvanceReadiness();
+        }
+
         ManagedLifecycleOperation operation = _startup
             ?? throw new InvalidOperationException(
                 $"Script executable '{script.GetType().FullName}' has no startup operation.");
@@ -1327,11 +1528,9 @@ internal sealed class ScriptInstance(
         {
             case ManagedLifecycleOperationStatus.Succeeded:
                 _lifecycleAuthority = authority;
-                _started = true;
-                log.Information(
-                    $"Script executable '{script.GetType().FullName}' started in " +
-                    $"lifecycle epoch {lifecycleEpoch}; reason={_startReason}.");
-                return PackageLifecycleProgress.Succeeded;
+                _readyStartedAt = Stopwatch.GetTimestamp();
+                _awaitingReady = true;
+                return AdvanceReadiness();
 
             case ManagedLifecycleOperationStatus.TimedOut:
                 _faulted = true;
@@ -1386,6 +1585,71 @@ internal sealed class ScriptInstance(
                 throw new InvalidOperationException(
                     "The Script4 startup operation reached an invalid state.");
         }
+    }
+
+    private PackageLifecycleProgress AdvanceReadiness()
+    {
+        if (_stopped || _faulted)
+        {
+            _awaitingReady = false;
+            return PackageLifecycleProgress.Failed;
+        }
+
+        long elapsed = Math.Max(0, Stopwatch.GetTimestamp() - _readyStartedAt);
+        if (elapsed >= ReadyTimeoutTicks)
+        {
+            log.Error(
+                $"Script executable '{script.GetType().FullName}' did not signal " +
+                "readiness within 2 seconds after its startup completed.",
+                source: packageName,
+                origin: script.GetType().FullName,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary: "Script post-start readiness timed out.");
+            _awaitingReady = false;
+            _faulted = true;
+            BeginRetirement(ScriptStopReason.PackageFault, null);
+            return PackageLifecycleProgress.Failed;
+        }
+
+
+        try
+        {
+            ManagedLifecycleAuthority authority = _lifecycleAuthority
+                ?? throw new InvalidOperationException("Script readiness authority is unavailable.");
+            using IDisposable scope = ManagedLifecycleAuthorityContext.Enter(authority);
+            if (script is not IScript4ReadinessProbe probe || probe.IsReady)
+            {
+                _awaitingReady = false;
+                _started = true;
+                log.Information(
+                    $"Script executable '{script.GetType().FullName}' is ready in " +
+                    $"lifecycle epoch {lifecycleEpoch}; reason={_startReason}.");
+                return PackageLifecycleProgress.Succeeded;
+            }
+        }
+        catch (Exception exception)
+        {
+            log.Error(
+                $"Script executable '{script.GetType().FullName}' readiness failed: {exception}",
+                source: packageName,
+                origin: script.GetType().FullName,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary: "Script readiness check faulted.");
+            _awaitingReady = false;
+            _faulted = true;
+            BeginRetirement(ScriptStopReason.PackageFault, null);
+            return PackageLifecycleProgress.Failed;
+        }
+
+        if (elapsed >= ReadyNoticeTicks && !_readyNoticeLogged)
+        {
+            _readyNoticeLogged = true;
+            log.Warning(
+                $"Script executable '{script.GetType().FullName}' is still " +
+                "awaiting its post-start readiness signal.",
+                source: packageName);
+        }
+        return PackageLifecycleProgress.Pending;
     }
 
     public void Tick(ScriptTickContext context)
@@ -1603,18 +1867,26 @@ internal sealed class StagedScriptPackageLoadContext :
     private readonly PackageAssemblyImage _entry;
     private readonly string _entryPath;
     private readonly IReadOnlyDictionary<string, Assembly> _sharedExecutables;
+    private readonly IReadOnlyDictionary<string, Assembly> _patternExecutables;
+    private readonly HashSet<string> _optionalLibraryNames =
+        [with(StringComparer.OrdinalIgnoreCase)];
+    private readonly string _entryAssemblyName;
 
     public StagedScriptPackageLoadContext(
         StagedPackageImage package,
         IReadOnlyList<StagedPackageImage> dependencies,
-        IReadOnlyDictionary<string, Assembly> sharedExecutables) :
+        IReadOnlyDictionary<string, Assembly> sharedExecutables,
+        IReadOnlyList<StagedPackageImage> optionalLibraries,
+        IReadOnlyDictionary<string, Assembly> patternExecutables) :
         base($"Script4:{package.Descriptor.Name}")
     {
         string entryPath = package.Descriptor.EntryAssembly
             ?? throw new InvalidOperationException(
                 "A staged executable package has no entry assembly.");
         _entryPath = entryPath;
+        _entryAssemblyName = package.Descriptor.Name;
         _sharedExecutables = sharedExecutables;
+        _patternExecutables = patternExecutables;
 
         PackageAssemblyImage? entry = null;
         AddImages(package, allowExisting: false, ref entry, entryPath);
@@ -1632,12 +1904,56 @@ internal sealed class StagedScriptPackageLoadContext :
             }
         }
 
+        foreach (StagedPackageImage candidate in optionalLibraries)
+        {
+            if (candidate.Descriptor.Kind != ScriptPackageKind.Library)
+            {
+                continue;
+            }
+            _optionalLibraryNames.Add(candidate.Descriptor.Name);
+            AddImages(candidate, allowExisting: true, ref entry, entryPath);
+        }
+
         _entry = entry
             ?? throw new BadImageFormatException(
                 "The staged entry assembly image is missing.");
     }
 
     public Assembly LoadEntryAssembly() => LoadImage(this, _entry);
+
+    public Assembly? TryLoadOptionalLibrary(string simpleName)
+    {
+        if (simpleName.Equals(_entryAssemblyName,
+            StringComparison.OrdinalIgnoreCase))
+        {
+            return Assemblies.FirstOrDefault(value =>
+                value.GetName().Name?.Equals(simpleName,
+                    StringComparison.OrdinalIgnoreCase) == true);
+        }
+        if (_patternExecutables.TryGetValue(simpleName, out Assembly? executable))
+        {
+            return executable;
+        }
+        if (!_optionalLibraryNames.Contains(simpleName) ||
+            !_images.TryGetValue(simpleName, out PackageAssemblyImage? image))
+        {
+            return null;
+        }
+
+        return Assemblies.FirstOrDefault(value =>
+                value.GetName().Name?.Equals(simpleName,
+                    StringComparison.OrdinalIgnoreCase) == true)
+            ?? LoadImage(this, image);
+    }
+
+    public bool IsCurrentLibrary(string simpleName, Assembly assembly)
+    {
+        if (_patternExecutables.TryGetValue(simpleName, out Assembly? executable))
+        {
+            return ReferenceEquals(executable, assembly);
+        }
+        return Assemblies.Any(value => ReferenceEquals(value, assembly));
+    }
 
     protected override Assembly? Load(AssemblyName assemblyName)
     {

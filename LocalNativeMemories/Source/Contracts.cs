@@ -51,6 +51,12 @@ public readonly record struct LocalPoolStatistics(
     public static LocalPoolStatistics Empty { get; } = new(0, 0);
 }
 
+public sealed record LocalPoolCountsSnapshot(
+    ulong HostFrameIndex,
+    LocalPoolStatistics Peds,
+    LocalPoolStatistics Vehicles,
+    LocalPoolStatistics Objects);
+
 public readonly record struct LocalPoolSnapshot(
     ulong Revision,
     LocalPoolStatistics Statistics,
@@ -59,6 +65,8 @@ public readonly record struct LocalPoolSnapshot(
     public int Capacity => Statistics.Capacity;
     public int ActiveCount => Statistics.ActiveCount;
     public int Count => Handles.Length;
+    public int UnresolvedCount => Math.Max(0, ActiveCount - Count);
+    public bool IsFullyResolved => Count == ActiveCount;
 
     public static LocalPoolSnapshot Empty { get; } =
         new(0, LocalPoolStatistics.Empty, ReadOnlyMemory<int>.Empty);
@@ -74,6 +82,9 @@ public readonly record struct EntityPoolsSnapshot(
 
     public int ResolvedEntityCount =>
         Peds.Count + Vehicles.Count + Objects.Count;
+
+    public int UnresolvedEntityCount =>
+        Peds.UnresolvedCount + Vehicles.UnresolvedCount + Objects.UnresolvedCount;
 }
 
 public readonly record struct PedLocalInvincibilityState(
@@ -98,6 +109,7 @@ public interface ILocalMemory
     LocalDataResult<byte> ReadByte(nint address);
     LocalDataResult<ushort> ReadUInt16(nint address);
     LocalDataResult<uint> ReadUInt32(nint address);
+    LocalDataStatus WriteUInt32(nint address, uint value);
     LocalDataResult<ulong> ReadUInt64(nint address);
     LocalDataResult<int> ReadInt32(nint address);
     LocalDataResult<nint> ReadPointer(nint address);
@@ -112,6 +124,8 @@ public interface ILocalMemory
 public interface ILocalEntityPools
 {
     LocalDataResult<LocalPoolStatistics> GetStatistics(LocalPoolKinds kind);
+
+    LocalDataResult<LocalPoolCountsSnapshot> GetCountSnapshot();
 
     LocalDataResult<EntityPoolsSnapshot> Capture(LocalPoolKinds kinds);
 }
@@ -145,6 +159,7 @@ public interface IPedLocalMemory
 {
     LocalDataResult<PedLocalInvincibilityState> ReadInvincibility(
         int pedHandle);
+    LocalDataStatus SetReactionInvincibility(int pedHandle, bool value);
 }
 
 public interface IVehicleLocalMemory

@@ -20,7 +20,8 @@ internal sealed record RuntimeExtensionReloadPlan(
     RootAssemblySnapshot Snapshot,
     IReadOnlyList<RuntimeExtensionDescriptor> NextDescriptors,
     IReadOnlyList<RuntimeExtensionDescriptor> PreviousDescriptors,
-    IReadOnlyList<string> TargetIds);
+    IReadOnlyList<string> TargetIds,
+    IReadOnlyList<string> BinaryTargetIds);
 
 internal readonly record struct RuntimeExtensionReloadSnapshot(
     RuntimeExtensionReloadState State,
@@ -35,6 +36,7 @@ internal readonly record struct RuntimeExtensionReloadSnapshot(
 internal interface IRuntimeExtensionReloadController
 {
     RuntimeExtensionReloadPlan CaptureReloadPlan();
+    RuntimeExtensionReloadPlan CaptureRestartPlan();
     void BeginReload(RuntimeExtensionReloadPlan plan);
     void AdvanceReload();
     RuntimeExtensionReloadSnapshot ReloadSnapshot { get; }
@@ -50,7 +52,9 @@ internal sealed class RuntimeExtensionManager(
     RuntimeDiagnosticHub diagnostics) : IDisposable, IRuntimeExtensionReloadController
 {
     private static readonly TimeSpan RootInitializationTimeout =
-        TimeSpan.FromSeconds(5);
+        Timeout.InfiniteTimeSpan;
+    private static readonly long ReadyNoticeTicks = Stopwatch.Frequency;
+    private static readonly long ReadyTimeoutTicks = 2L * Stopwatch.Frequency;
     private static readonly int MaximumConcurrentInitializations =
         Math.Clamp(Environment.ProcessorCount, 2, 8);
     private static readonly Assembly ContractAssembly =
@@ -85,6 +89,9 @@ internal sealed class RuntimeExtensionManager(
     private readonly HashSet<string> _unavailableAssemblies =
         [with(StringComparer.OrdinalIgnoreCase)];
     private readonly Queue<string> _newlyUnavailableAssemblies = [];
+    private readonly HashSet<string> _admittedExtensionIds =
+        [with(StringComparer.OrdinalIgnoreCase)];
+    private long _nextPendingAdmissionNoticeAt;
     private RootAssemblyResolver? _resolver;
     private RootAssemblySnapshot? _committedSnapshot;
     private IReadOnlyList<RuntimeExtensionDescriptor> _committedDescriptors = [];
@@ -153,13 +160,42 @@ internal sealed class RuntimeExtensionManager(
         RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
             extensionsDirectory,
             ContractAssemblyName,
-            log);
+            log,
+            _committedSnapshot);
         IReadOnlyList<RuntimeExtensionDescriptor> discovered =
             RuntimeExtensionDiscovery.Discover(snapshot, log);
         IReadOnlyList<RuntimeExtensionDescriptor> previous = _committedDescriptors;
-        IReadOnlyList<string> targets = ComputeReloadTargets(
+        IReadOnlyList<string> binaryTargets = ComputeReloadTargets(
             _committedSnapshot, snapshot, previous, discovered);
-        return new(snapshot, discovered, previous, targets);
+        HashSet<string> targets = [with(binaryTargets, StringComparer.OrdinalIgnoreCase)];
+        targets.UnionWith(_active.Select(active => active.Descriptor.Id));
+        return new(
+            snapshot,
+            discovered,
+            previous,
+            [.. targets.OrderBy(id => id, StringComparer.OrdinalIgnoreCase)],
+            binaryTargets);
+    }
+
+    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureRestartPlan()
+    {
+        EnsureRuntimeThread();
+        if (!_initializationCompleted || _committedSnapshot is null ||
+            _reloadState is RuntimeExtensionReloadState.Retiring or
+                RuntimeExtensionReloadState.Initializing ||
+            _initializing.Count != 0 || _pendingInitialization.Count != 0)
+        {
+            throw new InvalidOperationException(
+                "Runtime extensions cannot restart while another lifecycle operation is active.");
+        }
+        return new(
+            _committedSnapshot,
+            _committedDescriptors,
+            _committedDescriptors,
+            [.. _active.Select(active => active.Descriptor.Id)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)],
+            []);
     }
 
     private IReadOnlyList<string> ComputeReloadTargets(
@@ -171,8 +207,8 @@ internal sealed class RuntimeExtensionManager(
         HashSet<string> changedImages = [with(StringComparer.OrdinalIgnoreCase)];
         HashSet<string> names = [with(StringComparer.OrdinalIgnoreCase)];
         if (oldSnapshot is not null)
-            names.UnionWith(oldSnapshot.Images.Select(image => image.AssemblyName));
-        names.UnionWith(nextSnapshot.Images.Select(image => image.AssemblyName));
+            names.UnionWith(oldSnapshot.Images.Select(static image => image.AssemblyName));
+        names.UnionWith(nextSnapshot.Images.Select(static image => image.AssemblyName));
         foreach (string name in names)
         {
             if (oldSnapshot is null ||
@@ -362,10 +398,13 @@ internal sealed class RuntimeExtensionManager(
                 plan.Snapshot,
                 plan.NextDescriptors,
                 reviveOwners: true,
-                targetIds: new HashSet<string>(
+                targetIds: [with(
                     plan.TargetIds,
-                    StringComparer.OrdinalIgnoreCase),
-                previousDescriptors: plan.PreviousDescriptors);
+                    StringComparer.OrdinalIgnoreCase)],
+                previousDescriptors: plan.PreviousDescriptors,
+                binaryTargetIds: [with(
+                    plan.BinaryTargetIds,
+                    StringComparer.OrdinalIgnoreCase)]);
             _reloadState = RuntimeExtensionReloadState.Initializing;
         }
 
@@ -383,9 +422,22 @@ internal sealed class RuntimeExtensionManager(
         }
         if (_pendingInitialization.Count != 0)
         {
+            if (_active.Any(active =>
+                    !active.Unavailable &&
+                    !_admittedExtensionIds.Contains(active.Descriptor.Id)))
+            {
+                return;
+            }
             QuarantineUnsatisfiedPending();
         }
         if (_pendingInitialization.Count != 0)
+        {
+            return;
+        }
+
+        if (_active.Any(active =>
+                !active.Unavailable &&
+                !_admittedExtensionIds.Contains(active.Descriptor.Id)))
         {
             return;
         }
@@ -395,26 +447,15 @@ internal sealed class RuntimeExtensionManager(
             $"Runtime-extension reload completed with {_active.Count} active extension(s). ");
     }
 
-    private static bool SameImages(
-        RootAssemblySnapshot left,
-        RootAssemblySnapshot right)
+    private void RecordBlockedSources(RootAssemblySnapshot snapshot)
     {
-        if (left.Images.Count != right.Images.Count)
+        foreach (string name in snapshot.BlockedAssemblyNames)
         {
-            return false;
-        }
-        foreach (RootAssemblyImage before in left.Images)
-        {
-            if (!right.TryGet(before.AssemblyName, out RootAssemblyImage? after) ||
-                !before.Assembly.AsSpan().SequenceEqual(after.Assembly) ||
-                (before.Symbols is null) != (after.Symbols is null) ||
-                (before.Symbols is not null &&
-                 !before.Symbols.AsSpan().SequenceEqual(after.Symbols!)))
+            if (_unavailableAssemblies.Add(name))
             {
-                return false;
+                _newlyUnavailableAssemblies.Enqueue(name);
             }
         }
-        return true;
     }
 
     private void PrepareGeneration(
@@ -422,7 +463,8 @@ internal sealed class RuntimeExtensionManager(
         IReadOnlyList<RuntimeExtensionDescriptor> discovered,
         bool reviveOwners,
         HashSet<string>? targetIds = null,
-        IReadOnlyList<RuntimeExtensionDescriptor>? previousDescriptors = null)
+        IReadOnlyList<RuntimeExtensionDescriptor>? previousDescriptors = null,
+        HashSet<string>? binaryTargetIds = null)
     {
         if (reviveOwners)
         {
@@ -437,7 +479,8 @@ internal sealed class RuntimeExtensionManager(
             foreach (RuntimeExtensionDescriptor descriptor in
                 (previousDescriptors ?? []).Concat(discovered))
             {
-                if (targetIds is not null && targetIds.Contains(descriptor.Id))
+                if (binaryTargetIds is not null &&
+                    binaryTargetIds.Contains(descriptor.Id))
                     roots.Add(descriptor.AssemblyName);
             }
             _resolver!.ReplaceSnapshot(snapshot, discovered, roots);
@@ -448,6 +491,7 @@ internal sealed class RuntimeExtensionManager(
         }
         _committedSnapshot = snapshot;
         _committedDescriptors = Array.AsReadOnly([.. discovered]);
+        RecordBlockedSources(snapshot);
 
         Dictionary<string, string> declaredProviders = [with(
             StringComparer.OrdinalIgnoreCase)];
@@ -533,6 +577,12 @@ internal sealed class RuntimeExtensionManager(
 
         if (_pendingInitialization.Count != 0)
         {
+            if (_active.Any(active =>
+                    !active.Unavailable &&
+                    !_admittedExtensionIds.Contains(active.Descriptor.Id)))
+            {
+                return;
+            }
             QuarantineUnsatisfiedPending();
         }
 
@@ -568,11 +618,9 @@ internal sealed class RuntimeExtensionManager(
                     _active.Add(new(
                         pending.Descriptor,
                         pending.Instance,
-                        authority));
-                    foreach (string capability in pending.Descriptor.Provides)
-                    {
-                        _availableCapabilities.Add(capability);
-                    }
+                        authority,
+                        Stopwatch.GetTimestamp()));
+                    _admittedExtensionIds.Remove(pending.Descriptor.Id);
                     log.Information(
                         $"Runtime extension '{pending.Descriptor.Id}' initialized " +
                         "for its one root lifecycle in this GTA process.");
@@ -649,6 +697,12 @@ internal sealed class RuntimeExtensionManager(
                 _pendingInitialization[readyIndex];
             _pendingInitialization.RemoveAt(readyIndex);
 
+            if (!CanActivateFromCommittedSnapshot(descriptor))
+            {
+                MarkUnavailable(descriptor);
+                continue;
+            }
+
             PendingRuntimeExtension? pending = TryBeginInitialize(descriptor);
             if (pending is null)
             {
@@ -657,6 +711,73 @@ internal sealed class RuntimeExtensionManager(
             }
             _initializing.Add(pending);
         }
+    }
+
+    private bool CanActivateFromCommittedSnapshot(
+        RuntimeExtensionDescriptor descriptor)
+    {
+        if (_unavailableAssemblies.Contains(descriptor.AssemblyName) ||
+            _committedSnapshot is null ||
+            !_committedSnapshot.TryGet(descriptor.AssemblyName, out _))
+        {
+            return false;
+        }
+
+        try
+        {
+            Queue<string> pending = new([descriptor.AssemblyName]);
+            HashSet<string> visited = [with(StringComparer.OrdinalIgnoreCase)];
+            while (pending.TryDequeue(out string? name))
+            {
+                if (!visited.Add(name))
+                {
+                    continue;
+                }
+                if (_unavailableAssemblies.Contains(name) ||
+                    _committedSnapshot.BlockedAssemblyNames.Contains(
+                        name, StringComparer.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                if (!_committedSnapshot.TryGet(name, out RootAssemblyImage? image))
+                {
+                    if (name.Equals(ContractAssemblyName,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        RuntimePlatformAssemblyPolicy.IsPlatformAssembly(name) ||
+                        name.Equals("FSharp.Core", StringComparison.OrdinalIgnoreCase) &&
+                        RuntimeDependencyResolver.TryResolve(new AssemblyName(name)) is not null)
+                    {
+                        continue;
+                    }
+                    log.Error(
+                        $"Runtime extension '{descriptor.Id}' requires unadmitted " +
+                        $"assembly '{name}'.",
+                        source: descriptor.Id,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: "Required assembly is absent from the committed RAM image and is not a platform dependency.");
+                    return false;
+                }
+                foreach (string reference in ReadReferencedAssemblyNames(image))
+                {
+                    pending.Enqueue(reference);
+                }
+            }
+        }
+        catch (Exception exception) when (
+            exception is BadImageFormatException or
+                InvalidOperationException or
+                ArgumentException)
+        {
+            log.Error(
+                $"Runtime extension '{descriptor.Id}' failed final assembly " +
+                $"admission: {exception}",
+                source: descriptor.Id,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary:
+                    $"Runtime extension '{descriptor.Id}' was not activated because its assembly references could not be validated.");
+            return false;
+        }
+        return descriptor.Requires.All(_availableCapabilities.Contains);
     }
 
     private PendingRuntimeExtension? TryBeginInitialize(
@@ -704,8 +825,8 @@ internal sealed class RuntimeExtensionManager(
                 RootInitializationTimeout);
 
             log.Information(
-                $"Runtime extension '{descriptor.Id}' initialization started with " +
-                $"its own {RootInitializationTimeout.TotalSeconds:0.###} second deadline.");
+                $"Runtime extension '{descriptor.Id}' initialization started; " +
+                "its readiness clock will start after initialization completes.");
 
             return new(descriptor, instance, operation);
         }
@@ -778,6 +899,21 @@ internal sealed class RuntimeExtensionManager(
                         StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
+                }
+
+                if (snapshot.BlockedAssemblyNames.Contains(
+                        reference, StringComparer.OrdinalIgnoreCase))
+                {
+                    rejected.Add(consumer.Id);
+                    log.Error(
+                        $"Runtime extension '{consumer.Id}' depends on the " +
+                        $"security-blocked assembly '{reference}'.",
+                        source: consumer.Id,
+                        origin: consumer.EntryType,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary:
+                            $"Runtime extension '{consumer.Id}' was not activated because a required assembly was blocked.");
+                    break;
                 }
 
                 if (rootsByAssembly.TryGetValue(
@@ -866,6 +1002,94 @@ internal sealed class RuntimeExtensionManager(
             StringComparer.OrdinalIgnoreCase)];
     }
 
+    internal bool AdvanceAdmissionFrame(RuntimeExtensionFrameContext context)
+    {
+        ObserveRetirements();
+        bool ready = true;
+        long now = Stopwatch.GetTimestamp();
+        ActiveRuntimeExtension[] frame = [.. _active];
+        foreach (ActiveRuntimeExtension active in frame)
+        {
+            if (active.Unavailable ||
+                _admittedExtensionIds.Contains(active.Descriptor.Id))
+            {
+                continue;
+            }
+
+            long waiting = Math.Max(0, now - active.ReadyStartedAt);
+            if (waiting >= ReadyTimeoutTicks)
+            {
+                log.Error(
+                    $"Runtime extension '{active.Descriptor.Id}' did not signal " +
+                    "readiness within 2 seconds after initialization completed.",
+                    source: active.Descriptor.Id,
+                    origin: active.Descriptor.EntryType,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary: $"Runtime extension '{active.Descriptor.Id}' timed out waiting for readiness.");
+                Quarantine(active.Descriptor.Id, "extension readiness timeout");
+                ready = false;
+                continue;
+            }
+
+            bool signaled;
+            try
+            {
+                using IDisposable scope =
+                    ManagedLifecycleAuthorityContext.Enter(active.Authority);
+                signaled = active.Instance is not IRuntimeExtensionAdmissionProbe probe ||
+                    probe.AdvanceAdmissionFrame(context);
+            }
+            catch (Exception exception)
+            {
+                log.Error(
+                    $"Runtime extension '{active.Descriptor.Id}' failed readiness: {exception}",
+                    source: active.Descriptor.Id,
+                    origin: active.Descriptor.EntryType,
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary: $"Runtime extension '{active.Descriptor.Id}' did not become ready.");
+                Quarantine(active.Descriptor.Id, "extension readiness failed");
+                ready = false;
+                continue;
+            }
+
+            if (signaled)
+            {
+                _admittedExtensionIds.Add(active.Descriptor.Id);
+                foreach (string capability in active.Descriptor.Provides)
+                {
+                    _availableCapabilities.Add(capability);
+                }
+                log.Information(
+                    $"Runtime extension '{active.Descriptor.Id}' is ready.");
+                continue;
+            }
+
+            ready = false;
+            if (waiting >= ReadyNoticeTicks && !active.ReadyNoticeLogged)
+            {
+                active.ReadyNoticeLogged = true;
+                log.Warning(
+                    $"Runtime extension '{active.Descriptor.Id}' is still awaiting " +
+                    "its post-initialization readiness signal.",
+                    source: active.Descriptor.Id);
+            }
+        }
+
+        if (!ready && _initializationCompleted &&
+            _active.Any(active =>
+                !active.Unavailable &&
+                !_admittedExtensionIds.Contains(active.Descriptor.Id)))
+        {
+            if (now >= _nextPendingAdmissionNoticeAt)
+            {
+                _nextPendingAdmissionNoticeAt = now + 30L * Stopwatch.Frequency;
+                log.Information(
+                    "Waiting for runtime-extension readiness before starting scripts4.");
+            }
+        }
+        return ready && _initializationCompleted;
+    }
+
     public void AdvanceHostFrame(RuntimeExtensionFrameContext context)
     {
         ObserveRetirements();
@@ -877,7 +1101,9 @@ internal sealed class RuntimeExtensionManager(
         ActiveRuntimeExtension[] frame = [.. _active];
         foreach (ActiveRuntimeExtension active in frame)
         {
-            if (active.Unavailable)
+            if (active.Unavailable ||
+                (active.Instance is IRuntimeExtensionAdmissionProbe &&
+                 !_admittedExtensionIds.Contains(active.Descriptor.Id)))
             {
                 continue;
             }
@@ -1062,6 +1288,7 @@ internal sealed class RuntimeExtensionManager(
 
         foreach (ActiveRuntimeExtension active in affected)
         {
+            _admittedExtensionIds.Remove(active.Descriptor.Id);
             active.Unavailable = true;
             active.Authority.ForceRevoke();
             foreach (string capability in active.Descriptor.Provides)
@@ -1195,8 +1422,11 @@ internal sealed class RuntimeExtensionManager(
     private sealed class ActiveRuntimeExtension(
         RuntimeExtensionDescriptor descriptor,
         IScript4RuntimeExtension instance,
-        ManagedLifecycleAuthority authority)
+        ManagedLifecycleAuthority authority,
+        long readyStartedAt)
     {
+        public long ReadyStartedAt { get; } = readyStartedAt;
+        public bool ReadyNoticeLogged { get; set; }
         public RuntimeExtensionDescriptor Descriptor { get; } = descriptor;
         public IScript4RuntimeExtension Instance { get; } = instance;
         public ManagedLifecycleAuthority Authority { get; } = authority;
@@ -1248,7 +1478,7 @@ internal static class ManagedLifecycleAuthorityContext
     private static readonly AsyncLocal<ManagedLifecycleAuthority?> Current = new();
 
     internal static bool AllowsNativeCalls =>
-        Current.Value?.AllowsNativeCalls ?? true;
+        Current.Value?.AllowsNativeCalls ?? false;
 
     internal static IDisposable Enter(ManagedLifecycleAuthority authority)
     {
@@ -1293,17 +1523,20 @@ internal sealed class ManagedLifecycleOperation : IDisposable
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operationFactory);
-        if (timeout <= TimeSpan.Zero)
+        if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(timeout),
                 timeout,
-                "A managed lifecycle deadline must be positive.");
+                "A managed lifecycle deadline must be positive or infinite.");
         }
 
         _externalCancellation = cancellationToken;
         _timeout = new();
-        _timeout.CancelAfter(timeout);
+        if (timeout != Timeout.InfiniteTimeSpan)
+        {
+            _timeout.CancelAfter(timeout);
+        }
         _combined = cancellationToken.CanBeCanceled
             ? CancellationTokenSource.CreateLinkedTokenSource(
                 _timeout.Token,
@@ -1531,7 +1764,10 @@ internal static class RuntimeExtensionPlacement
             return;
         }
 
-        Directory.CreateDirectory(extensions);
+        if (!Directory.Exists(extensions))
+        {
+            Directory.CreateDirectory(extensions);
+        }
         string[] candidates =
         [
             .. Directory
@@ -1755,13 +1991,17 @@ internal sealed class RootAssemblySnapshot
     private readonly Dictionary<string, RootAssemblyImage> _images;
 
     private RootAssemblySnapshot(
-        Dictionary<string, RootAssemblyImage> images)
+        Dictionary<string, RootAssemblyImage> images,
+        IReadOnlyCollection<string> blockedAssemblyNames)
     {
         _images = images;
+        BlockedAssemblyNames = blockedAssemblyNames;
     }
 
     public IReadOnlyCollection<RootAssemblyImage> Images =>
         _images.Values;
+
+    public IReadOnlyCollection<string> BlockedAssemblyNames { get; }
 
     public bool TryGet(
         string simpleName,
@@ -1771,13 +2011,16 @@ internal sealed class RootAssemblySnapshot
     public static RootAssemblySnapshot Capture(
         string rootDirectory,
         string excludedAssemblyName,
-        RuntimeLog log)
+        RuntimeLog log,
+        RootAssemblySnapshot? previous = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(excludedAssemblyName);
         ArgumentNullException.ThrowIfNull(log);
 
         Dictionary<string, RootAssemblyImage> images =
+            [with(StringComparer.OrdinalIgnoreCase)];
+        HashSet<string> blockedNames =
             [with(StringComparer.OrdinalIgnoreCase)];
         foreach (string path in Directory
                      .EnumerateFiles(
@@ -1788,11 +2031,13 @@ internal sealed class RootAssemblySnapshot
                          value => value,
                          StringComparer.OrdinalIgnoreCase))
         {
+            byte[]? inspectedBytes = null;
             try
             {
                 string fullPath = Path.GetFullPath(path);
-                byte[] assemblyBytes = ReadStableImage(fullPath);
-                string assemblyName = ReadAssemblyName(assemblyBytes);
+                inspectedBytes = ReadStableImage(fullPath);
+                SecurityAdmission.CheckCapturedImage(fullPath, inspectedBytes, log);
+                string assemblyName = ReadAssemblyName(inspectedBytes);
                 if (assemblyName.Equals(
                         excludedAssemblyName,
                         StringComparison.OrdinalIgnoreCase))
@@ -1809,7 +2054,7 @@ internal sealed class RootAssemblySnapshot
                         new(
                             fullPath,
                             assemblyName,
-                            assemblyBytes,
+                            inspectedBytes,
                             symbols)))
                 {
                     throw new InvalidOperationException(
@@ -1819,23 +2064,94 @@ internal sealed class RootAssemblySnapshot
             catch (BadImageFormatException)
             {
             }
+            catch (SecurityBlockedException exception)
+            {
+                RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                log.Error(
+                    exception.Message,
+                    source: Path.GetFileName(path),
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary: "A security verdict prevented activation of this extension source.");
+            }
             catch (IOException exception)
             {
-                log.Warning(
-                    $"Root assembly '{Path.GetFileName(path)}' could not be " +
-                    $"captured into RAM: {exception.Message}");
+                if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                {
+                    RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                }
+                LogSourceReadFailure(path, exception, log);
             }
             catch (UnauthorizedAccessException exception)
             {
-                log.Warning(
-                    $"Root assembly '{Path.GetFileName(path)}' could not be " +
-                    $"captured into RAM: {exception.Message}");
+                if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                {
+                    RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                }
+                LogSourceReadFailure(path, exception, log);
             }
         }
 
         log.Information(
             $"Committed {images.Count} root managed assembly image(s) to one immutable RAM snapshot.");
-        return new(images);
+        return new(images, Array.AsReadOnly([.. blockedNames]));
+    }
+
+    private static void RecordBlockedIdentity(
+        string path,
+        byte[]? inspectedBytes,
+        RootAssemblySnapshot? previous,
+        HashSet<string> blockedNames)
+    {
+        if (inspectedBytes is not null)
+        {
+            try
+            {
+                blockedNames.Add(ReadAssemblyName(inspectedBytes));
+                return;
+            }
+            catch (BadImageFormatException)
+            {
+            }
+        }
+        if (previous is not null)
+        {
+            bool matched = false;
+            foreach (RootAssemblyImage image in previous.Images)
+            {
+                if (!Path.GetFullPath(image.Path).Equals(
+                        Path.GetFullPath(path),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                blockedNames.Add(image.AssemblyName);
+                matched = true;
+            }
+            if (matched)
+            {
+                return;
+            }
+        }
+        blockedNames.Add(Path.GetFileNameWithoutExtension(path));
+    }
+
+    private static void LogSourceReadFailure(
+        string path,
+        Exception exception,
+        RuntimeLog log)
+    {
+        if (SecurityAdmission.IsAntivirusFileBlock(exception))
+        {
+            log.Error(
+                $"Antivirus denied source '{Path.GetFileName(path)}': {exception.Message}",
+                source: Path.GetFileName(path),
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary: "The operating system blocked this extension source.");
+            return;
+        }
+        log.Warning(
+            $"Root assembly '{Path.GetFileName(path)}' could not be " +
+            $"captured into RAM: {exception.Message}");
     }
 
     private static byte[] ReadStableImage(string path)
@@ -1954,12 +2270,22 @@ internal sealed class RootAssemblyResolver : IDisposable
     private RootAssemblySnapshot? _snapshot;
     private bool _disposed;
 
-    private sealed class RootContext(string name)
+    private sealed class RootContext(RootAssemblyResolver owner, string name)
     {
         internal string Name { get; } = name;
-        internal AssemblyLoadContext Context { get; } = new(
+        internal AssemblyLoadContext Context { get; } =
+            new ExtensionLoadContext(owner, name);
+    }
+
+    private sealed class ExtensionLoadContext(
+        RootAssemblyResolver owner,
+        string name) : AssemblyLoadContext(
             $"CSHVDNC.Extension.{name}.{Guid.NewGuid():N}",
-            isCollectible: true);
+            isCollectible: true)
+    {
+        protected override Assembly? Load(AssemblyName requested) =>
+            owner.Resolve(this, requested) ?? throw new FileLoadException(
+                $"Extension dependency '{requested}' has no admitted provider.");
     }
 
     public RootAssemblyResolver(
@@ -2004,8 +2330,7 @@ internal sealed class RootAssemblyResolver : IDisposable
                 throw new FileNotFoundException(
                     $"Registered extension '{simpleName}' is absent from the RAM snapshot.");
             }
-            RootContext root = new(simpleName);
-            root.Context.Resolving += Resolve;
+            RootContext root = new(this, simpleName);
             _roots.Add(simpleName, root);
             try
             {
@@ -2014,7 +2339,6 @@ internal sealed class RootAssemblyResolver : IDisposable
             catch
             {
                 _roots.Remove(simpleName);
-                root.Context.Resolving -= Resolve;
                 root.Context.Unload();
                 throw;
             }
@@ -2061,9 +2385,8 @@ internal sealed class RootAssemblyResolver : IDisposable
         }
     }
 
-    private void ReleaseRoot(RootContext root)
+    private static void ReleaseRoot(RootContext root)
     {
-        root.Context.Resolving -= Resolve;
         Assembly[] loaded = [.. root.Context.Assemblies];
         RuntimeExtensionAssemblyRegistry.Unregister(loaded);
         root.Context.Unload();
@@ -2082,6 +2405,13 @@ internal sealed class RootAssemblyResolver : IDisposable
         lock (_gate)
         {
             if (_disposed) return null;
+            if (_snapshot is { } blockedSnapshot &&
+                blockedSnapshot.BlockedAssemblyNames.Contains(
+                    requested.Name, StringComparer.OrdinalIgnoreCase))
+            {
+                throw new FileLoadException(
+                    $"Assembly '{requested.Name}' was denied by security admission.");
+            }
             Assembly? loaded = FindLoaded(context, requested.Name);
             if (loaded is not null) return loaded;
 
@@ -2109,26 +2439,11 @@ internal sealed class RootAssemblyResolver : IDisposable
             }
         }
 
-        Assembly? runtimeDependency = RuntimeDependencyResolver.TryResolve(requested);
-        if (runtimeDependency is not null ||
-            requested.Name.Equals("FSharp.Core", StringComparison.OrdinalIgnoreCase))
+        if (requested.Name.Equals("FSharp.Core", StringComparison.OrdinalIgnoreCase))
         {
-            return runtimeDependency;
+            return RuntimeDependencyResolver.TryResolve(requested);
         }
-        foreach (Assembly shared in AssemblyLoadContext.Default.Assemblies)
-        {
-            if (shared.GetName().Name?.Equals(requested.Name,
-                StringComparison.OrdinalIgnoreCase) == true)
-            {
-                return shared;
-            }
-        }
-        try
-        {
-            return AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
-        }
-        catch (FileNotFoundException) { return null; }
-        catch (FileLoadException) { return null; }
+        return RuntimePlatformAssemblyPolicy.TryResolve(requested);
     }
 
     private Assembly LoadImage(AssemblyLoadContext context, RootAssemblyImage image)
@@ -2162,5 +2477,76 @@ internal sealed class RootAssemblyResolver : IDisposable
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(_disposed, typeof(RootAssemblyResolver));
+    }
+}
+
+
+
+internal static class RuntimePlatformAssemblyPolicy
+{
+    private static readonly Dictionary<string, string> TrustedPaths =
+        DiscoverTrustedPaths();
+
+    internal static bool IsPlatformAssembly(string simpleName) =>
+        TrustedPaths.ContainsKey(simpleName);
+
+    internal static Assembly? TryResolve(AssemblyName requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested.Name) ||
+            !TrustedPaths.TryGetValue(requested.Name, out string? trustedPath))
+        {
+            return null;
+        }
+        Assembly assembly = AssemblyLoadContext.Default.LoadFromAssemblyName(requested);
+        if (!Path.GetFullPath(assembly.Location).Equals(
+                trustedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new FileLoadException(
+                $"Platform dependency '{requested}' resolved outside its trusted runtime path.");
+        }
+        return assembly;
+    }
+
+    private static Dictionary<string, string> DiscoverTrustedPaths()
+    {
+        Dictionary<string, string> trusted =
+            [with(StringComparer.OrdinalIgnoreCase)];
+        string? runtimeDirectory = Path.GetDirectoryName(typeof(object).Assembly.Location);
+        if (string.IsNullOrWhiteSpace(runtimeDirectory))
+        {
+            return trusted;
+        }
+        DirectoryInfo? sharedRoot = new DirectoryInfo(runtimeDirectory).Parent?.Parent;
+        if (sharedRoot is null ||
+            !sharedRoot.Name.Equals("shared", StringComparison.OrdinalIgnoreCase))
+        {
+            return trusted;
+        }
+        string prefix = Path.GetFullPath(sharedRoot.FullName) +
+            Path.DirectorySeparatorChar;
+        if (AppContext.GetData("TRUSTED_PLATFORM_ASSEMBLIES") is string tpa)
+        {
+            foreach (string path in tpa.Split(Path.PathSeparator,
+                         StringSplitOptions.RemoveEmptyEntries))
+            {
+                string fullPath = Path.GetFullPath(path);
+                if (!fullPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                string name = Path.GetFileNameWithoutExtension(fullPath);
+                trusted.TryAdd(name, fullPath);
+            }
+        }
+        else
+        {
+            foreach (string path in Directory.EnumerateFiles(
+                         runtimeDirectory, "*.dll", SearchOption.TopDirectoryOnly))
+            {
+                trusted.TryAdd(Path.GetFileNameWithoutExtension(path),
+                    Path.GetFullPath(path));
+            }
+        }
+        return trusted;
     }
 }

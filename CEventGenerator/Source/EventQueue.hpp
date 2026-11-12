@@ -2,10 +2,10 @@
 
 #include "EventAbi.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 
 namespace CEventGenerator
@@ -29,7 +29,9 @@ namespace CEventGenerator
         EventQueue() = default;
 
         mutable std::mutex _gate;
-        std::deque<EventRecord> _records;
+        std::array<EventRecord, MaximumPendingRecords> _records{};
+        std::size_t _head{};
+        std::size_t _size{};
         std::atomic<std::uint64_t> _dropped{};
     };
 }

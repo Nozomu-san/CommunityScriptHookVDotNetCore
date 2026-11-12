@@ -12,13 +12,15 @@ namespace CEventGenerator
     {
         try
         {
-            std::scoped_lock lock(_gate);
-            if (_records.size() >= MaximumPendingRecords)
+            std::unique_lock lock(_gate, std::try_to_lock);
+            if (!lock.owns_lock() || _size == MaximumPendingRecords)
             {
                 _dropped.fetch_add(1, std::memory_order_relaxed);
                 return false;
             }
-            _records.push_back(record);
+
+            _records[(_head + _size) % MaximumPendingRecords] = record;
+            ++_size;
             return true;
         }
         catch (...)
@@ -33,13 +35,14 @@ namespace CEventGenerator
         try
         {
             std::scoped_lock lock(_gate);
-            if (_records.empty())
+            if (_size == 0)
             {
                 return false;
             }
 
-            record = _records.front();
-            _records.pop_front();
+            record = _records[_head];
+            _head = (_head + 1) % MaximumPendingRecords;
+            --_size;
             return true;
         }
         catch (...)
@@ -48,13 +51,12 @@ namespace CEventGenerator
         }
     }
 
-
     std::uint64_t EventQueue::PendingCount() const noexcept
     {
         try
         {
             std::scoped_lock lock(_gate);
-            return static_cast<std::uint64_t>(_records.size());
+            return static_cast<std::uint64_t>(_size);
         }
         catch (...)
         {

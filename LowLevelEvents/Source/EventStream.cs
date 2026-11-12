@@ -92,6 +92,7 @@ internal sealed class EventStream :
     private ulong _bulletImpactReactionCount;
     private ulong _bulletImpactGroupCount;
     private ulong _bulletImpactGlobalCount;
+    private readonly Dictionary<ulong, int> _frameEntityHandles = [];
     private bool _disposed;
 
     internal EventStream(
@@ -318,6 +319,7 @@ internal sealed class EventStream :
     internal void Advance(ulong _)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _frameEntityHandles.Clear();
         ObserveNativeDrops();
         DrainPendingDamageEvents();
         DrainPendingAimEvents();
@@ -708,16 +710,20 @@ internal sealed class EventStream :
         {
             return 0;
         }
+        if (_frameEntityHandles.TryGetValue(entityAddress, out int knownHandle))
+        {
+            return knownHandle;
+        }
 
         nint address = unchecked((nint)(long)entityAddress);
         LocalDataResult<int> cached = _identity.TryGetHandle(address);
-        if (cached.IsSuccess)
+        int handle = cached.IsSuccess ? cached.Value : 0;
+        if (!cached.IsSuccess)
         {
-            return cached.Value;
+            _identity.RequestHandle(address);
         }
-
-        _identity.RequestHandle(address);
-        return 0;
+        _frameEntityHandles.Add(entityAddress, handle);
+        return handle;
     }
 
     private static bool TryDecodeDamage(
@@ -1652,48 +1658,62 @@ internal sealed class EventStream :
         Action onDispose) : ILowLevelSubscription<T>
     {
         private readonly Lock _gate = new();
-        private readonly Queue<T> _queue = [with(capacity)];
+        private readonly T[] _records = new T[capacity];
         private Action? _onDispose = onDispose;
-        private ulong _dropped;
+        private long _dropped;
+        private int _head;
+        private int _count;
         private bool _disposed;
 
-        public ulong DroppedCount
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _dropped;
-                }
-            }
-        }
+        public ulong DroppedCount =>
+            unchecked((ulong)Interlocked.Read(ref _dropped));
 
         public bool TryRead([MaybeNullWhen(false)] out T value)
         {
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                return _queue.TryDequeue(out value);
+                if (_count == 0)
+                {
+                    value = default!;
+                    return false;
+                }
+
+                value = _records[_head];
+                _records[_head] = default!;
+                _head = (_head + 1) % _records.Length;
+                --_count;
+                return true;
             }
         }
 
         internal bool Publish(T value)
         {
-            lock (_gate)
+            if (!_gate.TryEnter())
+            {
+                Interlocked.Increment(ref _dropped);
+                return false;
+            }
+
+            try
             {
                 if (_disposed)
                 {
                     return true;
                 }
-
-                if (_queue.Count >= capacity)
+                if (_count == _records.Length)
                 {
-                    ++_dropped;
+                    Interlocked.Increment(ref _dropped);
                     return false;
                 }
 
-                _queue.Enqueue(value);
+                _records[(_head + _count) % _records.Length] = value;
+                ++_count;
                 return true;
+            }
+            finally
+            {
+                _gate.Exit();
             }
         }
 
@@ -1702,7 +1722,9 @@ internal sealed class EventStream :
             lock (_gate)
             {
                 _disposed = true;
-                _queue.Clear();
+                Array.Clear(_records);
+                _head = 0;
+                _count = 0;
                 _onDispose = null;
             }
         }
@@ -1718,7 +1740,9 @@ internal sealed class EventStream :
                 }
 
                 _disposed = true;
-                _queue.Clear();
+                Array.Clear(_records);
+                _head = 0;
+                _count = 0;
                 remove = Interlocked.Exchange(ref _onDispose, null);
             }
             remove?.Invoke();

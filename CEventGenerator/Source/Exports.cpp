@@ -291,6 +291,36 @@ std::uint32_t CEG_GetEnhancedCandidateRelations(std::uint32_t index) noexcept
 }
 
 extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetProducerCandidateCount() noexcept
+{
+    return GetProducerCandidateCount();
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetProducerDiagnosticCount() noexcept
+{
+    return GetProducerDiagnosticCount();
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetProducerRva(std::uint32_t index) noexcept
+{
+    return GetProducerRva(index);
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetProducerSize(std::uint32_t index) noexcept
+{
+    return GetProducerSize(index);
+}
+
+extern "C" __declspec(dllexport)
+std::uint32_t CEG_GetProducerRelations(std::uint32_t index) noexcept
+{
+    return GetProducerRelations(index);
+}
+
+extern "C" __declspec(dllexport)
 std::uint32_t CEG_GetDispatchCallsiteCandidateCount() noexcept
 {
     return GetDispatchCallsiteCandidateCount();

@@ -356,6 +356,152 @@ namespace CoreCLRHostLoader
         }
 
         [[nodiscard]]
+        std::optional<std::wstring> HideIniComments(
+            std::wstring_view original)
+        {
+            std::wstring visible(original);
+            if (!visible.empty() && visible.front() == 0xFEFF)
+            {
+                visible.front() = L' ';
+            }
+            bool blockComment = false;
+            bool lineComment = false;
+            for (std::size_t i = 0; i < original.size();)
+            {
+                const wchar_t current = original[i];
+                const wchar_t next = i + 1 < original.size()
+                    ? original[i + 1] : L'\0';
+                if (lineComment)
+                {
+                    if (current == L'\r' || current == L'\n')
+                    {
+                        lineComment = false;
+                    }
+                    else
+                    {
+                        visible[i] = L' ';
+                        ++i;
+                        continue;
+                    }
+                }
+                if (blockComment)
+                {
+                    if (current == L'*' && next == L'/')
+                    {
+                        visible[i] = visible[i + 1] = L' ';
+                        i += 2;
+                        blockComment = false;
+                        continue;
+                    }
+                    if (current != L'\r' && current != L'\n')
+                    {
+                        visible[i] = L' ';
+                    }
+                    ++i;
+                    continue;
+                }
+                if (current == L'/' && next == L'*')
+                {
+                    visible[i] = visible[i + 1] = L' ';
+                    i += 2;
+                    blockComment = true;
+                    continue;
+                }
+                if (current == L';' || current == L'#' ||
+                    (current == L'/' && next == L'/'))
+                {
+                    visible[i] = L' ';
+                    if (current == L'/')
+                    {
+                        visible[i + 1] = L' ';
+                        i += 2;
+                    }
+                    else
+                    {
+                        ++i;
+                    }
+                    lineComment = true;
+                    continue;
+                }
+                ++i;
+            }
+            return blockComment ? std::nullopt :
+                std::optional<std::wstring>(std::move(visible));
+        }
+        [[nodiscard]]
+        std::optional<std::pair<std::size_t, std::size_t>>
+        FindConfigurationValue(
+            std::wstring_view visible,
+            ConfigurationSection targetSection,
+            std::wstring_view targetKey)
+        {
+            ConfigurationSection section = ConfigurationSection::None;
+            std::optional<std::pair<std::size_t, std::size_t>> result;
+            std::size_t offset = 0;
+            while (offset < visible.size())
+            {
+                const std::size_t end = visible.find_first_of(L"\r\n", offset);
+                const std::size_t lineEnd = end == std::wstring_view::npos
+                    ? visible.size() : end;
+                const std::wstring_view line = visible.substr(
+                    offset, lineEnd - offset);
+                const std::wstring trimmed = Trim(std::wstring(line));
+                if (trimmed.size() >= 2 && trimmed.front() == L'[' &&
+                    trimmed.back() == L']')
+                {
+                    const std::wstring name = Trim(
+                        trimmed.substr(1, trimmed.size() - 2));
+                    section = EqualsIgnoreCase(name, L"Brain")
+                        ? ConfigurationSection::Brain
+                        : EqualsIgnoreCase(name, L"Runtime")
+                            ? ConfigurationSection::Runtime
+                            : ConfigurationSection::Unknown;
+                }
+                else if (section == targetSection)
+                {
+                    const std::size_t separator = line.find(L'=');
+                    if (separator != std::wstring_view::npos &&
+                        EqualsIgnoreCase(
+                            Trim(std::wstring(line.substr(0, separator))),
+                            targetKey))
+                    {
+                        if (result)
+                        {
+                            return std::nullopt;
+                        }
+                        const std::wstring_view right = line.substr(separator + 1);
+                        const std::size_t first = right.find_first_not_of(
+                            L" \t\v\f\r\n");
+                        if (first == std::wstring_view::npos)
+                        {
+                            const std::size_t where = offset + separator + 1;
+                            result = std::pair(where, where);
+                        }
+                        else
+                        {
+                            const std::size_t last = right.find_last_not_of(
+                                L" \t\v\f\r\n");
+                            result = std::pair(
+                                offset + separator + 1 + first,
+                                offset + separator + 2 + last);
+                        }
+                    }
+                }
+                if (end == std::wstring_view::npos)
+                {
+                    break;
+                }
+                offset = end + 1;
+                if (visible[end] == L'\r' && offset < visible.size() &&
+                    visible[offset] == L'\n')
+                {
+                    ++offset;
+                }
+            }
+            return result;
+        }
+
+        [[nodiscard]]
         ParsedConfiguration ParseConfiguration(std::string_view text)
         {
             ParsedConfiguration parsed{};
@@ -366,6 +512,9 @@ namespace CoreCLRHostLoader
             bool runtimeInvalid = false;
             bool logInvalid = false;
             bool brainInvalid = false;
+            bool structureInvalid = false;
+            bool seenRuntimeSection = false;
+            bool seenBrainSection = false;
 
             std::wstring wide = Utf8ToWide(text);
             if (wide.empty() && !text.empty())
@@ -377,7 +526,12 @@ namespace CoreCLRHostLoader
                 wide.erase(wide.begin());
             }
 
-            std::wstringstream lines(wide);
+            auto visible = HideIniComments(wide);
+            if (!visible)
+            {
+                return parsed;
+            }
+            std::wstringstream lines(*visible);
             std::wstring line;
             while (std::getline(lines, line))
             {
@@ -397,22 +551,36 @@ namespace CoreCLRHostLoader
                         Trim(line.substr(1, line.size() - 2));
                     if (EqualsIgnoreCase(name, L"Runtime"))
                     {
+                        structureInvalid |= seenRuntimeSection;
+                        seenRuntimeSection = true;
                         section = ConfigurationSection::Runtime;
                     }
                     else if (EqualsIgnoreCase(name, L"Brain"))
                     {
+                        structureInvalid |= seenBrainSection;
+                        seenBrainSection = true;
                         section = ConfigurationSection::Brain;
                     }
                     else
                     {
+                        structureInvalid = true;
                         section = ConfigurationSection::Unknown;
                     }
                     continue;
                 }
+                if (line.front() == L'[' || line.back() == L']')
+                {
+                    structureInvalid = true;
+                    section = ConfigurationSection::Unknown;
+                    continue;
+                }
 
                 const std::size_t equals = line.find(L'=');
-                if (equals == std::wstring::npos || equals == 0)
+                if (equals == std::wstring::npos || equals == 0 ||
+                    section == ConfigurationSection::None ||
+                    section == ConfigurationSection::Unknown)
                 {
+                    structureInvalid = true;
                     continue;
                 }
 
@@ -486,7 +654,9 @@ namespace CoreCLRHostLoader
                         continue;
                     }
                     brainValue = std::move(value);
+                    continue;
                 }
+                structureInvalid = true;
             }
 
             parsed.Value.Channel = !runtimeInvalid && runtimeValue
@@ -499,6 +669,9 @@ namespace CoreCLRHostLoader
                 ? std::move(*brainValue)
                 : std::wstring{};
             parsed.NeedsRewrite =
+                structureInvalid ||
+                !seenRuntimeSection ||
+                !seenBrainSection ||
                 runtimeInvalid ||
                 logInvalid ||
                 brainInvalid ||
@@ -594,14 +767,59 @@ namespace CoreCLRHostLoader
                 return false;
             }
 
-            state.Configuration.BrainAssembly = std::wstring(assemblyName);
-            auto saved = SaveHostConfiguration(state);
+            auto source = ReadUtf8File(state.Paths.Configuration);
+            if (!source)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini could not be read for Brain caching: " +
+                    source.error());
+            }
+            ParsedConfiguration parsed = ParseConfiguration(*source);
+            if (!parsed.IsValid || parsed.NeedsRewrite)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini has invalid or missing settings and "
+                    L"must be normalized on the next startup.");
+            }
+            std::wstring original = Utf8ToWide(*source);
+            if (original.empty() && !source->empty())
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini contains invalid UTF-8.");
+            }
+            auto visible = HideIniComments(original);
+            if (!visible)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini contains an unclosed block comment.");
+            }
+            auto span = FindConfigurationValue(
+                *visible,
+                ConfigurationSection::Brain,
+                L"Assembly");
+            if (!span)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini has no unambiguous [Brain] Assembly setting.");
+            }
+            original.replace(
+                span->first,
+                span->second - span->first,
+                assemblyName);
+            const std::string content = WideToUtf8(original);
+            if (content.empty() && !original.empty())
+            {
+                return std::unexpected(
+                    L"The Brain configuration could not be encoded as UTF-8.");
+            }
+            auto saved = WriteUtf8Atomically(state.Paths.Configuration, content);
             if (!saved)
             {
                 return std::unexpected(
                     L"CoreCLRHostLoader.ini could not cache the managed brain "
                     L"selection: " + saved.error());
             }
+            state.Configuration.BrainAssembly = std::wstring(assemblyName);
             return true;
         }
         catch (const std::exception& exception)
@@ -614,6 +832,84 @@ namespace CoreCLRHostLoader
         {
             return std::unexpected(
                 L"Managed brain selection caching failed with an unknown exception.");
+        }
+    }
+
+    HostResult<bool> CacheRuntimeChannelSelection(
+        const std::filesystem::path& configurationPath,
+        RuntimeChannel channel) noexcept
+    {
+        try
+        {
+            auto source = ReadUtf8File(configurationPath);
+            if (!source)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini could not be read for runtime channel caching: " +
+                    source.error());
+            }
+            ParsedConfiguration parsed = ParseConfiguration(*source);
+            if (!parsed.IsValid || parsed.NeedsRewrite)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini changed or became invalid; "
+                    L"the runtime channel cannot be cached safely.");
+            }
+            if (parsed.Value.Channel == channel)
+            {
+                return false;
+            }
+
+            std::wstring original = Utf8ToWide(*source);
+            if (original.empty() && !source->empty())
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini contains invalid UTF-8.");
+            }
+            auto visible = HideIniComments(original);
+            if (!visible)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini contains an unclosed block comment.");
+            }
+            auto span = FindConfigurationValue(
+                *visible,
+                ConfigurationSection::Runtime,
+                L"Channel");
+            if (!span)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini has no unambiguous [Runtime] Channel setting.");
+            }
+
+            original.replace(
+                span->first,
+                span->second - span->first,
+                channel == RuntimeChannel::Preview ? L"Preview" : L"Release");
+            const std::string content = WideToUtf8(original);
+            if (content.empty() && !original.empty())
+            {
+                return std::unexpected(
+                    L"The runtime channel configuration could not be encoded as UTF-8.");
+            }
+            auto saved = WriteUtf8Atomically(configurationPath, content);
+            if (!saved)
+            {
+                return std::unexpected(
+                    L"CoreCLRHostLoader.ini could not cache the selected runtime channel: " +
+                    saved.error());
+            }
+            return true;
+        }
+        catch (const std::exception& exception)
+        {
+            return std::unexpected(
+                L"Runtime channel caching failed: " + Utf8ToWide(exception.what()));
+        }
+        catch (...)
+        {
+            return std::unexpected(
+                L"Runtime channel caching failed with an unknown exception.");
         }
     }
 
@@ -702,7 +998,7 @@ namespace CoreCLRHostLoader
                         ? (configurationExists
                             ? L"CoreCLRHostLoader.ini was replaced with the default configuration."
                             : L"CoreCLRHostLoader.ini was created with the default configuration.")
-                        : L"CoreCLRHostLoader.ini was normalized without changing its effective configuration.");
+                        : L"CoreCLRHostLoader.ini was normalized while preserving valid settings.");
             }
             WriteLog(
                 LogLevel::Information,

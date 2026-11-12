@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cwchar>
 #include <string_view>
+#include <utility>
 
 namespace
 {
@@ -377,7 +378,8 @@ namespace
     constexpr std::size_t DynamicProbeCorrelationMatchCapacity = 64;
     constexpr std::uint8_t DynamicProbeBreakpoint = 0xCC;
     constexpr int DynamicProbeToggleKey = VK_F10;
-    constexpr wchar_t DynamicProbeLogName[] = L"CEventGenerator.log";
+    constexpr std::uint64_t DynamicProbeMaximumSessionMs = 3000;
+    constexpr wchar_t DiagnosticLogName[] = L"CEventGenerator.log";
 
     enum class DynamicProbeRecordKind : std::uint32_t
     {
@@ -552,6 +554,17 @@ namespace
     std::array<
         std::atomic<std::uint32_t>,
         EnhancedDiagnosticCandidateCapacity> g_enhancedCandidateRelations{};
+    std::atomic<std::uint32_t> g_producerCandidateCount{};
+    std::atomic<std::uint32_t> g_producerDiagnosticCount{};
+    std::array<
+        std::atomic<std::uint32_t>,
+        EnhancedProducerDiagnosticCapacity> g_producerRvas{};
+    std::array<
+        std::atomic<std::uint32_t>,
+        EnhancedProducerDiagnosticCapacity> g_producerSizes{};
+    std::array<
+        std::atomic<std::uint32_t>,
+        EnhancedProducerDiagnosticCapacity> g_producerRelations{};
     std::atomic<std::uint32_t> g_dispatchCallsiteCandidateCount{};
     std::atomic<std::uint32_t> g_dispatchCallsiteDiagnosticCount{};
     std::array<
@@ -2423,6 +2436,367 @@ namespace
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+    void WriteLocatorSnapshot(const EventLocatorResult& located) noexcept
+    {
+        if (!CEventGenerator::Configuration::LogEnabled())
+        {
+            return;
+        }
+
+        std::array<wchar_t, MAX_PATH> path{};
+        const DWORD length = GetModuleFileNameW(
+            nullptr, path.data(), static_cast<DWORD>(path.size()));
+        if (length == 0 || length >= path.size())
+        {
+            return;
+        }
+        wchar_t* slash = wcsrchr(path.data(), L'\\');
+        wchar_t* slash2 = wcsrchr(path.data(), L'/');
+        if (slash2 != nullptr && (slash == nullptr || slash2 > slash))
+        {
+            slash = slash2;
+        }
+        if (slash == nullptr)
+        {
+            return;
+        }
+        const std::size_t prefix = static_cast<std::size_t>(
+            slash + 1 - path.data());
+        if (prefix + std::size(DiagnosticLogName) > path.size() ||
+            wcscpy_s(slash + 1, path.size() - prefix, DiagnosticLogName) != 0)
+        {
+            return;
+        }
+
+        std::FILE* file{};
+        if (_wfopen_s(&file, path.data(), L"wb") != 0 || file == nullptr)
+        {
+            return;
+        }
+        const auto& d = located.Diagnostics;
+        std::fprintf(file, "CEventGenerator 12/11/2026 - locator snapshot\n");
+        std::fprintf(file, "edition=%u build=%u state=%u failure=%u\n",
+            std::to_underlying(located.Targets.Edition),
+            located.Targets.GameBuild, std::to_underlying(located.State),
+            std::to_underlying(d.Failure));
+        std::fprintf(file, "receiver-shapes: ped=%u global=%u damage-pattern=%u\n",
+            d.PedMatchCount, d.GlobalMatchCount, d.DamageMatchCount);
+        std::fprintf(file, "anchors: count=%u stack=%u type=%u\n",
+            d.CEventCountAnchorCount, d.CEventStackAnchorCount,
+            d.EventTypeAnchorCount);
+        std::fprintf(file, "layout: count=0x%X stack=0x%X type=0x%X\n",
+            d.CEventCountOffset, d.CEventStackOffset,
+            d.EventTypeVFuncOffset);
+        std::fprintf(file, "anchor-functions: count=0x%X size=0x%X "
+            "stack=0x%X type=0x%X size=0x%X\n",
+            d.CEventCountFunctionRva, d.CEventCountFunctionSize,
+            d.CEventStackAnchorRva, d.EventTypeFunctionRva,
+            d.EventTypeFunctionSize);
+        std::fprintf(file, "virtual-methods: id=0x%X args=0x%X entity=0x%X\n",
+            located.Targets.EventIdVFuncOffset,
+            located.Targets.EventArgumentsVFuncOffset,
+            located.Targets.EventEntityVFuncOffset);
+        std::fprintf(file, "scan: limit=%u direct-ped=%u direct-global=%u "
+            "chosen=%s ped-truncated=%u global-truncated=%u\n",
+            d.EnhancedReceiverScanLimit, d.EnhancedDirectPedCount,
+            d.EnhancedDirectGlobalCount,
+            d.EnhancedUsedPointerFallback ? "pointer-fallback" : "direct",
+            d.EnhancedSelectedPedTruncated, d.EnhancedSelectedGlobalTruncated);
+        std::fprintf(file, "correlation: groups=%u mixed-callees=%u "
+            "complete=%s\n", d.EnhancedCorrelationGroupCount,
+            d.EnhancedMixedCalleeCount,
+            d.EnhancedSelectedPedTruncated || d.EnhancedSelectedGlobalTruncated
+                ? "no" : "yes");
+        std::fprintf(file, "receiver-candidates=%u shown=%u (ranked)\n",
+            d.ProducerCandidateCount, d.ProducerDiagnosticCount);
+        for (std::uint32_t index = 0;
+             index < d.ProducerDiagnosticCount && index < d.Producers.size();
+             ++index)
+        {
+            const auto& candidate = d.Producers[index];
+            std::fprintf(file,
+                "  receiver[%u] rva=0x%X size=0x%X flags=0x%X\n",
+                index, candidate.Rva, candidate.Size, candidate.Relations);
+        }
+        std::fprintf(file, "callee-groups=%u shared-ped-global=%u shown=%u "
+            "(ranked)\n", d.DispatchCalleeCandidateCount,
+            d.EnhancedMixedCalleeCount, d.DispatchCalleeDiagnosticCount);
+        for (std::uint32_t index = 0;
+             index < d.DispatchCalleeDiagnosticCount &&
+             index < d.DispatchCallees.size(); ++index)
+        {
+            const auto& candidate = d.DispatchCallees[index];
+            std::fprintf(file,
+                "  callee[%u] rva=0x%X size=0x%X flags=0x%X "
+                "receivers=%u ped-receivers=%u\n",
+                index, candidate.Rva, candidate.Size,
+                candidate.Relations, candidate.CallsiteCount,
+                candidate.WalkerCount);
+        }
+        std::fprintf(file, "anchor-direct-calls: count=%u type=%u "
+            "overlap-callers=%u first-overlap=0x%X sample=%u/%u\n",
+            d.DirectCountCallerCount, d.DirectEventTypeCallerCount,
+            d.RelatedEventWalkerCandidateCount,
+            d.EventWalkerCandidateRva,
+            d.DispatchCallsiteDiagnosticCount,
+            d.DispatchCallsiteCandidateCount);
+        for (std::uint32_t index = 0;
+             index < d.DispatchCallsiteDiagnosticCount &&
+             index < d.DispatchCallsites.size(); ++index)
+        {
+            const auto& call = d.DispatchCallsites[index];
+            std::fprintf(file,
+                "  direct-call[%u] caller=0x%X at=0x%X target=0x%X "
+                "kind=%s\n", index, call.WalkerRva, call.CallsiteRva,
+                call.CalleeRva, call.Relations == 1u ? "count" : "type");
+        }
+        std::fprintf(file, "correlated-triplet: shown=%u\n",
+            d.EnhancedCandidateDiagnosticCount);
+        for (std::uint32_t index = 0;
+             index < d.EnhancedCandidateDiagnosticCount &&
+             index < d.EnhancedCandidates.size(); ++index)
+        {
+            const auto& candidate = d.EnhancedCandidates[index];
+            std::fprintf(file,
+                "  target-candidate[%u] rva=0x%X size=0x%X flags=0x%X\n",
+                index, candidate.Rva, candidate.Size, candidate.Relations);
+        }
+        std::fprintf(file, "selected-paths: shown=%u (static, unvalidated)\n",
+            d.EnhancedSelectedPathDiagnosticCount);
+        for (std::uint32_t index = 0; index <
+            d.EnhancedSelectedPathDiagnosticCount &&
+            index < d.EnhancedSelectedPaths.size(); ++index)
+        {
+            const auto& path = d.EnhancedSelectedPaths[index];
+            std::fprintf(file, "  path[%u] entry=0x%X comparison=0x%X "
+                "transfer=0x%X call=0x%X callee=0x%X "
+                "group-register=%u flags=0x%X bytes-rva=0x%X hex=",
+                index, path.EntryRva, path.ComparisonRva,
+                path.TransferRva, path.CallsiteRva, path.CalleeRva,
+                path.GroupRegister, path.Flags, path.ContextBeginRva);
+            for (std::uint32_t offset = 0;
+                offset < path.ContextLength && offset < path.Context.size();
+                ++offset)
+            {
+                std::fprintf(file, "%02X", path.Context[offset]);
+            }
+            std::fprintf(file, "\n");
+            if ((path.Flags & 0x20u) != 0)
+            {
+                std::fprintf(file,
+                    "    call-abi: rcx=rsi; rdx=zero at shared-callee "
+                    "callsite; not a validated CEvent dispatch\n");
+            }
+        }
+        std::fprintf(file, "virtual-call-candidates: candidates=%u shown=%u "
+            "decoder-stops=%u (static, object provenance unknown)\n",
+            d.EnhancedVirtualCallCandidateCount,
+            d.EnhancedVirtualCallDiagnosticCount,
+            d.EnhancedVirtualCallDecoderStops);
+        if (d.EnhancedDecoderStopRva != 0u)
+        {
+            std::fprintf(file, "  decoder-stop: owner=0x%X at=0x%X "
+                "reason=%u bytes=",
+                d.EnhancedDecoderStopOwnerRva,
+                d.EnhancedDecoderStopRva,
+                d.EnhancedDecoderStopReason);
+            for (std::uint32_t offset = 0;
+                offset < d.EnhancedDecoderStopByteCount &&
+                offset < d.EnhancedDecoderStopBytes.size(); ++offset)
+            {
+                std::fprintf(file, "%02X", d.EnhancedDecoderStopBytes[offset]);
+            }
+            std::fprintf(file, "\n");
+        }
+        for (std::uint32_t index = 0;
+            index < d.EnhancedVirtualCallDiagnosticCount &&
+            index < d.EnhancedVirtualCalls.size(); ++index)
+        {
+            const auto& candidate = d.EnhancedVirtualCalls[index];
+            std::fprintf(file, "  vcall[%u] owner=0x%X at=0x%X "
+                "slot=0x%X base-register=%u owner-kind=%u "
+                "nearby-load=0x%X source-register=%u source-disp=%d "
+                "context-rva=0x%X hex=",
+                index, candidate.OwnerRva, candidate.CallsiteRva,
+                candidate.SlotOffset, candidate.BaseRegister,
+                candidate.OwnerKind, candidate.NearbyLoadRva,
+                candidate.NearbyLoadSourceRegister,
+                candidate.NearbyLoadDisplacement,
+                candidate.ContextBeginRva);
+            for (std::uint32_t offset = 0;
+                offset < candidate.ContextLength &&
+                offset < candidate.Context.size(); ++offset)
+            {
+                std::fprintf(file, "%02X", candidate.Context[offset]);
+            }
+            std::fprintf(file, "\n");
+            std::fprintf(file, "    vtable-chain: object-register=%u "
+                "vtable-load=0x%X this-move=0x%X "
+                "alias-copy=0x%X flags=0x%X structural-only=%s "
+                "(not CEvent identity or hook validation)\n",
+                candidate.ObjectRegister, candidate.VtableLoadRva,
+                candidate.ThisMoveRva, candidate.AliasMoveRva,
+                candidate.ProvenanceFlags,
+                (candidate.ProvenanceFlags & 4u) != 0 ? "yes" : "no");
+        }
+        std::uint32_t structuralChains{};
+        std::uint32_t copiedObjectChains{};
+        std::uint32_t implicitThisChains{};
+        for (std::uint32_t index = 0;
+             index < d.EnhancedVirtualCallDiagnosticCount &&
+             index < d.EnhancedVirtualCalls.size(); ++index)
+        {
+            const auto& candidate = d.EnhancedVirtualCalls[index];
+            if ((candidate.ProvenanceFlags & 4u) != 0)
+            {
+                ++structuralChains;
+                copiedObjectChains += (candidate.ProvenanceFlags & 8u) != 0;
+                implicitThisChains += (candidate.ProvenanceFlags & 16u) != 0;
+            }
+        }
+        std::fprintf(file,
+            "vtable-structural-summary: matched=%u/%u preserved-alias=%u "
+            "implicit-rcx=%u validated-cevent=0 (static evidence only)\n",
+            structuralChains, d.EnhancedVirtualCallDiagnosticCount,
+            copiedObjectChains, implicitThisChains);
+        const auto& stackPath = d.EnhancedStackPath;
+        std::fprintf(file,
+            "enhanced-stack-path: load=0x%X displacement=0x%X "
+            "base-reg=%u index-reg=%u object-reg=%u "
+            "callsite=0x%X slot=0x%X conditional-branches=%u "
+            "flags=0x%X validated-cevent=no "
+            "(static local path, branch dominance unproven)\n",
+            stackPath.StackLoadRva, stackPath.StackDisplacement,
+            stackPath.SourceBaseRegister, stackPath.SourceIndexRegister,
+            stackPath.ObjectRegister, stackPath.CallsiteRva,
+            stackPath.SlotOffset, stackPath.ConditionalBranches,
+            stackPath.Flags);
+        if (stackPath.FirstBranchRva != 0u)
+        {
+            std::fprintf(file,
+                "  stack-branch: at=0x%X target=0x%X "
+                "fallthrough=0x%X leaves-local-path=%s "
+                "(diagnostic-only; no dominance proof)\n",
+                stackPath.FirstBranchRva,
+                stackPath.FirstBranchTargetRva,
+                stackPath.FirstBranchFallthroughRva,
+                stackPath.FirstBranchLeavesLocalPath ? "yes" : "no");
+        }
+        const auto printCfg = [file](const char* name,
+            const EnhancedControlFlowEvidence& cfg)
+        {
+            if (cfg.OwnerRva == 0u)
+            {
+                return;
+            }
+            std::fprintf(file,
+                "enhanced-cfg[%s]: owner=0x%X linear-stop=0x%X "
+                "reachable-linear-stop=%s blocks=%u instructions=%u "
+                "direct-branches=%u conditional-branches=%u "
+                "external-edges=%u followed=%u unfollowed=%u regions=%u "
+                "provisional-regions=%u provisional-edges=%u "
+                "provisional-instructions=%u "
+                "callsite-reachable=%u/%u decode-failures=%u "
+                "first-fault=0x%X budget-exceeded=%s "
+                "(static reachability only, not CEvent identity)\n",
+                name, cfg.OwnerRva, cfg.LinearStopRva,
+                cfg.LinearStopReachable ? "yes" : "no",
+                cfg.BlockStarts, cfg.Instructions,
+                cfg.DirectBranches, cfg.ConditionalBranches,
+                cfg.OutOfFunctionEdges, cfg.FollowedCrossFunctionEdges,
+                cfg.UnfollowedCrossFunctionEdges,
+                cfg.AcceptedFunctionRegions,
+                cfg.ProvisionalRegions, cfg.ProvisionalEdges,
+                cfg.ProvisionalInstructions,
+                cfg.ReachableVirtualCallsites, cfg.CandidateVirtualCallsites,
+                cfg.DecodeFailures, cfg.FirstDecodeFailureRva,
+                cfg.BudgetExceeded ? "yes" : "no");
+            std::fprintf(file,
+                "  cfg-linear-stop[%s]: inside-instruction=%s "
+                "instruction=0x%X length=%u opcode=0x%X "
+                "(instruction boundary diagnostic only)\n",
+                name, cfg.StopInsideInstruction ? "yes" : "no",
+                cfg.StopContainingInstructionRva,
+                cfg.StopContainingInstructionLength,
+                cfg.StopContainingOpcode);
+            for (std::uint32_t edgeIndex = 0u;
+                edgeIndex < cfg.EdgeDiagnosticCount &&
+                edgeIndex < cfg.EdgeDiagnostics.size(); ++edgeIndex)
+            {
+                const auto& edge = cfg.EdgeDiagnostics[edgeIndex];
+                std::fprintf(file,
+                    "  cfg-edge[%s:%u] from=0x%X to=0x%X "
+                    "destination-function=[0x%X,0x%X) status=%u "
+                    "probe-instructions=%u probe-bytes=%u "
+                    "jump-len=%u displacement=%lld "
+                    "section=%.8s range=[0x%X,0x%X) characteristics=0x%X "
+                    "page-state=0x%X page-protect=0x%X source-bytes=",
+                    name, edgeIndex, edge.SourceRva, edge.TargetRva,
+                    edge.DestinationFunctionRva, edge.DestinationFunctionEndRva,
+                    edge.Status, edge.ProbeInstructions,
+                    edge.ProbeRegionBytes, edge.JumpLength,
+                    static_cast<long long>(edge.JumpDisplacement),
+                    edge.SectionName.data(), edge.SectionStartRva,
+                    edge.SectionEndRva, edge.SectionCharacteristics,
+                    edge.PageState, edge.PageProtection);
+                for (std::uint32_t j = 0; j < edge.SourceByteCount &&
+                    j < edge.SourceBytes.size(); ++j)
+                {
+                    std::fprintf(file, "%02X", edge.SourceBytes[j]);
+                }
+                std::fprintf(file, " target-bytes=");
+                for (std::uint32_t j = 0; j < edge.DestinationByteCount &&
+                    j < edge.DestinationBytes.size(); ++j)
+                {
+                    std::fprintf(file, "%02X", edge.DestinationBytes[j]);
+                }
+                std::fprintf(file, "\n");
+            }
+        };
+        std::fprintf(file,
+            "cfg-provisional-status: 7=bounded-unwindless-diagnostic "
+            "8=section-not-executable 9=probe-rejected; "
+            "never validates a CEvent or permits installation of hooks\n");
+        printCfg("decoder", d.EnhancedControlFlow);
+        printCfg("count", d.EnhancedCountControlFlow);
+        printCfg("type", d.EnhancedTypeControlFlow);
+        std::fprintf(file, "static-call-evidence: candidates=%u "
+            "shown=%u decoder-stops=%u (unvalidated)\n",
+            d.EnhancedCallEvidenceCandidateCount,
+            d.EnhancedCallEvidenceDiagnosticCount,
+            d.EnhancedCallDecoderStopCount);
+        for (std::uint32_t index = 0;
+            index < d.EnhancedCallEvidenceDiagnosticCount &&
+            index < d.EnhancedCallEvidenceSamples.size(); ++index)
+        {
+            const auto& call = d.EnhancedCallEvidenceSamples[index];
+            std::fprintf(file, "  call[%u] owner=0x%X at=0x%X kind=%u "
+                "target=0x%X operand-offset=0x%X register=%u hex=",
+                index, call.OwnerRva, call.CallsiteRva, call.Kind,
+                call.TargetRva, call.OperandOffset, call.BaseRegister);
+            for (std::uint32_t offset = 0;
+                offset < call.Length && offset < call.Bytes.size(); ++offset)
+            {
+                std::fprintf(file, "%02X", call.Bytes[offset]);
+            }
+            std::fprintf(file, "\n");
+        }
+        if (located.Targets.Edition == GameEdition::Enhanced &&
+            located.State != Status::Ready)
+        {
+            if (d.DamageMatchCount == 0)
+            {
+                std::fprintf(file, "Damage: the Legacy byte signature has "
+                    "no match in Enhanced; no Enhanced Damage target "
+                    "was inferred.\n");
+            }
+            std::fprintf(file,
+                "Enhanced hooks are not installed. Candidate addresses and "
+                "ABI are not validated.\n");
+        }
+        static_cast<void>(std::fclose(file));
+    }
+
     void BuildDynamicProbeLogPath() noexcept
     {
         g_dynamicProbeLogPath.fill(L'\0');
@@ -2432,10 +2806,7 @@ namespace
             static_cast<DWORD>(g_dynamicProbeLogPath.size()));
         if (length == 0 || length >= g_dynamicProbeLogPath.size())
         {
-            static_cast<void>(wcscpy_s(
-                g_dynamicProbeLogPath.data(),
-                g_dynamicProbeLogPath.size(),
-                DynamicProbeLogName));
+            g_dynamicProbeLogPath.fill(L'\0');
             return;
         }
         wchar_t* slash = wcsrchr(
@@ -2451,23 +2822,19 @@ namespace
         }
         if (slash == nullptr)
         {
-            static_cast<void>(wcscpy_s(
-                g_dynamicProbeLogPath.data(),
-                g_dynamicProbeLogPath.size(),
-                DynamicProbeLogName));
+            g_dynamicProbeLogPath.fill(L'\0');
             return;
         }
         const std::size_t prefix = static_cast<std::size_t>(
             slash + 1 - g_dynamicProbeLogPath.data());
-        if (prefix + std::size(DynamicProbeLogName) >
-            g_dynamicProbeLogPath.size())
+        if (prefix + std::size(DiagnosticLogName) >
+            g_dynamicProbeLogPath.size() ||
+            wcscpy_s(slash + 1,
+                g_dynamicProbeLogPath.size() - prefix,
+                DiagnosticLogName) != 0)
         {
-            return;
+            g_dynamicProbeLogPath.fill(L'\0');
         }
-        static_cast<void>(wcscpy_s(
-            slash + 1,
-            g_dynamicProbeLogPath.size() - prefix,
-            DynamicProbeLogName));
     }
 
     [[nodiscard]] const char* DynamicProbeRecordKindName(
@@ -3078,13 +3445,13 @@ namespace
         g_dynamicProbeArmed.store(
             virtualCount != 0,
             std::memory_order_release);
-        BuildDynamicProbeLogPath();
-        if (CEventGenerator::Configuration::LogEnabled() &&
-            g_dynamicProbeLogPath[0] != L'\0')
+        if (CEventGenerator::Configuration::LogEnabled())
         {
-            static_cast<void>(
-                DeleteFileW(
-                    g_dynamicProbeLogPath.data()));
+            BuildDynamicProbeLogPath();
+        }
+        else
+        {
+            g_dynamicProbeLogPath.fill(L'\0');
         }
     }
 
@@ -3135,6 +3502,7 @@ namespace CEventGenerator
             std::memory_order_release);
 
         EventLocatorResult located = LocateEventHooks();
+        WriteLocatorSnapshot(located);
         g_gameEdition.store(located.Targets.Edition, std::memory_order_release);
         g_gameBuild.store(located.Targets.GameBuild, std::memory_order_release);
         g_locatorFailure.store(
@@ -3240,6 +3608,26 @@ namespace CEventGenerator
                 std::memory_order_release);
             g_enhancedCandidateRelations[index].store(
                 located.Diagnostics.EnhancedCandidates[index].Relations,
+                std::memory_order_release);
+        }
+        g_producerCandidateCount.store(
+            located.Diagnostics.ProducerCandidateCount,
+            std::memory_order_release);
+        g_producerDiagnosticCount.store(
+            located.Diagnostics.ProducerDiagnosticCount,
+            std::memory_order_release);
+        for (std::size_t index = 0;
+             index < EnhancedProducerDiagnosticCapacity;
+             ++index)
+        {
+            g_producerRvas[index].store(
+                located.Diagnostics.Producers[index].Rva,
+                std::memory_order_release);
+            g_producerSizes[index].store(
+                located.Diagnostics.Producers[index].Size,
+                std::memory_order_release);
+            g_producerRelations[index].store(
+                located.Diagnostics.Producers[index].Relations,
                 std::memory_order_release);
         }
         g_dispatchCallsiteCandidateCount.store(
@@ -3706,6 +4094,13 @@ namespace CEventGenerator
             }
         }
         g_dynamicProbeToggleDown = down;
+        if (g_dynamicProbeActive.load(std::memory_order_acquire) &&
+            GetTickCount64() -
+                g_dynamicProbeSessionStartTick.load(
+                    std::memory_order_acquire) >= DynamicProbeMaximumSessionMs)
+        {
+            StopDynamicProbe(true);
+        }
     }
 
     bool IsDynamicProbeArmed() noexcept
@@ -3928,6 +4323,37 @@ namespace CEventGenerator
     {
         return index < g_enhancedCandidateRelations.size()
             ? g_enhancedCandidateRelations[index].load(std::memory_order_acquire)
+            : 0;
+    }
+
+    std::uint32_t GetProducerCandidateCount() noexcept
+    {
+        return g_producerCandidateCount.load(std::memory_order_acquire);
+    }
+
+    std::uint32_t GetProducerDiagnosticCount() noexcept
+    {
+        return g_producerDiagnosticCount.load(std::memory_order_acquire);
+    }
+
+    std::uint32_t GetProducerRva(std::uint32_t index) noexcept
+    {
+        return index < g_producerRvas.size()
+            ? g_producerRvas[index].load(std::memory_order_acquire)
+            : 0;
+    }
+
+    std::uint32_t GetProducerSize(std::uint32_t index) noexcept
+    {
+        return index < g_producerSizes.size()
+            ? g_producerSizes[index].load(std::memory_order_acquire)
+            : 0;
+    }
+
+    std::uint32_t GetProducerRelations(std::uint32_t index) noexcept
+    {
+        return index < g_producerRelations.size()
+            ? g_producerRelations[index].load(std::memory_order_acquire)
             : 0;
     }
 

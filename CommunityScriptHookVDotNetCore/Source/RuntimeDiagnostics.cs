@@ -35,6 +35,12 @@ public interface IRuntimeDiagnosticEvents
     event Action? Available;
 }
 
+public interface IRuntimeInformationSink
+{
+    long RuntimeStartedAtTimestamp { get; }
+    void Information(string message);
+}
+
 public interface IRuntimeDiagnosticSink
 {
     void Warning(string source, string message, string? origin = null);

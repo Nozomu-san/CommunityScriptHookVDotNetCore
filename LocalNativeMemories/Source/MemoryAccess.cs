@@ -171,6 +171,9 @@ internal static class MemoryAccess
         return true;
     }
 
+    internal static bool TryWriteUInt32(nint address, uint value) =>
+        TryWriteBytes(address, BitConverter.GetBytes(value));
+
     internal static bool TryReadUInt64(
         nint address,
         out ulong value)
@@ -676,6 +679,11 @@ internal sealed class LocalMemoryService : ILocalMemory
         MemoryAccess.TryReadUInt32(address, out uint value)
             ? LocalDataResult<uint>.Succeeded(value)
             : LocalDataResult<uint>.Failed(LocalDataStatus.AccessRejected);
+
+    public LocalDataStatus WriteUInt32(nint address, uint value) =>
+        MemoryAccess.TryWriteUInt32(address, value)
+            ? LocalDataStatus.Success
+            : LocalDataStatus.AccessRejected;
 
     public LocalDataResult<ulong> ReadUInt64(nint address) =>
         MemoryAccess.TryReadUInt64(address, out ulong value)

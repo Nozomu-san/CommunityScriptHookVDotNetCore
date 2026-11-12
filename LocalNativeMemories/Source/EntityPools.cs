@@ -4,10 +4,18 @@ using CommunityScriptHookVDotNetCore.Source;
 
 namespace LocalNativeMemories.Source;
 
+internal readonly record struct PoolAdmissionEvidence(
+    LocalPoolKinds Kind,
+    LocalPoolStatistics Direct,
+    int EnumeratedCount,
+    bool GuidVerified);
+
 internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 {
-    private const int LocalSlotsPerHostFrame = 32;
-    private const int MaximumHandleResolutionsPerHostFrame = 8;
+    private const int LocalSlotsPerHostFrame = 16;
+    private const int MaximumHandleResolutionsPerHostFrame = 1;
+    private static readonly long HostFrameBudgetTicks =
+        Math.Max(1L, Stopwatch.Frequency / 1000L);
     private const int MaximumIdentityQueue = 256;
     private const int MaximumIdentityCache = 512;
     private static readonly LocalPoolKinds[] PoolOrder =
@@ -28,10 +36,12 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
     private readonly IGameThreadFunctionTransport _gameThread;
     private readonly Lock _gate = new();
     private readonly Dictionary<LocalPoolKinds, PublishedPool> _published = [];
-    private readonly Dictionary<LocalPoolKinds, PublishedStatistics> _statistics = [];
+    private LocalPoolCountsSnapshot? _latestCounts;
+    private int _countRequested;
+    private int _admissionGranted;
+    private int _pendingWork;
     private readonly Dictionary<LocalPoolKinds, PoolRefreshState> _refreshes = [];
     private readonly Dictionary<LocalPoolKinds, long> _nextRefreshAt = [];
-    private readonly Dictionary<LocalPoolKinds, long> _nextStatisticsAt = [];
     private readonly Queue<nint> _identityRequests = [with(MaximumIdentityQueue)];
     private readonly HashSet<nint> _identityPending = [];
     private readonly Dictionary<nint, CachedIdentity> _identityCache = [];
@@ -68,6 +78,16 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
             gameThread ?? throw new ArgumentNullException(nameof(gameThread));
     }
 
+    public LocalDataResult<LocalPoolCountsSnapshot> GetCountSnapshot()
+    {
+        Interlocked.Exchange(ref _countRequested, 1);
+        LocalPoolCountsSnapshot? counts = Volatile.Read(ref _latestCounts);
+        return counts is null
+            ? LocalDataResult<LocalPoolCountsSnapshot>.Failed(
+                LocalDataStatus.DataUnavailable)
+            : LocalDataResult<LocalPoolCountsSnapshot>.Succeeded(counts);
+    }
+
     public LocalDataResult<LocalPoolStatistics> GetStatistics(
         LocalPoolKinds kind)
     {
@@ -77,51 +97,209 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
                 LocalDataStatus.InvalidRequest);
         }
 
+        LocalDataResult<LocalPoolCountsSnapshot> result = GetCountSnapshot();
+        if (!result.IsSuccess)
+        {
+            return LocalDataResult<LocalPoolStatistics>.Failed(result.Status);
+        }
+
+        return LocalDataResult<LocalPoolStatistics>.Succeeded(kind switch
+        {
+            LocalPoolKinds.Peds => result.Value.Peds,
+            LocalPoolKinds.Vehicles => result.Value.Vehicles,
+            _ => result.Value.Objects
+        });
+    }
+
+    internal void GrantAdmission()
+    {
+        Volatile.Write(ref _admissionGranted, 1);
+        Interlocked.Exchange(ref _countRequested, 1);
+    }
+
+    internal LocalDataResult<LocalPoolCountsSnapshot> ReadDirectCounts(
+        ulong hostFrameIndex)
+    {
         lock (_gate)
         {
-            long now = Stopwatch.GetTimestamp();
-            if (_statistics.TryGetValue(
-                    kind,
-                    out PublishedStatistics cached) &&
-                now < _nextStatisticsAt.GetValueOrDefault(kind))
+            LocalDataResult<LocalPoolStatistics> peds =
+                ReadDirectStatistics(LocalPoolKinds.Peds);
+            LocalDataResult<LocalPoolStatistics> vehicles =
+                ReadDirectStatistics(LocalPoolKinds.Vehicles);
+            LocalDataResult<LocalPoolStatistics> objects =
+                ReadDirectStatistics(LocalPoolKinds.Objects);
+            if (!peds.IsSuccess || !vehicles.IsSuccess || !objects.IsSuccess)
             {
-                return cached.Status is LocalDataStatus.Success
-                    ? LocalDataResult<LocalPoolStatistics>.Succeeded(
-                        cached.Statistics)
-                    : LocalDataResult<LocalPoolStatistics>.Failed(
-                        cached.Status);
+                return LocalDataResult<LocalPoolCountsSnapshot>.Failed(
+                    !peds.IsSuccess ? peds.Status :
+                    !vehicles.IsSuccess ? vehicles.Status : objects.Status);
             }
 
+            return LocalDataResult<LocalPoolCountsSnapshot>.Succeeded(
+                new(hostFrameIndex, peds.Value, vehicles.Value, objects.Value));
+        }
+    }
+
+    private LocalDataResult<LocalPoolStatistics> ReadDirectStatistics(
+        LocalPoolKinds kind)
+    {
+        LocalDataResult<PoolBackendLocation[]> candidates =
+            _backends.ResolvePoolCandidates(kind);
+        if (!candidates.IsSuccess)
+        {
+            return LocalDataResult<LocalPoolStatistics>.Failed(
+                candidates.Status);
+        }
+
+        LocalDataStatus lastFailure = LocalDataStatus.DataUnavailable;
+        foreach (PoolBackendLocation candidate in candidates.Value)
+        {
+            LocalDataResult<LocalPoolStatistics> result =
+                _verification.ReadStatistics(kind, candidate.Address);
+            if (result.IsSuccess)
+            {
+                return result;
+            }
+            lastFailure = result.Status;
+        }
+        return LocalDataResult<LocalPoolStatistics>.Failed(lastFailure);
+    }
+
+    internal LocalDataResult<PoolAdmissionEvidence> VerifyAdmissionPool(
+        LocalPoolKinds kind, out string details)
+    {
+        details = "stage=invalid-pool-kind";
+        if (!IsSingleKind(kind))
+        {
+            return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                LocalDataStatus.InvalidRequest);
+        }
+
+        lock (_gate)
+        {
             LocalDataResult<PoolBackendLocation[]> candidates =
                 _backends.ResolvePoolCandidates(kind);
             if (!candidates.IsSuccess)
             {
-                PublishStatisticsFailure(kind, candidates.Status, now);
-                return ReadPublishedStatistics(kind);
+                details = $"stage=resolve-pool-candidates status={candidates.Status}";
+                return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                    candidates.Status);
             }
 
-            LocalDataStatus lastFailure = LocalDataStatus.DataUnavailable;
-            foreach (PoolBackendLocation candidate in candidates.Value)
+            List<string> attempts = [];
+            for (int index = 0; index < candidates.Value.Length; ++index)
             {
-                LocalDataResult<LocalPoolStatistics> result =
-                    _verification.ReadStatistics(
-                        kind,
-                        candidate.Address);
-                if (result.IsSuccess)
+                PoolBackendLocation candidate = candidates.Value[index];
+                string label = $"candidate={index + 1}/{candidates.Value.Length}";
+                LocalDataResult<PoolAdmissionProbe> probe =
+                    _verification.ReadAdmissionProbe(kind, candidate.Address);
+                if (!probe.IsSuccess)
                 {
-                    PublishStatisticsSuccess(kind, result.Value, now);
-                    return result;
+                    attempts.Add($"{label} stage=read-admission-probe status={probe.Status}");
+                    continue;
                 }
 
-                lastFailure = result.Status;
+                LocalDataResult<LocalPoolStatistics> counts =
+                    _verification.ReadStatistics(kind, candidate.Address);
+                if (!counts.IsSuccess)
+                {
+                    attempts.Add($"{label} stage=read-direct-statistics status={counts.Status}");
+                    details = string.Join("; ", attempts);
+                    return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                        LocalDataStatus.DataUnavailable);
+                }
+                if (counts.Value.Capacity != probe.Value.Capacity)
+                {
+                    attempts.Add($"{label} stage=capacity-compare " +
+                        $"directCapacity={counts.Value.Capacity} " +
+                        $"probeCapacity={probe.Value.Capacity} result=FAIL");
+                    details = string.Join("; ", attempts);
+                    return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                        LocalDataStatus.DataUnavailable);
+                }
+
+                if (probe.Value.Sample.IsAllocated)
+                {
+                    LocalDataResult<nint> createGuid =
+                        _backends.ResolveCreateGuid();
+                    LocalDataResult<nint> guidPool =
+                        _backends.ResolveScriptGuidPool();
+                    if (!createGuid.IsSuccess || !guidPool.IsSuccess)
+                    {
+                        attempts.Add($"{label} stage=guid-resolver " +
+                            $"createGuid={createGuid.Status} guidPool={guidPool.Status}");
+                        details = string.Join("; ", attempts);
+                        return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                            LocalDataStatus.DataUnavailable);
+                    }
+                    if (!_memory.IsExecutableRange(createGuid.Value, 1))
+                    {
+                        attempts.Add($"{label} stage=guid-executable-range result=FAIL");
+                        details = string.Join("; ", attempts);
+                        return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                            LocalDataStatus.DataUnavailable);
+                    }
+                    if (!_verification.CanCreateScriptGuid(guidPool.Value))
+                    {
+                        attempts.Add($"{label} stage=guid-pool-capacity result=FAIL");
+                        details = string.Join("; ", attempts);
+                        return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                            LocalDataStatus.DataUnavailable);
+                    }
+
+                    GameThreadInt32CallResult result =
+                        _gameThread.InvokeInt32Guarded(
+                            createGuid.Value,
+                            probe.Value.Sample.Entity,
+                            ToGameThreadGuard(
+                                probe.Value.Sample.PrimaryGuard),
+                            ToGameThreadGuard(
+                                probe.Value.Sample.SecondaryGuard));
+                    if (!result.IsSuccess || result.Value == 0)
+                    {
+                        attempts.Add($"{label} stage=guarded-guid-call " +
+                            $"callSucceeded={result.IsSuccess} " +
+                            $"nonzeroHandle={(result.IsSuccess && result.Value != 0)} " +
+                            "result=FAIL");
+                        details = string.Join("; ", attempts);
+                        return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                            LocalDataStatus.DataUnavailable);
+                    }
+                }
+
+                attempts.Add($"{label} stage=pool-probe-and-capacity-compare " +
+                    $"result=PASS guidCallRequired={probe.Value.Sample.IsAllocated}");
+                details = string.Join("; ", attempts);
+                return LocalDataResult<PoolAdmissionEvidence>.Succeeded(
+                    new(kind, counts.Value, probe.Value.OccupiedCount,
+                        probe.Value.Sample.IsAllocated));
             }
 
-            PublishStatisticsFailure(kind, lastFailure, now);
-            return ReadPublishedStatistics(kind);
+            if (attempts.Count == 0)
+            {
+                details = "stage=resolve-pool-candidates result=FAIL candidates=0";
+            }
+            else
+            {
+                details = string.Join("; ", attempts);
+            }
+            return LocalDataResult<PoolAdmissionEvidence>.Failed(
+                LocalDataStatus.DataUnavailable);
         }
     }
 
     public LocalDataResult<EntityPoolsSnapshot> Capture(LocalPoolKinds kinds)
+    {
+        if (Volatile.Read(ref _admissionGranted) == 0)
+        {
+            return LocalDataResult<EntityPoolsSnapshot>.Failed(
+                LocalDataStatus.DataUnavailable);
+        }
+        return CaptureCore(kinds);
+    }
+
+    private LocalDataResult<EntityPoolsSnapshot> CaptureCore(
+        LocalPoolKinds kinds)
     {
         if ((kinds & ~LocalPoolKinds.All) != 0 ||
             kinds is LocalPoolKinds.None)
@@ -133,6 +311,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         lock (_gate)
         {
             _demanded |= kinds;
+            Volatile.Write(ref _pendingWork, 1);
 
             LocalPoolSnapshot peds = LocalPoolSnapshot.Empty;
             LocalPoolSnapshot vehicles = LocalPoolSnapshot.Empty;
@@ -258,6 +437,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 
             _identityRequests.Enqueue(entityAddress);
             _identityPending.Add(entityAddress);
+            Volatile.Write(ref _pendingWork, 1);
             ++_identityRequestsAccepted;
             return LocalDataStatus.DataUnavailable;
         }
@@ -290,8 +470,27 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         }
     }
 
-    internal void AdvanceHostFrame()
+    internal bool HasPendingWork =>
+        Volatile.Read(ref _countRequested) != 0 ||
+        Volatile.Read(ref _pendingWork) != 0;
+
+    internal void AdvanceHostFrame(ulong hostFrameIndex)
     {
+        if (!HasPendingWork)
+        {
+            return;
+        }
+
+        if (Volatile.Read(ref _admissionGranted) != 0 &&
+            Interlocked.Exchange(ref _countRequested, 0) != 0)
+        {
+            LocalDataResult<LocalPoolCountsSnapshot> counts =
+                ReadDirectCounts(hostFrameIndex);
+            Interlocked.Exchange(ref _latestCounts,
+                counts.IsSuccess ? counts.Value : null);
+        }
+
+        long deadline = Stopwatch.GetTimestamp() + HostFrameBudgetTicks;
         lock (_gate)
         {
             long now = Stopwatch.GetTimestamp();
@@ -299,6 +498,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
             int identityBudget = ResolveIdentityBudget();
             while (identityBudget > 0 &&
                    remainingHandleResolutions > 0 &&
+                   Stopwatch.GetTimestamp() < deadline &&
                    AdvanceIdentity(now))
             {
                 --identityBudget;
@@ -307,6 +507,8 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 
             if (_demanded is LocalPoolKinds.None)
             {
+                Volatile.Write(ref _pendingWork,
+                    _identityRequests.Count != 0 ? 1 : 0);
                 return;
             }
 
@@ -315,6 +517,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 
             while (remainingSlots > 0 &&
                    remainingHandleResolutions > 0 &&
+                   Stopwatch.GetTimestamp() < deadline &&
                    _demanded is not LocalPoolKinds.None &&
                    withoutProgress < PoolOrder.Length)
             {
@@ -331,6 +534,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
                     kind,
                     now,
                     remainingSlots,
+                    deadline,
                     out int processedSlots,
                     out bool resolvedHandle);
 
@@ -349,6 +553,10 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
                     ++withoutProgress;
                 }
             }
+            Volatile.Write(ref _pendingWork,
+                _demanded != LocalPoolKinds.None || _identityRequests.Count != 0
+                    ? 1
+                    : 0);
         }
     }
 
@@ -599,6 +807,7 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         LocalPoolKinds kind,
         long now,
         int slotBudget,
+        long deadline,
         out int processedSlots,
         out bool resolvedHandle)
     {
@@ -644,11 +853,17 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
 
         if (state.VehicleView is VehiclePoolView vehicle)
         {
+            if (!_verification.IsCurrent(vehicle))
+            {
+                state.AbandonCandidate(LocalDataStatus.VerificationFailed);
+                return false;
+            }
             ProcessVehicleSlots(
                 state,
                 vehicle,
                 ref processedSlots,
                 slotBudget,
+                deadline,
                 ref resolvedHandle);
             if (state.SlotIndex >= vehicle.Capacity)
             {
@@ -661,11 +876,17 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         }
         else if (state.FwView is FwPoolView fw)
         {
+            if (!_verification.IsCurrent(fw))
+            {
+                state.AbandonCandidate(LocalDataStatus.VerificationFailed);
+                return false;
+            }
             ProcessFwSlots(
                 state,
                 fw,
                 ref processedSlots,
                 slotBudget,
+                deadline,
                 ref resolvedHandle);
             if (state.SlotIndex >= fw.Capacity)
             {
@@ -784,10 +1005,12 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         FwPoolView view,
         ref int processed,
         int budget,
+        long deadline,
         ref bool resolvedHandle)
     {
         while (processed < budget &&
                state.SlotIndex < view.Capacity &&
+               (processed == 0 || Stopwatch.GetTimestamp() < deadline) &&
                !resolvedHandle)
         {
             int index = state.SlotIndex;
@@ -797,6 +1020,12 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
                     index);
             if (!probe.IsSuccess)
             {
+                if (IsTransientSlotFailure(probe.Status))
+                {
+                    state.SlotIndex++;
+                    ++processed;
+                    continue;
+                }
                 state.AbandonCandidate(probe.Status);
                 return;
             }
@@ -826,10 +1055,12 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         VehiclePoolView view,
         ref int processed,
         int budget,
+        long deadline,
         ref bool resolvedHandle)
     {
         while (processed < budget &&
                state.SlotIndex < view.Capacity &&
+               (processed == 0 || Stopwatch.GetTimestamp() < deadline) &&
                !resolvedHandle)
         {
             int index = state.SlotIndex;
@@ -839,6 +1070,12 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
                     index);
             if (!probe.IsSuccess)
             {
+                if (IsTransientSlotFailure(probe.Status))
+                {
+                    state.SlotIndex++;
+                    ++processed;
+                    continue;
+                }
                 state.AbandonCandidate(probe.Status);
                 return;
             }
@@ -862,6 +1099,11 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
             }
         }
     }
+
+    private static bool IsTransientSlotFailure(LocalDataStatus status) =>
+        status is LocalDataStatus.DataUnavailable or
+            LocalDataStatus.AccessRejected or
+            LocalDataStatus.VerificationFailed;
 
     private bool TryAddHandle(
         PoolRefreshState state,
@@ -985,13 +1227,9 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         long now)
     {
         _published[kind] = new(LocalDataStatus.Success, snapshot);
-        _statistics[kind] = new(
-            LocalDataStatus.Success,
-            snapshot.Statistics);
         _refreshes.Remove(kind);
         long next = checked(now + RefreshIntervalTicks);
         _nextRefreshAt[kind] = next;
-        _nextStatisticsAt[kind] = next;
     }
 
     private void PublishFailure(
@@ -1006,48 +1244,6 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
         _published[kind] = new(failure, retained);
         _refreshes.Remove(kind);
         _nextRefreshAt[kind] = checked(now + RefreshIntervalTicks);
-    }
-
-    private LocalDataResult<LocalPoolStatistics> ReadPublishedStatistics(
-        LocalPoolKinds kind)
-    {
-        if (_statistics.TryGetValue(
-                kind,
-                out PublishedStatistics published))
-        {
-            return published.Status is LocalDataStatus.Success
-                ? LocalDataResult<LocalPoolStatistics>.Succeeded(
-                    published.Statistics)
-                : LocalDataResult<LocalPoolStatistics>.Failed(
-                    published.Status);
-        }
-
-        return LocalDataResult<LocalPoolStatistics>.Failed(
-            LocalDataStatus.DataUnavailable);
-    }
-
-    private void PublishStatisticsSuccess(
-        LocalPoolKinds kind,
-        LocalPoolStatistics statistics,
-        long now)
-    {
-        _statistics[kind] = new(LocalDataStatus.Success, statistics);
-        _nextStatisticsAt[kind] = checked(now + RefreshIntervalTicks);
-    }
-
-    private void PublishStatisticsFailure(
-        LocalPoolKinds kind,
-        LocalDataStatus failure,
-        long now)
-    {
-        LocalPoolStatistics retained =
-            _statistics.TryGetValue(
-                kind,
-                out PublishedStatistics current)
-                ? current.Statistics
-                : LocalPoolStatistics.Empty;
-        _statistics[kind] = new(failure, retained);
-        _nextStatisticsAt[kind] = checked(now + RefreshIntervalTicks);
     }
 
     private static bool IsSingleKind(LocalPoolKinds kind) =>
@@ -1094,10 +1290,6 @@ internal sealed class EntityPools : ILocalEntityPools, ILocalEntityIdentity
     private readonly record struct PublishedPool(
         LocalDataStatus Status,
         LocalPoolSnapshot Snapshot);
-
-    private readonly record struct PublishedStatistics(
-        LocalDataStatus Status,
-        LocalPoolStatistics Statistics);
 
     private sealed class PoolRefreshState(
         LocalPoolKinds kind,

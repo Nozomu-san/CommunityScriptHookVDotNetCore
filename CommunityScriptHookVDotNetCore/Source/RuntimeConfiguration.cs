@@ -58,7 +58,13 @@ public static class RuntimeIni
 
     public static RuntimeIniResult LoadOrCreate(
         string path,
-        IReadOnlyList<RuntimeIniEntry> entries)
+        IReadOnlyList<RuntimeIniEntry> entries) =>
+        LoadOrCreate(path, entries, reconcile: null);
+
+    internal static RuntimeIniResult LoadOrCreate(
+        string path,
+        IReadOnlyList<RuntimeIniEntry> entries,
+        Func<IReadOnlyDictionary<string, string>, IReadOnlyDictionary<string, string>?>? reconcile)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(entries);
@@ -158,12 +164,53 @@ public static class RuntimeIni
                 }
             }
 
+            if (reconcile is not null)
+            {
+                IReadOnlyDictionary<string, string>? corrections = reconcile(
+                    new ReadOnlyDictionary<string, string>(values));
+                if (corrections is not null)
+                {
+                    foreach (KeyValuePair<string, string> correction in corrections)
+                    {
+                        if (!schema.TryGetValue(correction.Key, out RuntimeIniEntry? entry))
+                        {
+                            throw new InvalidOperationException(
+                                $"Unknown INI repair key '{correction.Key}'.");
+                        }
+
+                        string normalized = entry.Normalize(correction.Value)
+                            ?? throw new InvalidOperationException(
+                                $"Invalid INI repair value for '{correction.Key}'.");
+                        if (!values[entry.Key].Equals(normalized, StringComparison.Ordinal))
+                        {
+                            values[entry.Key] = normalized;
+                            repairKeys.Add(entry.Key);
+                        }
+                    }
+                }
+            }
+
             bool repair = repairKeys.Count != 0;
             if (repair)
             {
-                WriteAtomic(
-                    fullPath,
-                    Repair(lines, entries, schema, values, repairKeys));
+                try
+                {
+                    WriteAtomic(
+                        fullPath,
+                        Repair(lines, entries, schema, values, repairKeys));
+                }
+                catch (Exception exception) when (
+                    exception is IOException or
+                        UnauthorizedAccessException or
+                        ArgumentException or
+                        NotSupportedException)
+                {
+                    return new(
+                        new ReadOnlyDictionary<string, string>(values),
+                        normalized: false,
+                        $"{Path.GetFileName(fullPath)} could not be normalized on disk. " +
+                        $"Repaired values are in use for this session: {exception.Message}");
+                }
             }
 
             return new(
@@ -379,7 +426,10 @@ public static class RuntimeIni
         string directory = Path.GetDirectoryName(fullPath)
             ?? throw new InvalidOperationException(
                 "INI path has no parent directory.");
-        Directory.CreateDirectory(directory);
+        if (!Directory.Exists(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
         string temporary = Path.Combine(
             directory,
             $"{Path.GetFileName(fullPath)}.{Guid.NewGuid():N}.tmp");
@@ -446,7 +496,8 @@ internal sealed record RuntimeConfiguration(
                     "true",
                     RuntimeIni.NormalizeBoolean,
                     "If you wish to toggle your logs.")
-            ]);
+            ],
+            values => ResolveDirectoryConflict(root, values));
 
         string extensions = ResolveRelativeDirectory(
             root,
@@ -456,13 +507,8 @@ internal sealed record RuntimeConfiguration(
             loaded.Get("Scripts4Directory"));
         if (extensions.Equals(scripts, StringComparison.OrdinalIgnoreCase))
         {
-            extensions = Path.Combine(root, "extensions");
-            scripts = Path.Combine(root, "scripts4");
-            return new(
-                extensions,
-                scripts,
-                true,
-                $"{FileName} resolved both directories to the same path. Session defaults are in use.");
+            throw new InvalidOperationException(
+                $"{FileName} cannot assign both infrastructures to the same directory.");
         }
 
         return new(
@@ -470,6 +516,24 @@ internal sealed record RuntimeConfiguration(
             scripts,
             loaded.GetBoolean("LogEnabled"),
             loaded.Diagnostic);
+    }
+
+    private static Dictionary<string, string>? ResolveDirectoryConflict(
+        string root,
+        IReadOnlyDictionary<string, string> values)
+    {
+        string extensions = ResolveRelativeDirectory(
+            root, values["ExtensionsDirectory"]);
+        string scripts = ResolveRelativeDirectory(
+            root, values["Scripts4Directory"]);
+        if (!extensions.Equals(scripts, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        return !extensions.Equals(
+            Path.Combine(root, "scripts4"), StringComparison.OrdinalIgnoreCase)
+            ? new Dictionary<string, string> { ["Scripts4Directory"] = "scripts4" }
+            : new Dictionary<string, string> { ["ExtensionsDirectory"] = "extensions" };
     }
 
     private static string? NormalizeRelativeDirectory(

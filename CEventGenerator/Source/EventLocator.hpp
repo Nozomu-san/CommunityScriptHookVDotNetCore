@@ -9,6 +9,7 @@
 namespace CEventGenerator
 {
     inline constexpr std::size_t EnhancedDiagnosticCandidateCapacity = 16;
+    inline constexpr std::size_t EnhancedProducerDiagnosticCapacity = 16;
     inline constexpr std::size_t EnhancedDispatchCallsiteDiagnosticCapacity = 16;
     inline constexpr std::size_t EnhancedDispatchCalleeDiagnosticCapacity = 16;
     inline constexpr std::size_t EnhancedDispatchForwardCallsiteDiagnosticCapacity = 16;
@@ -18,8 +19,19 @@ namespace CEventGenerator
     inline constexpr std::size_t EnhancedVirtualSlotDiagnosticCapacity = 24;
     inline constexpr std::size_t EnhancedVirtualSlotCallsiteDiagnosticCapacity = 48;
     inline constexpr std::size_t EnhancedRttiEventTypeDiagnosticCapacity = 32;
+    inline constexpr std::size_t EnhancedSelectedPathDiagnosticCapacity = 4;
+    inline constexpr std::size_t EnhancedCallEvidenceCapacity = 48;
+    inline constexpr std::size_t EnhancedVirtualCallEvidenceCapacity = 48;
+    inline constexpr std::size_t EnhancedCodeWindowCapacity = 64;
 
     struct EnhancedCandidateDiagnostic final
+    {
+        std::uint32_t Rva{};
+        std::uint32_t Size{};
+        std::uint32_t Relations{};
+    };
+
+    struct EnhancedProducerDiagnostic final
     {
         std::uint32_t Rva{};
         std::uint32_t Size{};
@@ -182,6 +194,69 @@ namespace CEventGenerator
         std::uint32_t SlotF8TargetRva{0xFFFFFFFFu};
     };
 
+    struct EnhancedSelectedPathDiagnostic final
+    {
+        std::uint32_t EntryRva{};
+        std::uint32_t ComparisonRva{};
+        std::uint32_t TransferRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t CalleeRva{};
+        std::uint32_t GroupRegister{};
+        std::uint32_t Flags{};
+        std::uint32_t ContextBeginRva{};
+        std::uint32_t ContextLength{};
+        std::array<std::uint8_t, EnhancedCodeWindowCapacity> Context{};
+    };
+
+    struct EnhancedCallEvidence final
+    {
+        std::uint32_t OwnerRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t TargetRva{};
+        std::uint32_t OperandOffset{0xFFFFFFFFu};
+        std::uint32_t BaseRegister{0xFFFFFFFFu};
+        std::uint32_t Kind{};
+        std::uint32_t Length{};
+        std::array<std::uint8_t, 15> Bytes{};
+    };
+
+    struct EnhancedVirtualCallEvidence final
+    {
+        std::uint32_t OwnerRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t SlotOffset{};
+        std::uint32_t BaseRegister{};
+        std::uint32_t OwnerKind{};
+        std::uint32_t NearbyLoadRva{};
+        std::uint32_t NearbyLoadSourceRegister{0xFFFFFFFFu};
+        std::int32_t NearbyLoadDisplacement{};
+        std::uint32_t ObjectRegister{0xFFFFFFFFu};
+        std::uint32_t VtableLoadRva{};
+        std::uint32_t ThisMoveRva{};
+        std::uint32_t AliasMoveRva{};
+        std::uint32_t ProvenanceFlags{};
+        std::uint32_t ContextBeginRva{};
+        std::uint32_t ContextLength{};
+        std::array<std::uint8_t, 48> Context{};
+    };
+
+    struct EnhancedStackPathEvidence final
+    {
+        std::uint32_t StackLoadRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t StackDisplacement{};
+        std::uint32_t SourceBaseRegister{0xFFFFFFFFu};
+        std::uint32_t SourceIndexRegister{0xFFFFFFFFu};
+        std::uint32_t ObjectRegister{0xFFFFFFFFu};
+        std::uint32_t SlotOffset{};
+        std::uint32_t ConditionalBranches{};
+        std::uint32_t FirstBranchRva{};
+        std::uint32_t FirstBranchTargetRva{};
+        std::uint32_t FirstBranchFallthroughRva{};
+        bool FirstBranchLeavesLocalPath{};
+        std::uint32_t Flags{};
+    };
+
     struct EventHookTargets final
     {
         std::array<void*, 3> Functions{};
@@ -194,12 +269,74 @@ namespace CEventGenerator
         std::uint32_t GameBuild{};
     };
 
+    struct EnhancedControlFlowEdge final
+    {
+        std::uint32_t SourceRva{};
+        std::uint32_t TargetRva{};
+        std::uint32_t DestinationFunctionRva{};
+        std::uint32_t DestinationFunctionEndRva{};
+        std::uint32_t Status{};
+        std::uint32_t ProbeInstructions{};
+        std::uint32_t ProbeRegionBytes{};
+        std::uint32_t JumpLength{};
+        std::int64_t JumpDisplacement{};
+        std::uint32_t SectionStartRva{};
+        std::uint32_t SectionEndRva{};
+        std::uint32_t SectionCharacteristics{};
+        std::array<char, 9> SectionName{};
+        std::uint32_t PageState{};
+        std::uint32_t PageProtection{};
+        std::uint32_t SourceByteCount{};
+        std::array<std::uint8_t, 12> SourceBytes{};
+        std::uint32_t DestinationByteCount{};
+        std::array<std::uint8_t, 12> DestinationBytes{};
+    };
+
+    struct EnhancedControlFlowEvidence final
+    {
+        std::uint32_t OwnerRva{};
+        std::uint32_t LinearStopRva{};
+        std::uint32_t FirstDecodeFailureRva{};
+        std::uint32_t StopContainingInstructionRva{};
+        std::uint32_t StopContainingInstructionLength{};
+        std::uint32_t StopContainingOpcode{};
+        bool StopInsideInstruction{};
+        std::uint32_t BlockStarts{};
+        std::uint32_t Instructions{};
+        std::uint32_t DirectBranches{};
+        std::uint32_t ConditionalBranches{};
+        std::uint32_t IndirectExits{};
+        std::uint32_t OutOfFunctionEdges{};
+        std::uint32_t FollowedCrossFunctionEdges{};
+        std::uint32_t UnfollowedCrossFunctionEdges{};
+        std::uint32_t AcceptedFunctionRegions{};
+        std::uint32_t ProvisionalRegions{};
+        std::uint32_t ProvisionalEdges{};
+        std::uint32_t ProvisionalInstructions{};
+        std::uint32_t CandidateVirtualCallsites{};
+        std::uint32_t ReachableVirtualCallsites{};
+        std::uint32_t EdgeDiagnosticCount{};
+        std::array<EnhancedControlFlowEdge, 12> EdgeDiagnostics{};
+        std::uint32_t IndirectCallSites{};
+        std::uint32_t DecodeFailures{};
+        bool LinearStopReachable{};
+        bool BudgetExceeded{};
+    };
+
     struct EventLocatorDiagnostics final
     {
         LocatorFailure Failure{LocatorFailure::None};
         std::uint32_t PedMatchCount{};
         std::uint32_t GlobalMatchCount{};
         std::uint32_t DamageMatchCount{};
+        std::uint32_t EnhancedReceiverScanLimit{};
+        std::uint32_t EnhancedDirectPedCount{};
+        std::uint32_t EnhancedDirectGlobalCount{};
+        std::uint32_t EnhancedSelectedPedTruncated{};
+        std::uint32_t EnhancedSelectedGlobalTruncated{};
+        std::uint32_t EnhancedUsedPointerFallback{};
+        std::uint32_t EnhancedCorrelationGroupCount{};
+        std::uint32_t EnhancedMixedCalleeCount{};
         std::uint32_t CEventCountAnchorCount{};
         std::uint32_t CEventStackAnchorCount{};
         std::uint32_t EventTypeAnchorCount{};
@@ -229,6 +366,11 @@ namespace CEventGenerator
         std::array<
             EnhancedCandidateDiagnostic,
             EnhancedDiagnosticCandidateCapacity> EnhancedCandidates{};
+        std::uint32_t ProducerCandidateCount{};
+        std::uint32_t ProducerDiagnosticCount{};
+        std::array<
+            EnhancedProducerDiagnostic,
+            EnhancedProducerDiagnosticCapacity> Producers{};
         std::uint32_t DispatchCallsiteCandidateCount{};
         std::uint32_t DispatchCallsiteDiagnosticCount{};
         std::array<
@@ -269,6 +411,28 @@ namespace CEventGenerator
         std::array<
             EnhancedVirtualSlotCallsiteDiagnostic,
             EnhancedVirtualSlotCallsiteDiagnosticCapacity> VirtualSlotCallsites{};
+        std::uint32_t EnhancedSelectedPathDiagnosticCount{};
+        std::array<EnhancedSelectedPathDiagnostic,
+            EnhancedSelectedPathDiagnosticCapacity> EnhancedSelectedPaths{};
+        std::uint32_t EnhancedCallEvidenceCandidateCount{};
+        std::uint32_t EnhancedCallEvidenceDiagnosticCount{};
+        std::uint32_t EnhancedCallDecoderStopCount{};
+        std::array<EnhancedCallEvidence,
+            EnhancedCallEvidenceCapacity> EnhancedCallEvidenceSamples{};
+        std::uint32_t EnhancedVirtualCallCandidateCount{};
+        std::uint32_t EnhancedVirtualCallDiagnosticCount{};
+        std::uint32_t EnhancedVirtualCallDecoderStops{};
+        std::uint32_t EnhancedDecoderStopOwnerRva{};
+        std::uint32_t EnhancedDecoderStopRva{};
+        std::uint32_t EnhancedDecoderStopReason{};
+        std::uint32_t EnhancedDecoderStopByteCount{};
+        std::array<std::uint8_t, 15> EnhancedDecoderStopBytes{};
+        std::array<EnhancedVirtualCallEvidence,
+            EnhancedVirtualCallEvidenceCapacity> EnhancedVirtualCalls{};
+        EnhancedStackPathEvidence EnhancedStackPath{};
+        EnhancedControlFlowEvidence EnhancedControlFlow{};
+        EnhancedControlFlowEvidence EnhancedCountControlFlow{};
+        EnhancedControlFlowEvidence EnhancedTypeControlFlow{};
         std::uint32_t RttiEventTypeCandidateCount{};
         std::uint32_t RttiEventTypeDiagnosticCount{};
         std::array<

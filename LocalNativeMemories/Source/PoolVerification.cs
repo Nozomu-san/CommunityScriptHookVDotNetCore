@@ -27,11 +27,20 @@ internal readonly record struct PoolSlotProbe(
 internal readonly record struct FwPoolView(
     nint Pool,
     int Capacity,
-    int ItemSize);
+    int ItemSize,
+    nint PoolStart,
+    nint ByteArray);
 
 internal readonly record struct VehiclePoolView(
     nint Allocator,
-    int Capacity);
+    int Capacity,
+    nint PoolAddress,
+    nint BitArray);
+
+internal readonly record struct PoolAdmissionProbe(
+    int Capacity,
+    int OccupiedCount,
+    PoolSlotProbe Sample);
 
 internal sealed class PoolVerification(
     ILocalMemory memory,
@@ -100,8 +109,34 @@ internal sealed class PoolVerification(
             new(
                 pool,
                 checked((int)size),
-                checked((int)itemSize)));
+                checked((int)itemSize),
+                poolStart,
+                byteArray));
     }
+
+    internal bool IsCurrent(FwPoolView view) =>
+        TryReadFwShape(
+            view.Pool,
+            out nint poolStart,
+            out nint byteArray,
+            out uint size,
+            out uint itemSize,
+            out _) &&
+        poolStart == view.PoolStart &&
+        byteArray == view.ByteArray &&
+        size == checked((uint)view.Capacity) &&
+        itemSize == checked((uint)view.ItemSize);
+
+    internal bool IsCurrent(VehiclePoolView view) =>
+        TryReadVehicleShape(
+            view.Allocator,
+            out nint poolAddress,
+            out nint bitArray,
+            out uint size,
+            out _) &&
+        poolAddress == view.PoolAddress &&
+        bitArray == view.BitArray &&
+        size == checked((uint)view.Capacity);
 
     internal LocalDataResult<VehiclePoolView> ReadVehiclePool(
         nint allocator)
@@ -142,7 +177,7 @@ internal sealed class PoolVerification(
         }
 
         return LocalDataResult<VehiclePoolView>.Succeeded(
-            new(allocator, checked((int)size)));
+            new(allocator, checked((int)size), poolAddress, bitArray));
     }
 
     internal LocalDataResult<PoolSlotProbe> ProbeFwSlot(
@@ -155,22 +190,8 @@ internal sealed class PoolVerification(
                 LocalDataStatus.InvalidRequest);
         }
 
-        if (!TryReadFwShape(
-                view.Pool,
-                out nint poolStart,
-                out nint byteArray,
-                out uint size,
-                out uint itemSize,
-                out _) ||
-            size != checked((uint)view.Capacity) ||
-            itemSize != checked((uint)view.ItemSize))
-        {
-            return LocalDataResult<PoolSlotProbe>.Failed(
-                LocalDataStatus.VerificationFailed);
-        }
-
         if (!MemoryAccess.TryAdd(
-                byteArray,
+                view.ByteArray,
                 index,
                 out nint allocationAddress))
         {
@@ -204,7 +225,7 @@ internal sealed class PoolVerification(
         }
 
         if (!MemoryAccess.TryAdd(
-                poolStart,
+                view.PoolStart,
                 offset,
                 out nint entity) ||
             !IsPlausibleEntityObject(entity))
@@ -235,21 +256,9 @@ internal sealed class PoolVerification(
                 LocalDataStatus.InvalidRequest);
         }
 
-        if (!TryReadVehicleShape(
-                view.Allocator,
-                out nint poolAddress,
-                out nint bitArray,
-                out uint size,
-                out _) ||
-            size != checked((uint)view.Capacity))
-        {
-            return LocalDataResult<PoolSlotProbe>.Failed(
-                LocalDataStatus.VerificationFailed);
-        }
-
         int wordIndex = index >> 5;
         if (!MemoryAccess.TryAdd(
-                bitArray,
+                view.BitArray,
                 checked((long)wordIndex * sizeof(uint)),
                 out nint allocationAddress))
         {
@@ -273,7 +282,7 @@ internal sealed class PoolVerification(
         }
 
         if (!MemoryAccess.TryAdd(
-                poolAddress,
+                view.PoolAddress,
                 checked((long)index * IntPtr.Size),
                 out nint pointerAddress))
         {
@@ -308,6 +317,127 @@ internal sealed class PoolVerification(
                     IntPtr.Size)));
     }
 
+    internal LocalDataResult<PoolAdmissionProbe> ReadAdmissionProbe(
+        LocalPoolKinds kind,
+        nint address)
+    {
+        if (kind is LocalPoolKinds.Vehicles)
+        {
+            LocalDataResult<VehiclePoolView> read = ReadVehiclePool(address);
+            if (!read.IsSuccess)
+            {
+                return LocalDataResult<PoolAdmissionProbe>.Failed(read.Status);
+            }
+
+            VehiclePoolView view = read.Value;
+            int byteLength = checked(((view.Capacity + 31) / 32) * sizeof(uint));
+            if (!MemoryAccess.TryReadBuffer(
+                    view.BitArray, byteLength, out byte[] flags))
+            {
+                return LocalDataResult<PoolAdmissionProbe>.Failed(
+                    LocalDataStatus.DataUnavailable);
+            }
+
+            int count = 0;
+            Span<int> candidates = stackalloc int[4];
+            int vehicleSampleCount = 0;
+            for (int index = 0; index < view.Capacity; ++index)
+            {
+                if ((flags[index >> 3] & (1 << (index & 7))) == 0)
+                {
+                    continue;
+                }
+                ++count;
+                if (vehicleSampleCount < candidates.Length)
+                {
+                    candidates[vehicleSampleCount++] = index;
+                }
+            }
+
+            PoolSlotProbe chosen = PoolSlotProbe.Empty;
+            for (int i = 0; i < vehicleSampleCount; ++i)
+            {
+                LocalDataResult<PoolSlotProbe> result =
+                    ProbeVehicleSlot(view, candidates[i]);
+                if (result.IsSuccess && result.Value.IsAllocated)
+                {
+                    chosen = result.Value;
+                    break;
+                }
+            }
+            if (count > 0 && !chosen.IsAllocated)
+            {
+                return LocalDataResult<PoolAdmissionProbe>.Failed(
+                    LocalDataStatus.DataUnavailable);
+            }
+
+            return !IsCurrent(view)
+                ? LocalDataResult<PoolAdmissionProbe>.Failed(
+                    LocalDataStatus.DataUnavailable)
+                : LocalDataResult<PoolAdmissionProbe>.Succeeded(
+                    new(view.Capacity, count, chosen));
+        }
+
+        if (kind is not (LocalPoolKinds.Peds or LocalPoolKinds.Objects))
+        {
+            return LocalDataResult<PoolAdmissionProbe>.Failed(
+                LocalDataStatus.InvalidRequest);
+        }
+
+        LocalDataResult<FwPoolView> fw = ReadFwPool(address);
+        if (!fw.IsSuccess)
+        {
+            return LocalDataResult<PoolAdmissionProbe>.Failed(fw.Status);
+        }
+
+        FwPoolView pool = fw.Value;
+        if (!MemoryAccess.TryReadBuffer(
+                pool.ByteArray, pool.Capacity, out byte[] allocation))
+        {
+            return LocalDataResult<PoolAdmissionProbe>.Failed(
+                LocalDataStatus.DataUnavailable);
+        }
+
+        int occupied = 0;
+        Span<int> sampleIndices = stackalloc int[4];
+        int sampleCount = 0;
+        for (int index = 0; index < pool.Capacity; ++index)
+        {
+            if ((allocation[index] & 0x80) != 0)
+            {
+                continue;
+            }
+            ++occupied;
+            if (sampleCount < sampleIndices.Length)
+            {
+                sampleIndices[sampleCount++] = index;
+            }
+        }
+
+        PoolSlotProbe sampleProbe = PoolSlotProbe.Empty;
+        for (int i = 0; i < sampleCount; ++i)
+        {
+            LocalDataResult<PoolSlotProbe> result =
+                ProbeFwSlot(pool, sampleIndices[i]);
+            if (result.IsSuccess && result.Value.IsAllocated)
+            {
+                sampleProbe = result.Value;
+                break;
+            }
+        }
+        if (occupied > 0 && !sampleProbe.IsAllocated)
+        {
+            return LocalDataResult<PoolAdmissionProbe>.Failed(
+                LocalDataStatus.DataUnavailable);
+        }
+
+        return !IsCurrent(pool)
+            ? LocalDataResult<PoolAdmissionProbe>.Failed(
+                LocalDataStatus.DataUnavailable)
+            : LocalDataResult<PoolAdmissionProbe>.Succeeded(
+                new(pool.Capacity, occupied, sampleProbe));
+    }
+
     internal bool CanCreateScriptGuid(
         nint guidPool)
     {
@@ -329,7 +459,7 @@ internal sealed class PoolVerification(
         if (!snapshot.Statistics.IsConsistent ||
             snapshot.Capacity <= 0 ||
             snapshot.Count < 0 ||
-            snapshot.Count > snapshot.Capacity)
+            snapshot.Count > snapshot.ActiveCount)
         {
             return false;
         }

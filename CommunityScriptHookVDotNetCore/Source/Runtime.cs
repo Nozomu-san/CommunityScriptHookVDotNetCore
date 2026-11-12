@@ -88,6 +88,7 @@ internal sealed class RuntimeSession : IDisposable
         _scheduler = new(files.Log);
         _diagnostics = diagnostics;
         _services.Register<IRuntimeDiagnosticSink>(_diagnostics);
+        _services.Register<IRuntimeInformationSink>(_log);
         _native = new(
             request.NativeCall,
             BorrowEvent(request.NativeRequestedEvent, EventResetMode.AutoReset),
@@ -111,6 +112,7 @@ internal sealed class RuntimeSession : IDisposable
         _packages.AttachExtensionReloadController(_extensions);
 
         _services.RegisterRuntimeOnly<IRawNativeTransport>(_native);
+        _services.Register<IManualNativeInvoker>(_native);
         _services.RegisterRuntimeOnly<INativeCallAdmissionControl>(_native);
         _services.RegisterRuntimeOnly<IGameThreadFunctionTransport>(_native);
         _services.RegisterRuntimeOnly<IReloadRuntimeHost>(_packages);
@@ -196,7 +198,8 @@ internal sealed class RuntimeSession : IDisposable
                 _request.PerformanceFrequency);
 
             _extensions.AdvanceInitialization();
-            if (!_extensions.InitializationCompleted)
+            if (!_rootInitializationCommitted &&
+                !_extensions.AdvanceAdmissionFrame(extensionFrame))
             {
                 return;
             }
@@ -224,14 +227,18 @@ internal sealed class RuntimeSession : IDisposable
                 return;
             }
 
-            _extensions.AdvanceHostFrame(extensionFrame);
+            _extensions.AdvanceAdmissionFrame(extensionFrame);
+            _packages.AdvanceTransitionOperations(frame.FrameIndex);
+            if (!_packages.IsLifecycleDispatchPaused)
+            {
+                _extensions.AdvanceHostFrame(extensionFrame);
+            }
             IReadOnlyList<string> unavailableRoots =
                 _extensions.DrainNewUnavailableAssemblyNames();
             if (unavailableRoots.Count != 0)
             {
                 _packages.QuarantineAssemblyReferences(unavailableRoots);
             }
-            _packages.AdvanceTransitionOperations(frame.FrameIndex);
             _scheduler.ObserveHostFrame(frame.FrameIndex);
             _scheduler.Start(frame.FrameIndex);
             DispatchScriptTickIfDue();
@@ -288,6 +295,7 @@ internal sealed class RuntimeSession : IDisposable
 
 internal sealed class NativeTransport :
     IRawNativeTransport,
+    IManualNativeInvoker,
     INativeCallAdmissionControl,
     IGameThreadFunctionTransport,
     IDisposable
@@ -341,7 +349,20 @@ internal sealed class NativeTransport :
     public RawNativeCallResult Invoke(
         ulong hash,
         IReadOnlyList<ulong> arguments,
-        int resultCount)
+        int resultCount) =>
+        InvokeCore(hash, arguments, resultCount, requireCatalogAdmission: true);
+
+    public RawNativeCallResult InvokeRaw(
+        ulong hash,
+        IReadOnlyList<ulong> arguments,
+        int resultCount) =>
+        InvokeCore(hash, arguments, resultCount, requireCatalogAdmission: false);
+
+    private RawNativeCallResult InvokeCore(
+        ulong hash,
+        IReadOnlyList<ulong> arguments,
+        int resultCount,
+        bool requireCatalogAdmission)
     {
         ArgumentNullException.ThrowIfNull(arguments);
         if (arguments.Count > HostContract.MaximumNativeArguments)
@@ -368,34 +389,37 @@ internal sealed class NativeTransport :
                     []);
             }
 
-            INativeCallAdmissionPolicy? policy = _admissionPolicy;
-            if (policy is null)
+            if (requireCatalogAdmission)
             {
-                return new(
-                    RawNativeCallStatus.AdmissionUnavailable,
-                    []);
-            }
+                INativeCallAdmissionPolicy? policy = _admissionPolicy;
+                if (policy is null)
+                {
+                    return new(
+                        RawNativeCallStatus.AdmissionUnavailable,
+                        []);
+                }
 
-            NativeCallAdmissionDecision admission;
-            try
-            {
-                admission = policy.Evaluate(
-                    hash,
-                    arguments.Count,
-                    resultCount);
-            }
-            catch
-            {
-                return new(
-                    RawNativeCallStatus.AdmissionRejected,
-                    []);
-            }
+                NativeCallAdmissionDecision admission;
+                try
+                {
+                    admission = policy.Evaluate(
+                        hash,
+                        arguments.Count,
+                        resultCount);
+                }
+                catch
+                {
+                    return new(
+                        RawNativeCallStatus.AdmissionRejected,
+                        []);
+                }
 
-            if (!admission.IsAllowed)
-            {
-                return new(
-                    RawNativeCallStatus.AdmissionRejected,
-                    []);
+                if (!admission.IsAllowed)
+                {
+                    return new(
+                        RawNativeCallStatus.AdmissionRejected,
+                        []);
+                }
             }
 
             Marshal.WriteInt32(

@@ -29,7 +29,8 @@ internal sealed record CapturedPackageImage(
 
 internal sealed record CapturedReloadImage(
     IReadOnlyList<string> TargetPackages,
-    IReadOnlyDictionary<string, CapturedPackageImage> Packages);
+    IReadOnlyDictionary<string, CapturedPackageImage> Packages,
+    IReadOnlyList<string> BlockedAssemblyNames);
 
 internal sealed record StagedPackageImage(
     PackageDescriptor Descriptor,
@@ -52,102 +53,100 @@ internal sealed record CaptureAttempt(
 
 internal static class PackageImageCapture
 {
-    private sealed record CaptureFile(
-        string Path,
-        FileStream Stream);
-
     public static async Task<CaptureAttempt> CaptureAsync(
         string scriptsDirectory,
         IReadOnlyList<string> packageNames,
         RuntimeLog log,
         CancellationToken cancellationToken)
     {
-        List<CaptureFile> opened = [];
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             string root = Path.GetFullPath(scriptsDirectory);
-            Dictionary<string, (string AssemblyPath, string? SymbolsPath)>
-                files = [with(StringComparer.OrdinalIgnoreCase)];
+            Dictionary<string, CapturedPackageImage> packages =
+                [with(StringComparer.OrdinalIgnoreCase)];
+            Dictionary<string, PackageAssemblyImage> captured =
+                [with(StringComparer.OrdinalIgnoreCase)];
+            HashSet<string> blockedNames =
+                [with(StringComparer.OrdinalIgnoreCase)];
 
             foreach (string packageName in packageNames)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string assemblyPath = GetPackageAssemblyPath(
-                    root,
-                    packageName);
+                string assemblyPath = GetPackageAssemblyPath(root, packageName);
                 if (!File.Exists(assemblyPath))
                 {
                     continue;
                 }
 
-                string symbolsPath = Path.ChangeExtension(
-                    assemblyPath,
-                    ".pdb");
-                files.Add(
-                    packageName,
-                    (
-                        assemblyPath,
-                        File.Exists(symbolsPath)
-                            ? Path.GetFullPath(symbolsPath)
-                            : null));
-            }
-
-            foreach (KeyValuePair<
-                         string,
-                         (string AssemblyPath, string? SymbolsPath)> pair in files)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                string assemblyPath = pair.Value.AssemblyPath;
-                string? symbolsPath = pair.Value.SymbolsPath;
-                opened.Add(new(
-                    assemblyPath,
-                    OpenReadFence(assemblyPath)));
-
-                if (symbolsPath is not null)
+                try
                 {
-                    opened.Add(new(
-                        symbolsPath,
-                        OpenReadFence(symbolsPath)));
+                    byte[] assemblyBytes;
+                    await using (FileStream stream = OpenReadFence(assemblyPath))
+                    {
+                        assemblyBytes = await ReadAllAsync(
+                            stream, cancellationToken).ConfigureAwait(false);
+                    }
+                    SecurityAdmission.CheckCapturedImage(
+                        assemblyPath, assemblyBytes, log);
+
+                    string symbolsPath = Path.ChangeExtension(
+                        assemblyPath, ".pdb");
+                    byte[]? symbols = null;
+                    if (File.Exists(symbolsPath))
+                    {
+                        await using FileStream symbolStream =
+                            OpenReadFence(symbolsPath);
+                        symbols = await ReadAllAsync(
+                            symbolStream, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    captured[packageName] = new(
+                        assemblyPath, assemblyBytes, symbols);
+                }
+                catch (SecurityBlockedException exception)
+                {
+                    blockedNames.Add(packageName);
+                    log.Error(
+                        exception.Message,
+                        source: packageName,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: "Security scanning blocked this scripts4 source.");
+                }
+                catch (IOException exception) when (
+                    SecurityAdmission.IsAntivirusFileBlock(exception))
+                {
+                    blockedNames.Add(packageName);
+                    log.Error(
+                        $"Antivirus blocked '{packageName}': {exception.Message}",
+                        source: packageName,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: "The operating system blocked this scripts4 source.");
+                }
+                catch (UnauthorizedAccessException exception) when (
+                    SecurityAdmission.IsAntivirusFileBlock(exception))
+                {
+                    blockedNames.Add(packageName);
+                    log.Error(
+                        $"Antivirus blocked '{packageName}': {exception.Message}",
+                        source: packageName,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: "The operating system blocked this scripts4 source.");
                 }
             }
 
-            Dictionary<string, byte[]> bytes =
-                [with(StringComparer.OrdinalIgnoreCase)];
-            foreach (CaptureFile file in opened)
+            IReadOnlyDictionary<string, byte[]> snapshots = captured
+                .ToDictionary(entry => entry.Key, entry => entry.Value.Assembly,
+                    StringComparer.OrdinalIgnoreCase);
+            foreach ((string packageName, PackageAssemblyImage image) in captured)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                bytes[file.Path] = await ReadAllAsync(
-                        file.Stream,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            Dictionary<string, CapturedPackageImage> packages =
-                [with(StringComparer.OrdinalIgnoreCase)];
-            foreach (KeyValuePair<
-                         string,
-                         (string AssemblyPath, string? SymbolsPath)> pair in files)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                string packageName = pair.Key;
-                string assemblyPath = pair.Value.AssemblyPath;
-                string? symbolsPath = pair.Value.SymbolsPath;
-                PackageAssemblyImage image = new(
-                    assemblyPath,
-                    bytes[assemblyPath],
-                    symbolsPath is not null &&
-                        bytes.TryGetValue(
-                            symbolsPath,
-                            out byte[]? symbols) &&
-                        symbols is not null
-                            ? symbols
-                            : null);
-                PackageDescriptor? descriptor =
+                PackageDescriptor descriptor =
                     PackageDiscovery.InspectPackageImages(
                         root,
-                        Array.AsReadOnly([image]),
-                        log) ?? throw new BadImageFormatException(
+                        [image],
+                        log,
+                        snapshots) ?? throw new BadImageFormatException(
                         $"Package '{packageName}' does not contain a valid " +
                         "managed replacement generation.");
                 if (!descriptor.Name.Equals(
@@ -158,15 +157,13 @@ internal static class PackageImageCapture
                         $"Captured package '{packageName}' declares assembly " +
                         $"identity '{descriptor.Name}'.");
                 }
-
-                packages[packageName] = new(
-                    descriptor,
-                    Array.AsReadOnly([image]));
+                packages[packageName] = new(descriptor, [image]);
             }
 
             return CaptureAttempt.Success(new(
                 Array.AsReadOnly(packageNames.ToArray()),
-                new ReadOnlyDictionary<string, CapturedPackageImage>(packages)));
+                new ReadOnlyDictionary<string, CapturedPackageImage>(packages),
+                Array.AsReadOnly([.. blockedNames])));
         }
         catch (OperationCanceledException)
         {
@@ -180,13 +177,6 @@ internal static class PackageImageCapture
                 ArgumentException)
         {
             return CaptureAttempt.Retry(exception.Message);
-        }
-        finally
-        {
-            foreach (CaptureFile file in opened)
-            {
-                await file.Stream.DisposeAsync().ConfigureAwait(false);
-            }
         }
     }
 
@@ -260,7 +250,8 @@ internal static class PackageDiscovery
     internal static PackageDescriptor? InspectPackageImages(
         string scriptsDirectory,
         IReadOnlyList<PackageAssemblyImage> images,
-        RuntimeLog log)
+        RuntimeLog log,
+        IReadOnlyDictionary<string, byte[]>? knownAssemblies = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(scriptsDirectory);
         ArgumentNullException.ThrowIfNull(images);
@@ -285,7 +276,7 @@ internal static class PackageDiscovery
         try
         {
             using MemoryStream stream = new(image.Assembly, writable: false);
-            inspection = InspectAssembly(image.Path, stream);
+            inspection = InspectAssembly(image.Path, stream, knownAssemblies);
         }
         catch (Exception exception)
         {
@@ -586,7 +577,8 @@ internal static class PackageDiscovery
 
     private static AssemblyInspection InspectAssembly(
         string path,
-        Stream stream)
+        Stream stream,
+        IReadOnlyDictionary<string, byte[]>? knownAssemblies)
     {
         using PEReader pe = new(
             stream,
@@ -627,7 +619,8 @@ internal static class PackageDiscovery
             TypeDefinition type = metadata.GetTypeDefinition(handle);
             TypeAttributes attributes = type.Attributes;
             if ((attributes & TypeAttributes.Interface) != 0 ||
-                !DerivesFromScript4(metadata, handle, []))
+                !DerivesFromScript4(
+                    metadata, handle, [], knownAssemblies))
             {
                 continue;
             }
@@ -669,10 +662,12 @@ internal static class PackageDiscovery
                     StringComparer.OrdinalIgnoreCase)]));
     }
 
-    private static bool DerivesFromScript4(
+    internal static bool DerivesFromScript4(
         MetadataReader metadata,
         TypeDefinitionHandle handle,
-        HashSet<TypeDefinitionHandle> visited)
+        HashSet<TypeDefinitionHandle> visited,
+        IReadOnlyDictionary<string, byte[]>? knownAssemblies = null,
+        HashSet<string>? externalVisits = null)
     {
         if (!visited.Add(handle))
         {
@@ -680,17 +675,43 @@ internal static class PackageDiscovery
         }
 
         EntityHandle baseType = metadata.GetTypeDefinition(handle).BaseType;
+        return ResolvesToScript4(metadata, baseType, visited,
+            knownAssemblies, externalVisits ?? [with(StringComparer.Ordinal)]);
+    }
+
+    private static bool ResolvesToScript4(
+        MetadataReader metadata,
+        EntityHandle baseType,
+        HashSet<TypeDefinitionHandle> visited,
+        IReadOnlyDictionary<string, byte[]>? knownAssemblies,
+        HashSet<string> externalVisits)
+    {
         if (baseType.IsNil)
         {
             return false;
         }
-
+        if (baseType.Kind == HandleKind.TypeSpecification)
+        {
+            TypeSpecification specification = metadata.GetTypeSpecification(
+                (TypeSpecificationHandle)baseType);
+            BlobReader signature = metadata.GetBlobReader(specification.Signature);
+            SignatureTypeCode code = signature.ReadSignatureTypeCode();
+            if (code == SignatureTypeCode.GenericTypeInstance)
+            {
+                code = signature.ReadSignatureTypeCode();
+            }
+            if (code != SignatureTypeCode.TypeHandle)
+            {
+                return false;
+            }
+            return ResolvesToScript4(metadata, signature.ReadTypeHandle(),
+                visited, knownAssemblies, externalVisits);
+        }
         if (baseType.Kind == HandleKind.TypeDefinition)
         {
-            return DerivesFromScript4(
-                metadata,
-                (TypeDefinitionHandle)baseType,
-                visited);
+            return DerivesFromScript4(metadata,
+                (TypeDefinitionHandle)baseType, visited,
+                knownAssemblies, externalVisits);
         }
         if (baseType.Kind != HandleKind.TypeReference)
         {
@@ -699,25 +720,48 @@ internal static class PackageDiscovery
 
         TypeReference reference = metadata.GetTypeReference(
             (TypeReferenceHandle)baseType);
-        if (!metadata.GetString(reference.Namespace).Equals(
-                ScriptNamespace,
-                StringComparison.Ordinal) ||
-            !metadata.GetString(reference.Name).Equals(
-                ScriptTypeName,
-                StringComparison.Ordinal))
-        {
-            return false;
-        }
-
         if (reference.ResolutionScope.Kind != HandleKind.AssemblyReference)
         {
             return false;
         }
+        string typeNamespace = metadata.GetString(reference.Namespace);
+        string typeName = metadata.GetString(reference.Name);
         AssemblyReference assembly = metadata.GetAssemblyReference(
             (AssemblyReferenceHandle)reference.ResolutionScope);
-        return metadata.GetString(assembly.Name).Equals(
-            RuntimeAssemblyName,
-            StringComparison.OrdinalIgnoreCase);
+        string assemblyName = metadata.GetString(assembly.Name);
+        if (assemblyName.Equals(RuntimeAssemblyName,
+                StringComparison.OrdinalIgnoreCase) &&
+            typeNamespace.Equals(ScriptNamespace, StringComparison.Ordinal) &&
+            typeName.Equals(ScriptTypeName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (knownAssemblies is null ||
+            !knownAssemblies.TryGetValue(assemblyName, out byte[]? image) ||
+            !externalVisits.Add(assemblyName + ":" + typeNamespace + "." + typeName))
+        {
+            return false;
+        }
+
+        using MemoryStream stream = new(image, writable: false);
+        using PEReader pe = new(stream, PEStreamOptions.PrefetchMetadata);
+        if (!pe.HasMetadata)
+        {
+            return false;
+        }
+        MetadataReader other = pe.GetMetadataReader();
+        foreach (TypeDefinitionHandle otherHandle in other.TypeDefinitions)
+        {
+            TypeDefinition type = other.GetTypeDefinition(otherHandle);
+            if (other.GetString(type.Name).Equals(typeName, StringComparison.Ordinal) &&
+                other.GetString(type.Namespace).Equals(typeNamespace, StringComparison.Ordinal) &&
+                type.GetDeclaringType().IsNil)
+            {
+                return DerivesFromScript4(other, otherHandle, [],
+                    knownAssemblies, externalVisits);
+            }
+        }
+        return false;
     }
 
     private static string GetTypeName(

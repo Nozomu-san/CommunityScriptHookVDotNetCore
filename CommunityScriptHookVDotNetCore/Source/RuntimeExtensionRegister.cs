@@ -85,6 +85,14 @@ public interface IRawNativeTransport
         int resultCount);
 }
 
+public interface IManualNativeInvoker
+{
+    RawNativeCallResult InvokeRaw(
+        ulong hash,
+        IReadOnlyList<ulong> arguments,
+        int resultCount);
+}
+
 public enum GameThreadFunctionCallStatus
 {
     Success = 0,
@@ -190,6 +198,11 @@ public interface IScript4RuntimeExtension
     void AdvanceHostFrame(RuntimeExtensionFrameContext context);
 
     Task ShutdownAsync();
+}
+
+public interface IRuntimeExtensionAdmissionProbe
+{
+    bool AdvanceAdmissionFrame(RuntimeExtensionFrameContext context);
 }
 
 public enum ScriptPackageKind
@@ -641,6 +654,9 @@ internal static class RuntimeExtensionDiscovery
         ArgumentNullException.ThrowIfNull(log);
 
         List<RuntimeExtensionDescriptor> result = [];
+        IReadOnlyDictionary<string, byte[]> knownAssemblies = snapshot.Images
+            .ToDictionary(image => image.AssemblyName,
+                image => image.Assembly, StringComparer.OrdinalIgnoreCase);
         foreach (RootAssemblyImage image in snapshot.Images
                      .OrderBy(
                          value => value.Path,
@@ -649,7 +665,7 @@ internal static class RuntimeExtensionDiscovery
             RuntimeExtensionDescriptor? descriptor;
             try
             {
-                descriptor = Inspect(image);
+                descriptor = Inspect(image, knownAssemblies);
             }
             catch (Exception exception)
             {
@@ -678,7 +694,8 @@ internal static class RuntimeExtensionDiscovery
     }
 
     private static RuntimeExtensionDescriptor? Inspect(
-        RootAssemblyImage image)
+        RootAssemblyImage image,
+        IReadOnlyDictionary<string, byte[]> knownAssemblies)
     {
         using MemoryStream stream = new(image.Assembly, writable: false);
         using PEReader pe = new(stream, PEStreamOptions.PrefetchMetadata);
@@ -694,6 +711,14 @@ internal static class RuntimeExtensionDiscovery
             !role.Equals(RuntimeExtensionMetadataKeys.RuntimeExtensionRole, StringComparison.OrdinalIgnoreCase))
         {
             return null;
+        }
+
+        if (metadata.TypeDefinitions.Any(handle =>
+                PackageDiscovery.DerivesFromScript4(
+                    metadata, handle, [], knownAssemblies)))
+        {
+            throw new BadImageFormatException(
+                "A runtime extension cannot also define Script4 executable types.");
         }
 
         string assemblyName = metadata.GetString(

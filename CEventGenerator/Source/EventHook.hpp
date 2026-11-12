@@ -45,6 +45,11 @@ namespace CEventGenerator
     [[nodiscard]] std::uint32_t GetEnhancedCandidateRva(std::uint32_t index) noexcept;
     [[nodiscard]] std::uint32_t GetEnhancedCandidateSize(std::uint32_t index) noexcept;
     [[nodiscard]] std::uint32_t GetEnhancedCandidateRelations(std::uint32_t index) noexcept;
+    [[nodiscard]] std::uint32_t GetProducerCandidateCount() noexcept;
+    [[nodiscard]] std::uint32_t GetProducerDiagnosticCount() noexcept;
+    [[nodiscard]] std::uint32_t GetProducerRva(std::uint32_t index) noexcept;
+    [[nodiscard]] std::uint32_t GetProducerSize(std::uint32_t index) noexcept;
+    [[nodiscard]] std::uint32_t GetProducerRelations(std::uint32_t index) noexcept;
     [[nodiscard]] std::uint32_t GetDispatchCallsiteCandidateCount() noexcept;
     [[nodiscard]] std::uint32_t GetDispatchCallsiteDiagnosticCount() noexcept;
     [[nodiscard]] std::uint32_t GetDispatchCallsiteWalkerRva(std::uint32_t index) noexcept;

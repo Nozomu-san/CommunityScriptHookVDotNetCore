@@ -85,7 +85,8 @@ internal sealed class StandardGameOperationsExtension :
             entities,
             pools,
             pedMemory,
-            nativeBindings);
+            nativeBindings,
+            natives.GameBuild);
         VehicleOperations vehicles = new(entities, vehicleMemory);
         WeaponOperations weapons = new(entities, nativeBindings);
         CombatOperations combat = new(entities, peds, nativeBindings);

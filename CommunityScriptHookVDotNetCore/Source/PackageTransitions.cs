@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Reflection;
 
 namespace CommunityScriptHookVDotNetCore.Source;
 
@@ -34,9 +35,9 @@ internal sealed partial class PackageManager
             _extensionReloadController
             ?? throw new InvalidOperationException(
                 "The runtime-extension reload controller is unavailable.");
-        RuntimeExtensionReloadPlan? extensionPlan =
+        RuntimeExtensionReloadPlan extensionPlan =
             plan.Reason is ScriptLifecycleTransitionReason.ManualRestart
-                ? null
+                ? extensionReload.CaptureRestartPlan()
                 : extensionReload.CaptureReloadPlan();
 
         ScriptLifecycleTransitionOperationId id =
@@ -273,11 +274,20 @@ internal sealed partial class PackageManager
                 [.. merged.Values.OrderBy(
                     value => value.Name,
                     StringComparer.OrdinalIgnoreCase)]);
-        if (_unavailableRuntimeAssemblies.Count != 0)
+        HashSet<string> unavailableAssemblies = [with(
+            _unavailableRuntimeAssemblies,
+            StringComparer.OrdinalIgnoreCase)];
+        unavailableAssemblies.UnionWith(captured.BlockedAssemblyNames);
+        unavailableAssemblies.UnionWith(_catalog
+            .Where(package => !merged.ContainsKey(package.Name))
+            .Select(package => package.Name));
+        if (unavailableAssemblies.Count != 0)
         {
             HashSet<string> invalidSeeds = [with(resolvedCatalog
-                    .Where(package => package.ReferencedAssemblyNames.Any(reference =>
-                        _unavailableRuntimeAssemblies.Contains(reference)))
+                    .Where(package =>
+                        unavailableAssemblies.Contains(package.Name) ||
+                        package.ReferencedAssemblyNames.Any(reference =>
+                            unavailableAssemblies.Contains(reference)))
                     .Select(package => package.Name),
                 StringComparer.OrdinalIgnoreCase)];
             HashSet<string> invalid = ExpandDependentClosure(
@@ -288,12 +298,12 @@ internal sealed partial class PackageManager
                 foreach (string name in invalid.OrderBy(value => value, StringComparer.OrdinalIgnoreCase))
                 {
                     _log.Error(
-                        $"Package '{name}' is excluded because it depends on a " +
-                        "quarantined root extension assembly.",
+                        $"Package '{name}' is excluded because a required " +
+                        "assembly failed security or availability admission.",
                         source: name,
                         impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
                         summary:
-                            $"Package '{name}' cannot provide a lifecycle because a required extension is quarantined.");
+                            $"Package '{name}' cannot provide a lifecycle because a required assembly was blocked.");
                 }
                 resolvedCatalog = Array.AsReadOnly(
                     [.. resolvedCatalog.Where(package => !invalid.Contains(package.Name))]);
@@ -311,9 +321,7 @@ internal sealed partial class PackageManager
                     name,
                     out PackageDescriptor? descriptor))
             {
-                throw new BadImageFormatException(
-                    $"Captured package '{name}' disappeared while its " +
-                    "dependency graph was being resolved.");
+                continue;
             }
 
             stagedPackages.Add(
@@ -348,10 +356,17 @@ internal sealed partial class PackageManager
             package.UnloadStopped(),
             _lastHostFrameIndex);
         _packages.Remove(package);
+        _admittedPatternExecutables.TryRemove(package.Name, out _);
     }
 
-    private void AddPreparedPackage(ScriptPackage package) =>
+    private void AddPreparedPackage(ScriptPackage package)
+    {
         _packages.Add(package);
+        if (package.EntryAssembly is Assembly assembly)
+        {
+            _admittedPatternExecutables[package.Name] = assembly;
+        }
+    }
 
     private ulong BeginLifecycleTransition()
     {
@@ -360,8 +375,11 @@ internal sealed partial class PackageManager
             throw new InvalidOperationException(
                 "A scripts4 lifecycle barrier is already active.");
         }
+        _lifecycleDispatchPaused = true;
         return ++_lifecycleEpoch;
     }
+
+    internal bool IsLifecycleDispatchPaused => _lifecycleDispatchPaused;
 
     private void EndLifecycleTransition()
     {
@@ -475,6 +493,8 @@ internal sealed partial class PackageManager
         private readonly List<string> _removed = [];
         private readonly List<string> _failed = [];
         private HashSet<string> _targetSet = [with(StringComparer.OrdinalIgnoreCase)];
+        private HashSet<string> _activeBeforeTransition =
+            [with(StringComparer.OrdinalIgnoreCase)];
         private string[] _binarySeeds = [];
         private HashSet<string> _originalPackageNames = [with(StringComparer.OrdinalIgnoreCase)];
         private Task<CaptureAttempt>? _captureTask;
@@ -670,14 +690,18 @@ internal sealed partial class PackageManager
             _inMemoryRestart = true;
             _lifecycleEpoch = owner.BeginLifecycleTransition();
             _barrierEntered = true;
+            _activeBeforeTransition = new(
+                owner._packages.Where(package => package.ActiveScriptCount != 0)
+                    .Select(package => package.Name),
+                StringComparer.OrdinalIgnoreCase);
             _stopQueue = new(OrderPackageNames(
                 owner._catalog,
-                owner._packages.Where(package => _targetSet.Contains(package.Name))
-                    .Select(package => package.Name), reverse: true));
+                _activeBeforeTransition,
+                reverse: true));
             State = ScriptLifecycleTransitionOperationState.StoppingLifecycle;
             _log.Information(
-                $"RAM-only restart '{Id.Value:D}' targets {_stopQueue.Count} " +
-                "active scripts4 package(s); no DLL capture or extension reload.");
+                $"RAM-only restart '{Id.Value:D}' pauses {_stopQueue.Count} " +
+                "active scripts4 package(s); unchanged binaries remain in RAM.");
         }
 
         private void StartCapture(PackageManager owner)
@@ -827,6 +851,16 @@ internal sealed partial class PackageManager
             closure.UnionWith(ExpandDependentClosure(
                 _binarySeeds,
                 staged.Catalog));
+            HashSet<string> updatedLibraries = [with(_binarySeeds,
+                StringComparer.OrdinalIgnoreCase)];
+            IEnumerable<string> libraryFirstConsumers = owner._packages
+                .Where(package => package.DeclaredLibraryNames.Any(
+                    updatedLibraries.Contains))
+                .Select(package => package.Name);
+            closure.UnionWith(ExpandDependentClosure(
+                libraryFirstConsumers, owner._catalog));
+            closure.UnionWith(ExpandDependentClosure(
+                libraryFirstConsumers, staged.Catalog));
             if (_extensionPlan is { TargetIds.Count: > 0 } extensionChanges)
             {
                 HashSet<string> changedRoots = [with(
@@ -863,7 +897,8 @@ internal sealed partial class PackageManager
 
         private void PrepareLifecycleStop(PackageManager owner)
         {
-            if (_targetSet.Count == 0 &&
+            if (plan.Reason is ScriptLifecycleTransitionReason.AutomaticReload &&
+                _targetSet.Count == 0 &&
                 _extensionPlan is { TargetIds.Count: 0 })
             {
                 _lifecycleEpoch = owner._lifecycleEpoch;
@@ -872,16 +907,19 @@ internal sealed partial class PackageManager
             }
             _lifecycleEpoch = owner.BeginLifecycleTransition();
             _barrierEntered = true;
+            _activeBeforeTransition = new(
+                owner._packages.Where(package => package.ActiveScriptCount != 0)
+                    .Select(package => package.Name),
+                StringComparer.OrdinalIgnoreCase);
             _stopQueue = new(OrderPackageNames(
                 owner._catalog,
-                owner._packages.Where(package => _targetSet.Contains(package.Name))
-                    .Select(package => package.Name),
+                _activeBeforeTransition,
                 reverse: true));
             State = ScriptLifecycleTransitionOperationState.StoppingLifecycle;
             _log.Information(
                 $"scripts4 reconcile '{Id.Value:D}' entered lifecycle " +
-                $"epoch {_lifecycleEpoch.Value}. Only {_stopQueue.Count} targeted " +
-                "package(s) will stop; independent lifecycles remain active.");
+                $"epoch {_lifecycleEpoch.Value}. {_stopQueue.Count} active " +
+                "script package(s) will suspend before reactivation.");
         }
 
         private void AdvanceLifecycleStop(PackageManager owner)
@@ -913,22 +951,13 @@ internal sealed partial class PackageManager
                 }
 
                 package.BeginStopInstances(
-                    _targetSet.Contains(name)
+                    !_inMemoryRestart && _targetSet.Contains(name)
                         ? ScriptStopReason.BinaryReplacement
                         : ScriptStopReason.LifecycleRestart);
                 _stoppingPackage = package;
                 return;
             }
 
-            if (_inMemoryRestart)
-            {
-                _startQueue = new(OrderPackageNames(
-                    owner._catalog,
-                    owner._packages.Where(package => _targetSet.Contains(package.Name))
-                        .Select(package => package.Name), reverse: false));
-                State = ScriptLifecycleTransitionOperationState.StartingLifecycle;
-                return;
-            }
             if (_extensionPlan is { TargetIds.Count: > 0 } changedExtensions)
             {
                 _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Extensions);
@@ -938,6 +967,22 @@ internal sealed partial class PackageManager
             }
 
             _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
+            ContinueScriptsAfterExtensions(owner);
+        }
+
+        private void ContinueScriptsAfterExtensions(PackageManager owner)
+        {
+            if (_inMemoryRestart)
+            {
+                _startQueue = new(OrderPackageNames(
+                    owner._catalog,
+                    owner._packages.Where(package =>
+                            _activeBeforeTransition.Contains(package.Name) ||
+                            _targetSet.Contains(package.Name))
+                        .Select(package => package.Name), reverse: false));
+                State = ScriptLifecycleTransitionOperationState.StartingLifecycle;
+                return;
+            }
             BeginBinaryReplacement();
         }
 
@@ -961,7 +1006,7 @@ internal sealed partial class PackageManager
             _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
             owner.SetUnavailableRuntimeAssemblies(
                 _extensionReload.UnavailableAssemblyNames);
-            BeginBinaryReplacement();
+            ContinueScriptsAfterExtensions(owner);
         }
 
         private void BeginBinaryReplacement()
@@ -1087,7 +1132,10 @@ internal sealed partial class PackageManager
                         owner._diagnostics,
                         owner.NextPackageGeneration(),
                         owner.SharedExecutableAssemblies(
-                            image.Descriptor.DependencyPackageNames))
+                            image.Descriptor.DependencyPackageNames),
+                        [.. _staged.Packages.Values.Where(value =>
+                            value.Descriptor.Kind == ScriptPackageKind.Library)],
+                        owner._admittedPatternExecutables)
                     : null;
                 if (replacement is null)
                 {
@@ -1103,7 +1151,9 @@ internal sealed partial class PackageManager
             owner.PropagateClassFaults();
             _startQueue = new(OrderPackageNames(
                 owner._catalog,
-                owner._packages.Where(package => _targetSet.Contains(package.Name))
+                owner._packages.Where(package =>
+                        _activeBeforeTransition.Contains(package.Name) ||
+                        _targetSet.Contains(package.Name))
                     .Select(package => package.Name),
                 reverse: false));
             State = ScriptLifecycleTransitionOperationState.StartingLifecycle;
@@ -1154,6 +1204,22 @@ internal sealed partial class PackageManager
                 ScriptPackage? package = owner.FindActivePackage(name);
                 if (package is null)
                 {
+                    continue;
+                }
+
+                string? admissionFailure = owner.ValidateLifecycleAdmission(package);
+                if (admissionFailure is not null)
+                {
+                    AddUnique(_failed, name);
+                    owner.BeginPackageRetirement(
+                        package,
+                        ScriptStopReason.DependencyUnavailable,
+                        admissionFailure);
+                    _log.Error(
+                        admissionFailure,
+                        source: name,
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: $"Package '{name}' was rejected before lifecycle reactivation.");
                     continue;
                 }
 

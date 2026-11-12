@@ -43,6 +43,12 @@ namespace CoreCLRHostLoader
                 const void* parameters,
                 hostfxr_handle* hostContext);
 
+        using hostfxr_get_runtime_property_value_fn =
+            std::int32_t(__cdecl*)(
+                hostfxr_handle hostContext,
+                const host_char_t* name,
+                const host_char_t** value);
+
         using hostfxr_get_runtime_delegate_fn =
             std::int32_t(__cdecl*)(
                 hostfxr_handle hostContext,
@@ -157,7 +163,7 @@ namespace CoreCLRHostLoader
             {
                 if (message != nullptr && *message != L'\0')
                 {
-                    WriteLog(LogLevel::Error, message);
+                    WriteLog(LogLevel::Warning, message);
                 }
             }
 
@@ -419,6 +425,65 @@ namespace CoreCLRHostLoader
             return left.Prerelease.size() < right.Prerelease.size() ? -1 : 1;
         }
 
+        [[nodiscard]]
+        std::wstring_view ChannelName(RuntimeChannel channel) noexcept
+        {
+            return channel == RuntimeChannel::Preview ? L"Preview" : L"Release";
+        }
+
+        [[nodiscard]]
+        RuntimeChannel OtherChannel(RuntimeChannel channel) noexcept
+        {
+            return channel == RuntimeChannel::Preview
+                ? RuntimeChannel::Release
+                : RuntimeChannel::Preview;
+        }
+
+        [[nodiscard]]
+        HostResult<std::pair<RuntimeChannel, std::wstring>> InspectResolvedRuntime(
+            hostfxr_handle context,
+            hostfxr_get_runtime_property_value_fn getProperty)
+        {
+            if (getProperty == nullptr)
+            {
+                return std::unexpected(
+                    L"hostfxr does not expose runtime property inspection.");
+            }
+
+            const host_char_t* value = nullptr;
+            std::wstring versionText;
+            if (getProperty(context, L"FX_DEPS_FILE", &value) == 0 &&
+                value != nullptr && *value != L'\0')
+            {
+                const std::filesystem::path deps(value);
+                if (deps.filename() == L"Microsoft.NETCore.App.deps.json")
+                {
+                    versionText = deps.parent_path().filename().wstring();
+                }
+            }
+            if (versionText.empty())
+            {
+                value = nullptr;
+                if (getProperty(context, L"FX_PRODUCT_VERSION", &value) == 0 &&
+                    value != nullptr && *value != L'\0')
+                {
+                    versionText = value;
+                }
+            }
+            const auto version = ParseHostFxrVersion(versionText);
+            if (!version)
+            {
+                return std::unexpected(
+                    L"hostfxr did not expose a recognizable resolved "
+                    L"Microsoft.NETCore.App version.");
+            }
+            return std::pair(
+                version->Prerelease.empty()
+                    ? RuntimeChannel::Release
+                    : RuntimeChannel::Preview,
+                versionText);
+        }
+
         struct NetHostLocation final
         {
             std::filesystem::path Library;
@@ -530,8 +595,7 @@ namespace CoreCLRHostLoader
         }
 
         [[nodiscard]]
-        std::optional<NetHostLocation> LocateSdkNetHost(
-            RuntimeChannel channel)
+        std::optional<NetHostLocation> LocateSdkNetHost()
         {
             auto dotnetRoot = LocateDotNetRoot();
             if (!dotnetRoot)
@@ -567,9 +631,7 @@ namespace CoreCLRHostLoader
 
                 auto version =
                     ParseHostFxrVersion(entry.path().filename().wstring());
-                if (!version ||
-                    (channel == RuntimeChannel::Release &&
-                     !version->Prerelease.empty()))
+                if (!version)
                 {
                     continue;
                 }
@@ -604,8 +666,7 @@ namespace CoreCLRHostLoader
 
         [[nodiscard]]
         HostResult<std::filesystem::path> LocateDefaultHostFxr(
-            const ManagedBrain& brain,
-            RuntimeChannel channel)
+            const ManagedBrain& brain)
         {
             HMODULE rawNetHost = LoadLibraryExW(
                 L"nethost.dll",
@@ -615,7 +676,7 @@ namespace CoreCLRHostLoader
             std::optional<NetHostLocation> sdkNetHost;
             if (rawNetHost == nullptr)
             {
-                sdkNetHost = LocateSdkNetHost(channel);
+                sdkNetHost = LocateSdkNetHost();
                 if (sdkNetHost)
                 {
                     rawNetHost = LoadLibraryExW(
@@ -680,29 +741,19 @@ namespace CoreCLRHostLoader
         }
 
         [[nodiscard]]
-        HostResult<std::filesystem::path> ResolveHostFxr(
-            const ManagedBrain& brain,
-            RuntimeChannel channel)
+        HostResult<std::filesystem::path> SelectLatestHostFxr(
+            const std::filesystem::path& fxrDirectory)
         {
-            auto located = LocateDefaultHostFxr(brain, channel);
-            if (!located)
-            {
-                return std::unexpected(located.error());
-            }
-
-            const std::filesystem::path versionDirectory =
-                located->parent_path();
-            const std::filesystem::path fxrDirectory =
-                versionDirectory.parent_path();
-            if (!std::filesystem::is_directory(fxrDirectory))
+            std::error_code error;
+            if (!std::filesystem::is_directory(fxrDirectory, error))
             {
                 return std::unexpected(
-                    L"The resolved .NET host/fxr directory is unavailable.");
+                    L"The .NET host/fxr directory is unavailable: " +
+                    fxrDirectory.wstring());
             }
 
             std::optional<HostFxrVersion> selectedVersion;
             std::filesystem::path selectedPath;
-            std::error_code error;
             for (const auto& entry : std::filesystem::directory_iterator(
                      fxrDirectory,
                      std::filesystem::directory_options::skip_permission_denied,
@@ -714,17 +765,13 @@ namespace CoreCLRHostLoader
                 }
                 if (!entry.is_directory(error))
                 {
+                    error.clear();
                     continue;
                 }
 
                 auto version =
                     ParseHostFxrVersion(entry.path().filename().wstring());
                 if (!version)
-                {
-                    continue;
-                }
-                if (channel == RuntimeChannel::Release &&
-                    !version->Prerelease.empty())
                 {
                     continue;
                 }
@@ -740,7 +787,7 @@ namespace CoreCLRHostLoader
                 if (!selectedVersion ||
                     CompareHostFxrVersion(*version, *selectedVersion) > 0)
                 {
-                    selectedVersion = std::move(version);
+                    selectedVersion = std::move(*version);
                     selectedPath = candidate;
                 }
             }
@@ -748,24 +795,80 @@ namespace CoreCLRHostLoader
             if (error)
             {
                 return std::unexpected(
-                    L"The .NET host/fxr directory could not be enumerated.");
+                    L"The .NET host/fxr directory could not be enumerated: " +
+                    fxrDirectory.wstring());
             }
             if (selectedPath.empty())
             {
                 return std::unexpected(
-                    channel == RuntimeChannel::Release
-                        ? L"No release hostfxr installation is available."
-                        : L"No hostfxr installation is available.");
+                    L"No usable hostfxr.dll was found in: " +
+                    fxrDirectory.wstring());
             }
-
             return selectedPath;
         }
+
+        [[nodiscard]]
+        HostResult<std::filesystem::path> ResolveHostFxr(
+            const ManagedBrain& brain)
+        {
+            auto located = LocateDefaultHostFxr(brain);
+            if (located)
+            {
+                auto resolved = SelectLatestHostFxr(
+                    located->parent_path().parent_path());
+                if (resolved)
+                {
+                    return resolved;
+                }
+                WriteLog(LogLevel::Warning, resolved.error());
+            }
+            else
+            {
+                WriteLog(LogLevel::Warning, located.error());
+            }
+
+            std::array<std::optional<std::filesystem::path>, 4> roots
+            {
+                EnvironmentPath(L"DOTNET_ROOT_X64"),
+                EnvironmentPath(L"DOTNET_ROOT"),
+                RegisteredDotNetRoot(),
+                std::nullopt
+            };
+            if (auto programFiles = EnvironmentPath(L"ProgramFiles"))
+            {
+                roots.back() = *programFiles / L"dotnet";
+            }
+
+            for (const auto& root : roots)
+            {
+                if (!root)
+                {
+                    continue;
+                }
+                auto resolved = SelectLatestHostFxr(
+                    *root / L"host" / L"fxr");
+                if (resolved)
+                {
+                    WriteLog(
+                        LogLevel::Information,
+                        L"hostfxr.dll selected directly from installed .NET: " +
+                            resolved->wstring());
+                    return resolved;
+                }
+            }
+
+            return std::unexpected(
+                L"No usable .NET hostfxr.dll was found through nethost or "
+                L"the available installed .NET runtime roots.");
+        }
+
     }
 
     HostResult<void> RunManagedBrain(
         const HostConfiguration& configuration,
         const ManagedBrain& brain,
-        const BrainRunRequest& request) noexcept
+        const BrainRunRequest& request,
+        const std::filesystem::path& configurationPath) noexcept
     {
         try
         {
@@ -775,7 +878,6 @@ namespace CoreCLRHostLoader
                     L"The managed runtime has already been activated by "
                     L"CoreCLRHostLoader in this GTA process.");
             }
-
             if (!std::filesystem::is_regular_file(brain.RuntimeConfiguration))
             {
                 return std::unexpected(
@@ -783,17 +885,14 @@ namespace CoreCLRHostLoader
                     brain.RuntimeConfiguration.wstring());
             }
 
-            auto hostFxrPath = ResolveHostFxr(brain, configuration.Channel);
+            auto hostFxrPath = ResolveHostFxr(brain);
             if (!hostFxrPath)
             {
                 return std::unexpected(hostFxrPath.error());
             }
-
             WriteLog(
                 LogLevel::Information,
-                configuration.Channel == RuntimeChannel::Preview
-                    ? L"Preview hostfxr selected: " + hostFxrPath->wstring()
-                    : L"Release hostfxr selected: " + hostFxrPath->wstring());
+                L".NET hostfxr selected: " + hostFxrPath->wstring());
 
             LoadedLibrary hostFxr(LoadLibraryExW(
                 hostFxrPath->c_str(),
@@ -802,7 +901,8 @@ namespace CoreCLRHostLoader
                     LOAD_LIBRARY_SEARCH_DEFAULT_DIRS));
             if (hostFxr.Get() == nullptr)
             {
-                return std::unexpected(L"The resolved hostfxr.dll could not be loaded.");
+                return std::unexpected(
+                    L"The resolved hostfxr.dll could not be loaded.");
             }
 
             const auto initialize =
@@ -811,105 +911,174 @@ namespace CoreCLRHostLoader
             const auto getDelegate =
                 reinterpret_cast<hostfxr_get_runtime_delegate_fn>(
                     GetProcAddress(hostFxr.Get(), "hostfxr_get_runtime_delegate"));
+            const auto getProperty =
+                reinterpret_cast<hostfxr_get_runtime_property_value_fn>(
+                    GetProcAddress(hostFxr.Get(), "hostfxr_get_runtime_property_value"));
             const auto close = reinterpret_cast<hostfxr_close_fn>(
                 GetProcAddress(hostFxr.Get(), "hostfxr_close"));
             const auto setErrorWriter =
                 reinterpret_cast<hostfxr_set_error_writer_fn>(
                     GetProcAddress(hostFxr.Get(), "hostfxr_set_error_writer"));
-
-            if (initialize == nullptr || getDelegate == nullptr || close == nullptr)
+            if (initialize == nullptr || getDelegate == nullptr ||
+                getProperty == nullptr || close == nullptr)
             {
                 return std::unexpected(
                     L"hostfxr does not expose the required stable hosting APIs.");
             }
 
             HostFxrErrorWriter errorWriter(setErrorWriter);
-            const bool previewRuntime =
-                configuration.Channel == RuntimeChannel::Preview;
-
-            EnvironmentVariableOverride prereleasePolicy(
-                L"DOTNET_ROLL_FORWARD_TO_PRERELEASE",
-                previewRuntime ? L"1" : L"0");
-            if (!prereleasePolicy.Applied())
+            const std::wstring runtimeConfig = brain.RuntimeConfiguration.wstring();
+            const std::array<RuntimeChannel, 2> order
             {
-                return std::unexpected(
-                    L"The prerelease runtime policy could not be applied.");
-            }
-
-            std::optional<EnvironmentVariableOverride> rollForwardPolicy;
-            if (previewRuntime)
+                configuration.Channel,
+                OtherChannel(configuration.Channel)
+            };
+            std::wstring failureSummary;
+            for (RuntimeChannel channel : order)
             {
-                rollForwardPolicy.emplace(
-                    L"DOTNET_ROLL_FORWARD",
-                    L"LatestMajor");
-                if (!rollForwardPolicy->Applied())
+                WriteLog(
+                    LogLevel::Information,
+                    std::wstring(L"Attempting .NET runtime channel ") +
+                        std::wstring(ChannelName(channel)) + L".");
+
+                EnvironmentVariableOverride prereleasePolicy(
+                    L"DOTNET_ROLL_FORWARD_TO_PRERELEASE",
+                    channel == RuntimeChannel::Preview ? L"1" : L"0");
+                if (!prereleasePolicy.Applied())
                 {
                     return std::unexpected(
-                        L"The Preview runtime roll-forward policy could not be applied.");
+                        L"The prerelease runtime policy could not be applied.");
                 }
-            }
-
-            hostfxr_handle context = nullptr;
-            const std::wstring runtimeConfig = brain.RuntimeConfiguration.wstring();
-            std::int32_t status = initialize(runtimeConfig.c_str(), nullptr, &context);
-            if (status < 0 || context == nullptr)
-            {
-                if (context != nullptr)
+                std::optional<EnvironmentVariableOverride> rollForwardPolicy;
+                if (channel == RuntimeChannel::Preview)
                 {
-                    close(context);
+                    rollForwardPolicy.emplace(
+                        L"DOTNET_ROLL_FORWARD", L"LatestMajor");
+                    if (!rollForwardPolicy->Applied())
+                    {
+                        return std::unexpected(
+                            L"The Preview runtime roll-forward policy could not be applied.");
+                    }
                 }
-                return std::unexpected(
-                    L"hostfxr_initialize_for_runtime_config failed with " +
-                    FormatStatus(status) + L".");
+
+                hostfxr_handle context = nullptr;
+                const std::int32_t initStatus = initialize(
+                    runtimeConfig.c_str(), nullptr, &context);
+                if (initStatus < 0 || context == nullptr)
+                {
+                    if (context != nullptr)
+                    {
+                        close(context);
+                    }
+                    const std::wstring failure =
+                        std::wstring(ChannelName(channel)) +
+                        L": hostfxr_initialize_for_runtime_config failed with " +
+                        FormatStatus(initStatus) + L".";
+                    WriteLog(LogLevel::Warning, failure);
+                    if (!failureSummary.empty())
+                    {
+                        failureSummary += L" ";
+                    }
+                    failureSummary += failure;
+                    continue;
+                }
+
+                HostContext hostContext(context, close);
+                auto resolved = InspectResolvedRuntime(context, getProperty);
+                if (!resolved || resolved->first != channel)
+                {
+                    const std::wstring failure =
+                        std::wstring(ChannelName(channel)) + L": " +
+                        (resolved
+                            ? L"hostfxr resolved " + resolved->second +
+                                L" in the other runtime channel."
+                            : resolved.error());
+                    WriteLog(LogLevel::Warning, failure);
+                    if (!failureSummary.empty())
+                    {
+                        failureSummary += L" ";
+                    }
+                    failureSummary += failure;
+                    continue;
+                }
+
+                WriteLog(
+                    LogLevel::Information,
+                    std::wstring(ChannelName(channel)) +
+                        L" .NET runtime resolved: " + resolved->second + L".");
+                void* rawLoadAssembly = nullptr;
+                const std::int32_t delegateStatus = getDelegate(
+                    context,
+                    HostFxrDelegateType::LoadAssemblyAndGetFunctionPointer,
+                    &rawLoadAssembly);
+                if (delegateStatus < 0 || rawLoadAssembly == nullptr)
+                {
+                    return std::unexpected(
+                        L"hostfxr_get_runtime_delegate failed with " +
+                        FormatStatus(delegateStatus) +
+                        L"; switching runtimes is no longer safe.");
+                }
+
+                g_activeHostFxr = hostFxr.Release();
+                const auto loadAssembly =
+                    reinterpret_cast<load_assembly_and_get_function_pointer_fn>(
+                        rawLoadAssembly);
+                void* rawRun = nullptr;
+                const std::wstring assemblyPath = brain.Assembly.wstring();
+                const auto unmanagedCallersOnly =
+                    reinterpret_cast<const host_char_t*>(
+                        static_cast<std::intptr_t>(-1));
+                const std::int32_t loadStatus = loadAssembly(
+                    assemblyPath.c_str(),
+                    brain.EntryType.c_str(),
+                    brain.EntryMethod.c_str(),
+                    unmanagedCallersOnly,
+                    nullptr,
+                    &rawRun);
+                if (loadStatus < 0 || rawRun == nullptr)
+                {
+                    return std::unexpected(
+                        L"The managed brain entry point could not be resolved: " +
+                        FormatStatus(loadStatus) + L".");
+                }
+
+                if (channel != configuration.Channel)
+                {
+                    auto cached = CacheRuntimeChannelSelection(
+                        configurationPath, channel);
+                    if (!cached)
+                    {
+                        WriteLog(
+                            LogLevel::Warning,
+                            L"Selected runtime channel could not be cached: " +
+                                cached.error());
+                    }
+                    else if (*cached)
+                    {
+                        WriteLog(
+                            LogLevel::Information,
+                            L"CoreCLRHostLoader.ini switched to " +
+                                std::wstring(ChannelName(channel)) + L".");
+                    }
+                }
+
+                const auto runBrain = reinterpret_cast<brain_run_fn>(rawRun);
+                const std::int32_t result = runBrain(
+                    &request,
+                    static_cast<std::int32_t>(sizeof(request)));
+                if (result != 0)
+                {
+                    return std::unexpected(
+                        L"The managed brain ended with result " +
+                        std::to_wstring(result) + L".");
+                }
+                return {};
             }
 
-            HostContext hostContext(context, close);
-            void* rawLoadAssembly = nullptr;
-            status = getDelegate(
-                context,
-                HostFxrDelegateType::LoadAssemblyAndGetFunctionPointer,
-                &rawLoadAssembly);
-            if (status < 0 || rawLoadAssembly == nullptr)
-            {
-                return std::unexpected(
-                    L"hostfxr_get_runtime_delegate failed with " +
-                    FormatStatus(status) + L".");
-            }
-
-            g_activeHostFxr = hostFxr.Release();
-            const auto loadAssembly =
-                reinterpret_cast<load_assembly_and_get_function_pointer_fn>(
-                    rawLoadAssembly);
-
-            void* rawRun = nullptr;
-            const std::wstring assemblyPath = brain.Assembly.wstring();
-            const auto unmanagedCallersOnly = reinterpret_cast<const host_char_t*>(
-                static_cast<std::intptr_t>(-1));
-            status = loadAssembly(
-                assemblyPath.c_str(),
-                brain.EntryType.c_str(),
-                brain.EntryMethod.c_str(),
-                unmanagedCallersOnly,
-                nullptr,
-                &rawRun);
-            if (status < 0 || rawRun == nullptr)
-            {
-                return std::unexpected(
-                    L"The managed brain entry point could not be resolved: " +
-                    FormatStatus(status) + L".");
-            }
-
-            const auto runBrain = reinterpret_cast<brain_run_fn>(rawRun);
-            const std::int32_t result = runBrain(
-                &request,
-                static_cast<std::int32_t>(sizeof(request)));
-            if (result != 0)
-            {
-                return std::unexpected(
-                    L"The managed brain ended with result " +
-                    std::to_wstring(result) + L".");
-            }
-            return {};
+            return std::unexpected(
+                L"No installed .NET runtime can satisfy either channel. " +
+                failureSummary +
+                L" Central Brain and all subsequent infrastructures will not be started.");
         }
         catch (const std::exception& exception)
         {
@@ -920,12 +1089,8 @@ namespace CoreCLRHostLoader
             {
                 std::wstring buffer(static_cast<std::size_t>(required), L'\0');
                 if (MultiByteToWideChar(
-                        CP_UTF8,
-                        0,
-                        exception.what(),
-                        -1,
-                        buffer.data(),
-                        required) == required)
+                        CP_UTF8, 0, exception.what(), -1,
+                        buffer.data(), required) == required)
                 {
                     buffer.pop_back();
                     message = std::move(buffer);

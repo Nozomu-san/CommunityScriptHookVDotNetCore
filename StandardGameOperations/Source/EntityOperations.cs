@@ -143,22 +143,18 @@ internal sealed class EntityOperations(ILocalEntityPools pools) :
 
     public EntityPopulationCounts GetPopulationCounts()
     {
-        LocalDataResult<LocalPoolStatistics> peds =
-            _pools.GetStatistics(LocalPoolKinds.Peds);
-        LocalDataResult<LocalPoolStatistics> vehicles =
-            _pools.GetStatistics(LocalPoolKinds.Vehicles);
-        LocalDataResult<LocalPoolStatistics> objects =
-            _pools.GetStatistics(LocalPoolKinds.Objects);
-
-        if (!peds.IsSuccess || !vehicles.IsSuccess || !objects.IsSuccess)
+        LocalDataResult<LocalPoolCountsSnapshot> snapshot =
+            _pools.GetCountSnapshot();
+        if (!snapshot.IsSuccess)
         {
             return default;
         }
 
+        LocalPoolCountsSnapshot counts = snapshot.Value;
         return new(
             true,
-            peds.Value.ActiveCount,
-            vehicles.Value.ActiveCount,
-            objects.Value.ActiveCount);
+            counts.Peds.ActiveCount,
+            counts.Vehicles.ActiveCount,
+            counts.Objects.ActiveCount);
     }
 }

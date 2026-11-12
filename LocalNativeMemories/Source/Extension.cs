@@ -17,10 +17,11 @@ using CommunityScriptHookVDotNetCore.Source;
 namespace LocalNativeMemories.Source;
 
 internal sealed class LocalNativeMemoriesExtension :
-    IScript4RuntimeExtension
+    IScript4RuntimeExtension, IRuntimeExtensionAdmissionProbe
 {
     private LocalMemoryService? _memory;
     private EntityPools? _pools;
+    private PoolAdmission? _admission;
 
     public Task InitializeAsync(
         RuntimeExtensionContext context,
@@ -59,16 +60,27 @@ internal sealed class LocalNativeMemoriesExtension :
 
         _memory = memory;
         _pools = pools;
+        IRuntimeInformationSink information =
+            context.Services.GetRequired<IRuntimeInformationSink>();
+        _admission = new PoolAdmission(pools, information);
         return Task.CompletedTask;
     }
 
+    public bool AdvanceAdmissionFrame(RuntimeExtensionFrameContext context) =>
+        _admission?.Advance(context.HostFrameIndex) ?? false;
+
     public void AdvanceHostFrame(RuntimeExtensionFrameContext context)
     {
-        _pools?.AdvanceHostFrame();
+        EntityPools? pools = _pools;
+        if (pools is not null && pools.HasPendingWork)
+        {
+            pools.AdvanceHostFrame(context.HostFrameIndex);
+        }
     }
 
     public Task ShutdownAsync()
     {
+        _admission = null;
         _pools = null;
         _memory = null;
         return Task.CompletedTask;

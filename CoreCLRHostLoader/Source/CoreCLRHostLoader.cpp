@@ -240,7 +240,8 @@ namespace
         [[nodiscard]]
         HostResult<void> Start(
             HostConfiguration configuration,
-            ManagedBrain brain)
+            ManagedBrain brain,
+            std::filesystem::path configurationPath)
         {
             if (m_state.load(std::memory_order_acquire) !=
                 SessionState::Created)
@@ -265,6 +266,7 @@ namespace
 
             m_configuration = std::move(configuration);
             m_brain = std::move(brain);
+            m_configurationPath = std::move(configurationPath);
             m_frequency = frequency.QuadPart;
             m_request.ReadyEvent = m_readyEvent;
             m_request.FrameRequestedEvent = m_frameRequestedEvent;
@@ -754,7 +756,8 @@ namespace
             auto result = RunManagedBrain(
                 session.m_configuration,
                 session.m_brain,
-                session.m_request);
+                session.m_request,
+                session.m_configurationPath);
 
             if (!result)
             {
@@ -792,6 +795,7 @@ namespace
 
         HostConfiguration m_configuration;
         ManagedBrain m_brain;
+        std::filesystem::path m_configurationPath;
         BrainRunRequest m_request{};
         FrameMailbox m_frame{};
         NativeCallMailbox m_nativeCall{};
@@ -841,10 +845,8 @@ namespace
         WriteLog(
             LogLevel::Information,
             state->Configuration.Channel == RuntimeChannel::Preview
-                ? L"Preview .NET runtime access is enabled. Prerelease runtimes "
-                  L"may participate in LatestMajor hostfxr resolution."
-                : L"Release .NET runtime channel is active. Prerelease runtimes "
-                  L"are excluded from hostfxr resolution.");
+                ? L"Preview .NET runtime requested; Release is the fallback."
+                : L"Release .NET runtime requested; Preview is the fallback.");
 
         auto brain = DiscoverManagedBrain(*state);
         if (!brain)
@@ -905,7 +907,8 @@ namespace
         auto session = std::make_unique<HostSession>();
         auto started = session->Start(
             state->Configuration,
-            **brain);
+            **brain,
+            state->Paths.Configuration);
         if (!started)
         {
             WriteLog(LogLevel::Error, started.error());

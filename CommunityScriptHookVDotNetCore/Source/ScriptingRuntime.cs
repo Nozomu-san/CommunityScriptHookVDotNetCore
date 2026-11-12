@@ -62,6 +62,23 @@ public sealed class ScriptLifecycleDependencyAttribute(Type requiredType) : Attr
     public Type RequiredType { get; } = requiredType;
 }
 
+[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = true)]
+public sealed class ScriptLibraryPatternAttribute(string assemblyName) : Attribute
+{
+    public string AssemblyName { get; } = assemblyName;
+    public bool Required { get; set; }
+}
+
+public interface IScriptLibraryPattern
+{
+    Task<bool> TryApplyAsync(Script4 script, CancellationToken cancellationToken);
+}
+
+public interface IScript4ReadinessProbe
+{
+    bool IsReady { get; }
+}
+
 public abstract class Script4
 {
     protected abstract Task OnStartAsync(ScriptStartContext context);

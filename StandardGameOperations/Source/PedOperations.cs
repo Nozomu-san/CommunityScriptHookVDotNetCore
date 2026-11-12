@@ -20,6 +20,8 @@ public readonly record struct PedPopulationSnapshot(
     ReadOnlyMemory<Ped> Peds)
 {
     public int Count => Peds.Length;
+    public int UnresolvedCount => Math.Max(0, ActiveCount - Count);
+    public bool IsFullyResolved => Available && Count == ActiveCount;
 
     public static PedPopulationSnapshot Empty { get; } =
         new(false, 0, 0, 0, ReadOnlyMemory<Ped>.Empty);
@@ -126,6 +128,7 @@ public interface IPedOperations
     bool TryRagdoll(Ped ped, int minimumTime = 450, int maximumTime = 900);
     PedInvincibilityState ReadInvincibility(Ped ped);
     void SetPureInvincibility(Ped ped, bool value);
+    bool TrySetReactionInvincibility(Ped ped, bool value);
     bool CanReceiveSyntheticDamage(Ped ped);
     bool IsOnFire(Ped ped);
     bool StartFire(Ped ped);
@@ -137,7 +140,8 @@ internal sealed class PedOperations(
     IEntityOperations entities,
     ILocalEntityPools pools,
     IPedLocalMemory memory,
-    NativeBindings known) : IPedOperations
+    NativeBindings known,
+    IGameBuildService gameBuild) : IPedOperations
 {
     private readonly IEntityOperations _entities =
         entities ?? throw new ArgumentNullException(nameof(entities));
@@ -147,6 +151,8 @@ internal sealed class PedOperations(
         memory ?? throw new ArgumentNullException(nameof(memory));
     private readonly NativeBindings _known =
         known ?? throw new ArgumentNullException(nameof(known));
+    private readonly IGameBuildService _gameBuild =
+        gameBuild ?? throw new ArgumentNullException(nameof(gameBuild));
     private readonly Lock _populationGate = new();
     private readonly Lock _observationGate = new();
     private readonly Queue<int> _activeObservationQueue = [];
@@ -579,6 +585,32 @@ internal sealed class PedOperations(
                 value,
                 false);
         }
+    }
+
+    public bool TrySetReactionInvincibility(Ped ped, bool value)
+    {
+        if (!_entities.IsValid(ped))
+        {
+            return false;
+        }
+
+        GameBuildInfo game = _gameBuild.Current;
+        if (!game.IsSupported ||
+            (game.Edition is GameEdition.Legacy && game.Build < 463))
+        {
+            return false;
+        }
+
+        if (ped.Value == StandardNatives.PLAYER_PED_ID().Value)
+        {
+            StandardNatives.SET_PLAYER_INVINCIBLE_BUT_HAS_REACTIONS(
+                StandardNatives.PLAYER_ID(),
+                value);
+            return true;
+        }
+
+        return _memory.SetReactionInvincibility(ped.Value, value)
+            is LocalDataStatus.Success;
     }
 
     public bool CanReceiveSyntheticDamage(Ped ped) =>

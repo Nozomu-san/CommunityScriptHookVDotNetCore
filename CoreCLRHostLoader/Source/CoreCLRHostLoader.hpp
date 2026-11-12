@@ -197,6 +197,11 @@ namespace CoreCLRHostLoader
         HostState& state,
         std::wstring_view assemblyName) noexcept;
 
+    [[nodiscard]]
+    HostResult<bool> CacheRuntimeChannelSelection(
+        const std::filesystem::path& configurationPath,
+        RuntimeChannel channel) noexcept;
+
     void WriteLog(LogLevel level, std::wstring_view message) noexcept;
 
     [[nodiscard]]
@@ -207,5 +212,6 @@ namespace CoreCLRHostLoader
     HostResult<void> RunManagedBrain(
         const HostConfiguration& configuration,
         const ManagedBrain& brain,
-        const BrainRunRequest& request) noexcept;
+        const BrainRunRequest& request,
+        const std::filesystem::path& configurationPath) noexcept;
 }

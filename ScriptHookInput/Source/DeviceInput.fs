@@ -201,7 +201,12 @@ type internal DeviceInputReader() =
                 cursorBaseline <- false
                 pointerState <- PointerState.Unavailable frame.FrameIndex
                 Array.Clear(controllerAvailable)
-            else
+                Array.Clear(controllerNextProbe)
+            elif not controllerDemand then
+                Array.Clear(controllerAvailable)
+                Array.Clear(controllerNextProbe)
+
+            if foreground then
                 let mutable point = NativePoint()
                 if NativeDeviceInput.GetCursorPos(&point) then
                     if cursorBaseline then
@@ -236,9 +241,6 @@ type internal DeviceInputReader() =
         if foreground && controllerDemand && not controllersCaptured then
             captureControllers()
             controllersCaptured <- true
-        elif not controllerDemand then
-            Array.Clear(controllerAvailable)
-            Array.Clear(controllerNextProbe)
 
     let readControllerButton (control: DeviceControl) =
         let mask = controllerMask control.Code
