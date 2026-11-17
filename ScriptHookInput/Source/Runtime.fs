@@ -2,6 +2,8 @@ namespace ScriptHookInput.Source
 
 open System
 open System.Collections.Generic
+open System.Threading
+open System.Threading.Tasks
 open CommunityScriptHookVDotNetCore.Source
 
 [<StructuralEquality; NoComparison>]
@@ -172,10 +174,10 @@ type internal InputRuntime() as this =
                 else
                     entry.PublishUnavailable(context.HostFrameIndex)
 
-            for action in actions do
+            for action in actions.ToArray() do
                 action.Update(context.HostFrameIndex))
 
-    member private _.CreateInputAction(binding: InputActionBinding) =
+    member private _.CreateInputAction(binding: InputActionBinding, requireAll: bool) =
         ArgumentNullException.ThrowIfNull(binding)
 
         lock gate (fun () ->
@@ -205,7 +207,8 @@ type internal InputRuntime() as this =
                     new InputAction(
                         this,
                         binding.Name,
-                        acquired.ToArray())
+                        acquired.ToArray(),
+                        requireAll)
 
                 actions.Add(action)
                 action :> IInputAction
@@ -223,14 +226,20 @@ type internal InputRuntime() as this =
 
     interface IInputActions with
         member _.Create(binding) =
-            this.CreateInputAction(binding)
+            this.CreateInputAction(binding, false)
 
         member _.Create(name, inputs) =
-            this.CreateInputAction(InputActionBinding(name, inputs))
+            this.CreateInputAction(InputActionBinding(name, inputs), false)
 
         member _.CreateSingle(name, input) =
             let binding = InputBindingCodec.Parse(input)
-            this.CreateInputAction(InputActionBinding(name, [| binding |]))
+            this.CreateInputAction(InputActionBinding(name, [| binding |]), false)
+
+        member _.CreateChord(binding) =
+            this.CreateInputAction(binding, true)
+
+        member _.CreateChord(name, inputs) =
+            this.CreateInputAction(InputActionBinding(name, inputs), true)
 
     interface IDisposable with
         member _.Dispose() =
@@ -249,7 +258,8 @@ type internal InputRuntime() as this =
 and internal InputAction(
     runtime: InputRuntime,
     name: string,
-    entries: ObservationEntry array) as this =
+    entries: ObservationEntry array,
+    requireAll: bool) as this =
 
     let gate = obj()
     let mutable attached = true
@@ -257,6 +267,17 @@ and internal InputAction(
     let mutable previousDown = false
     let mutable previousOrigin = InputOrigin.None
     let mutable state = InputState.Unavailable(0UL, InputOrigin.None)
+    let entryStates = Array.init entries.Length (fun index -> entries[index].State)
+    let pressWaiters = ResizeArray<TaskCompletionSource<InputState>>()
+    let releaseWaiters = ResizeArray<TaskCompletionSource<InputState>>()
+    let matchWaiters =
+        ResizeArray<Func<IReadOnlyList<InputState>, bool> * TaskCompletionSource<InputState>>()
+
+    let removeMatchWaiter (waiter: TaskCompletionSource<InputState>) =
+        for index = matchWaiters.Count - 1 downto 0 do
+            let _, candidate = matchWaiters[index]
+            if Object.ReferenceEquals(candidate, waiter) then
+                matchWaiters.RemoveAt(index)
 
     member _.Entries = entries
 
@@ -264,26 +285,31 @@ and internal InputAction(
         lock gate (fun () ->
             if attached then
                 let mutable availableCount = 0
-                let mutable currentDown = false
+                let mutable currentDown = requireAll
                 let mutable strongestValue = 0.0f
                 let mutable strongestOrigin = InputOrigin.None
                 let mutable downOrigin = InputOrigin.None
                 let mutable hasDownOrigin = false
 
-                for entry in entries do
-                    let sample = entry.State
+                for index = 0 to entries.Length - 1 do
+                    let sample = entries[index].State
+                    entryStates[index] <- sample
                     if sample.IsAvailable then
                         availableCount <- availableCount + 1
                         if abs sample.Value > abs strongestValue then
                             strongestValue <- sample.Value
                             strongestOrigin <- sample.Origin
-                        if sample.IsDown then
+                        if requireAll then
+                            currentDown <- currentDown && sample.IsDown
+                        elif sample.IsDown then
                             currentDown <- true
+                        if sample.IsDown then
                             if not hasDownOrigin then
                                 hasDownOrigin <- true
                                 downOrigin <- sample.Origin
 
-                if availableCount = 0 then
+                if availableCount = 0 ||
+                   (requireAll && availableCount <> entries.Length) then
                     let wasReleased = initialized && previousDown
                     state <-
                         InputState(
@@ -326,11 +352,132 @@ and internal InputAction(
                         previousOrigin <- origin
 
                     previousDown <- currentDown
-                    initialized <- true)
+                    initialized <- true
+
+                if state.WasPressed then
+                    for waiter in pressWaiters do
+                        waiter.TrySetResult(state) |> ignore
+                    pressWaiters.Clear()
+                if state.WasReleased then
+                    for waiter in releaseWaiters do
+                        waiter.TrySetResult(state) |> ignore
+                    releaseWaiters.Clear()
+
+                if matchWaiters.Count > 0 then
+                    let samples =
+                        System.Array.AsReadOnly(Array.copy entryStates)
+                        :> IReadOnlyList<InputState>
+                    for (predicate, waiter) in matchWaiters.ToArray() do
+                        if not waiter.Task.IsCompleted then
+                            try
+                                if predicate.Invoke(samples) then
+                                    removeMatchWaiter waiter
+                                    waiter.TrySetResult(state) |> ignore
+                            with ex ->
+                                removeMatchWaiter waiter
+                                waiter.TrySetException(ex) |> ignore)
+
+    member private _.WaitForTransition(
+        isPress: bool,
+        cancellationToken: CancellationToken) : Task<InputState> =
+
+        let completion =
+            TaskCompletionSource<InputState>(
+                TaskCreationOptions.RunContinuationsAsynchronously)
+        let waiters = if isPress then pressWaiters else releaseWaiters
+        let registered =
+            lock gate (fun () ->
+                if not attached then
+                    completion.TrySetException(
+                        ObjectDisposedException(nameof InputAction)) |> ignore
+                    false
+                elif cancellationToken.IsCancellationRequested then
+                    completion.TrySetCanceled(cancellationToken) |> ignore
+                    false
+                else
+                    waiters.Add(completion)
+                    true)
+
+        if registered && cancellationToken.CanBeCanceled then
+            let registration =
+                cancellationToken.Register(
+                    Action(fun () ->
+                        lock gate (fun () ->
+                            waiters.Remove(completion) |> ignore)
+                        completion.TrySetCanceled(cancellationToken) |> ignore))
+            completion.Task.ContinueWith(
+                Action<Task<InputState>>(fun _ -> registration.Dispose()),
+                CancellationToken.None,
+                TaskContinuationOptions.RunContinuationsAsynchronously,
+                TaskScheduler.Default) |> ignore
+
+        completion.Task
+
+    member private _.WaitForMatch(
+        predicate: Func<IReadOnlyList<InputState>, bool>,
+        cancellationToken: CancellationToken) : Task<InputState> =
+
+        ArgumentNullException.ThrowIfNull(predicate)
+        let completion =
+            TaskCompletionSource<InputState>(
+                TaskCreationOptions.RunContinuationsAsynchronously)
+        let registered =
+            lock gate (fun () ->
+                if not attached then
+                    completion.TrySetException(
+                        ObjectDisposedException(nameof InputAction)) |> ignore
+                    false
+                elif cancellationToken.IsCancellationRequested then
+                    completion.TrySetCanceled(cancellationToken) |> ignore
+                    false
+                else
+                    try
+                        let samples =
+                            System.Array.AsReadOnly(Array.copy entryStates)
+                            :> IReadOnlyList<InputState>
+                        if state.IsAvailable && predicate.Invoke(samples) then
+                            completion.TrySetResult(state) |> ignore
+                            false
+                        else
+                            matchWaiters.Add((predicate, completion))
+                            true
+                    with ex ->
+                        completion.TrySetException(ex) |> ignore
+                        false)
+
+        if registered && cancellationToken.CanBeCanceled then
+            let registration =
+                cancellationToken.Register(
+                    Action(fun () ->
+                        lock gate (fun () ->
+                            removeMatchWaiter completion)
+                        completion.TrySetCanceled(cancellationToken) |> ignore))
+            completion.Task.ContinueWith(
+                Action<Task<InputState>>(fun _ -> registration.Dispose()),
+                CancellationToken.None,
+                TaskContinuationOptions.RunContinuationsAsynchronously,
+                TaskScheduler.Default) |> ignore
+
+        completion.Task
 
     member _.Detach() =
         lock gate (fun () ->
             attached <- false
+            for waiter in pressWaiters do
+                waiter.TrySetException(
+                    ObjectDisposedException(nameof InputAction)) |> ignore
+            for waiter in releaseWaiters do
+                waiter.TrySetException(
+                    ObjectDisposedException(nameof InputAction)) |> ignore
+            pressWaiters.Clear()
+            releaseWaiters.Clear()
+            for (_, waiter) in matchWaiters do
+                waiter.TrySetException(
+                    ObjectDisposedException(nameof InputAction)) |> ignore
+            matchWaiters.Clear()
+            for index = 0 to entryStates.Length - 1 do
+                entryStates[index] <-
+                    InputState.Unavailable(state.FrameIndex, InputOrigin.None)
             initialized <- false
             previousDown <- false
             previousOrigin <- InputOrigin.None
@@ -342,6 +489,15 @@ and internal InputAction(
     interface IInputAction with
         member _.Name = name
         member _.State = lock gate (fun () -> state)
+        member _.States =
+            lock gate (fun () ->
+                System.Array.AsReadOnly(Array.copy entryStates) :> IReadOnlyList<InputState>)
+        member _.WaitForPressAsync(cancellationToken) =
+            this.WaitForTransition(true, cancellationToken)
+        member _.WaitForReleaseAsync(cancellationToken) =
+            this.WaitForTransition(false, cancellationToken)
+        member _.WaitForMatchAsync(predicate, cancellationToken) =
+            this.WaitForMatch(predicate, cancellationToken)
 
     interface IDisposable with
         member _.Dispose() =

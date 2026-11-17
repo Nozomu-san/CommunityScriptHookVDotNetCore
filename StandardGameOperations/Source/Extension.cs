@@ -10,7 +10,7 @@ using LocalNativeMemories.Source;
     "StandardGameOperations.Source.StandardGameOperationsExtension")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Provides",
-    "game.standard;game.entities;game.peds;game.vehicles;game.weapons;game.combat;game.ballistics;game.damage;game.notifications")]
+    "game.standard;game.entities;game.peds;game.vehicles;game.weapons;game.combat;game.ballistics;game.damage")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Requires",
     "native.standard;memory.entity.pools;memory.ped;memory.vehicle")]
@@ -26,7 +26,6 @@ public interface IStandardGameOperations
     ICombatOperations Combat { get; }
     IBallisticOperations Ballistics { get; }
     IDamageOperations Damage { get; }
-    INotificationOperations Notifications { get; }
 }
 
 internal sealed class StandardGameOperationsService(
@@ -36,8 +35,7 @@ internal sealed class StandardGameOperationsService(
     IWeaponOperations weapons,
     ICombatOperations combat,
     IBallisticOperations ballistics,
-    IDamageOperations damage,
-    INotificationOperations notifications) : IStandardGameOperations
+    IDamageOperations damage) : IStandardGameOperations
 {
     public IEntityOperations Entities { get; } = entities;
     public IPedOperations Peds { get; } = peds;
@@ -46,7 +44,6 @@ internal sealed class StandardGameOperationsService(
     public ICombatOperations Combat { get; } = combat;
     public IBallisticOperations Ballistics { get; } = ballistics;
     public IDamageOperations Damage { get; } = damage;
-    public INotificationOperations Notifications { get; } = notifications;
 }
 
 internal sealed class StandardGameOperationsExtension :
@@ -96,7 +93,6 @@ internal sealed class StandardGameOperationsExtension :
             peds,
             vehicles,
             nativeBindings);
-        NotificationOperations notifications = new();
 
         StandardGameOperationsService service = new(
             entities,
@@ -105,8 +101,7 @@ internal sealed class StandardGameOperationsExtension :
             weapons,
             combat,
             ballistics,
-            damage,
-            notifications);
+            damage);
 
         context.Services.Register<IEntityOperations>(entities);
         context.Services.Register<IPedOperations>(peds);
@@ -115,7 +110,6 @@ internal sealed class StandardGameOperationsExtension :
         context.Services.Register<ICombatOperations>(combat);
         context.Services.Register<IBallisticOperations>(ballistics);
         context.Services.Register<IDamageOperations>(damage);
-        context.Services.Register<INotificationOperations>(notifications);
         context.Services.Register<IStandardGameOperations>(service);
 
         _peds = peds;

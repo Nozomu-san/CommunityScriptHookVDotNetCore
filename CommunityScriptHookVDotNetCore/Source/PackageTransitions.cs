@@ -26,19 +26,14 @@ internal sealed partial class PackageManager
         ArgumentNullException.ThrowIfNull(plan);
         EnsureRuntimeThread();
         ThrowIfStopping();
-        if (plan.Reason is not ScriptLifecycleTransitionReason.ManualRestart)
-        {
-            PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
-        }
+        PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
 
         IRuntimeExtensionReloadController extensionReload =
             _extensionReloadController
             ?? throw new InvalidOperationException(
                 "The runtime-extension reload controller is unavailable.");
-        RuntimeExtensionReloadPlan extensionPlan =
-            plan.Reason is ScriptLifecycleTransitionReason.ManualRestart
-                ? extensionReload.CaptureRestartPlan()
-                : extensionReload.CaptureReloadPlan();
+        RuntimeExtensionReloadPlan extensionPlan = extensionReload.CaptureReloadPlan(
+            plan.Reason is not ScriptLifecycleTransitionReason.AutomaticReload);
 
         ScriptLifecycleTransitionOperationId id =
             ScriptLifecycleTransitionOperationId.Create();
@@ -512,12 +507,17 @@ internal sealed partial class PackageManager
         private ulong? _lifecycleEpoch;
         private string? _diagnostic;
         private bool _barrierEntered;
-        private bool _inMemoryRestart;
         private bool _diagnosticEpochStarted;
         private bool _diagnosticEpochSealed;
         private bool _disposed;
 
         public ScriptLifecycleTransitionOperationId Id { get; } = id;
+
+        public bool IsScript4ReloadSelfUnload =>
+            plan.RequestedBy is "Script4Reload" &&
+            _extensionPlan is { } reload &&
+            reload.PreviousDescriptors.Any(item => item.Id is "Script4Reload") &&
+            !reload.NextDescriptors.Any(item => item.Id is "Script4Reload");
 
         public ScriptLifecycleTransitionOperationState State { get; private set; } =
             ScriptLifecycleTransitionOperationState.Queued;
@@ -557,14 +557,7 @@ internal sealed partial class PackageManager
                 switch (State)
                 {
                     case ScriptLifecycleTransitionOperationState.Queued:
-                        if (plan.Reason is ScriptLifecycleTransitionReason.ManualRestart)
-                        {
-                            PrepareInMemoryRestart(owner);
-                        }
-                        else
-                        {
-                            StartCapture(owner);
-                        }
+                        StartCapture(owner);
                         break;
                     case ScriptLifecycleTransitionOperationState.CapturingImages:
                         AdvanceCapture(owner);
@@ -669,39 +662,6 @@ internal sealed partial class PackageManager
                 _lifetime.Cancel();
             }
             _lifetime.Dispose();
-        }
-
-        private void PrepareInMemoryRestart(PackageManager owner)
-        {
-            string[] seeds = plan.TargetPackages is null
-                ? [.. owner._packages.Select(package => package.Name)]
-                : [.. plan.TargetPackages];
-            foreach (string seed in seeds)
-            {
-                if (!owner._catalog.Any(package => package.Name.Equals(
-                        seed, StringComparison.OrdinalIgnoreCase)))
-                {
-                    throw new InvalidDataException(
-                        $"Cannot restart unknown scripts4 package '{seed}'.");
-                }
-            }
-            _targetSet = ExpandDependentClosure(seeds, owner._catalog);
-            owner.ResetClassQuarantine(_targetSet);
-            _inMemoryRestart = true;
-            _lifecycleEpoch = owner.BeginLifecycleTransition();
-            _barrierEntered = true;
-            _activeBeforeTransition = new(
-                owner._packages.Where(package => package.ActiveScriptCount != 0)
-                    .Select(package => package.Name),
-                StringComparer.OrdinalIgnoreCase);
-            _stopQueue = new(OrderPackageNames(
-                owner._catalog,
-                _activeBeforeTransition,
-                reverse: true));
-            State = ScriptLifecycleTransitionOperationState.StoppingLifecycle;
-            _log.Information(
-                $"RAM-only restart '{Id.Value:D}' pauses {_stopQueue.Count} " +
-                "active scripts4 package(s); unchanged binaries remain in RAM.");
         }
 
         private void StartCapture(PackageManager owner)
@@ -861,11 +821,16 @@ internal sealed partial class PackageManager
                 libraryFirstConsumers, owner._catalog));
             closure.UnionWith(ExpandDependentClosure(
                 libraryFirstConsumers, staged.Catalog));
-            if (_extensionPlan is { TargetIds.Count: > 0 } extensionChanges)
+            if (_extensionPlan is { BinaryTargetIds.Count: > 0 } extensionChanges)
             {
+                HashSet<string> changedIds = [with(
+                    extensionChanges.BinaryTargetIds,
+                    StringComparer.OrdinalIgnoreCase)];
                 HashSet<string> changedRoots = [with(
-                    extensionChanges.PreviousDescriptors.Select(x => x.AssemblyName)
-                        .Concat(extensionChanges.NextDescriptors.Select(x => x.AssemblyName)),
+                    extensionChanges.PreviousDescriptors
+                        .Concat(extensionChanges.NextDescriptors)
+                        .Where(value => changedIds.Contains(value.Id))
+                        .Select(value => value.AssemblyName),
                     StringComparer.OrdinalIgnoreCase)];
                 IEnumerable<string> extensionDependent = owner._catalog
                     .Concat(staged.Catalog)
@@ -876,7 +841,24 @@ internal sealed partial class PackageManager
                 closure.UnionWith(ExpandDependentClosure(extensionDependent, staged.Catalog));
             }
             _targetSet = closure;
-            owner.ResetClassQuarantine(_targetSet);
+            if (plan.Reason is ScriptLifecycleTransitionReason.ManualRestart &&
+                plan.TargetPackages is not null)
+            {
+                foreach (string target in plan.TargetPackages)
+                {
+                    if (!owner._catalog.Any(package => package.Name.Equals(
+                            target, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new InvalidDataException(
+                            $"Cannot restart unknown scripts4 package '{target}'.");
+                    }
+                }
+            }
+            owner.ResetClassQuarantine(
+                plan.Reason is ScriptLifecycleTransitionReason.AutomaticReload
+                    ? _targetSet
+                    : [with(owner._catalog.Select(package => package.Name),
+                        StringComparer.OrdinalIgnoreCase)]);
             _staged = staged;
             _diagnostic = null;
             State = ScriptLifecycleTransitionOperationState.ReadyInMemory;
@@ -951,7 +933,7 @@ internal sealed partial class PackageManager
                 }
 
                 package.BeginStopInstances(
-                    !_inMemoryRestart && _targetSet.Contains(name)
+                    _targetSet.Contains(name)
                         ? ScriptStopReason.BinaryReplacement
                         : ScriptStopReason.LifecycleRestart);
                 _stoppingPackage = package;
@@ -967,22 +949,11 @@ internal sealed partial class PackageManager
             }
 
             _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
-            ContinueScriptsAfterExtensions(owner);
+            ContinueScriptsAfterExtensions();
         }
 
-        private void ContinueScriptsAfterExtensions(PackageManager owner)
+        private void ContinueScriptsAfterExtensions()
         {
-            if (_inMemoryRestart)
-            {
-                _startQueue = new(OrderPackageNames(
-                    owner._catalog,
-                    owner._packages.Where(package =>
-                            _activeBeforeTransition.Contains(package.Name) ||
-                            _targetSet.Contains(package.Name))
-                        .Select(package => package.Name), reverse: false));
-                State = ScriptLifecycleTransitionOperationState.StartingLifecycle;
-                return;
-            }
             BeginBinaryReplacement();
         }
 
@@ -1006,7 +977,7 @@ internal sealed partial class PackageManager
             _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
             owner.SetUnavailableRuntimeAssemblies(
                 _extensionReload.UnavailableAssemblyNames);
-            ContinueScriptsAfterExtensions(owner);
+            ContinueScriptsAfterExtensions();
         }
 
         private void BeginBinaryReplacement()
@@ -1223,7 +1194,7 @@ internal sealed partial class PackageManager
                     continue;
                 }
 
-                bool replaced = !_inMemoryRestart && _targetSet.Contains(name);
+                bool replaced = _targetSet.Contains(name);
                 package.BeginStartInstances(
                     replaced
                         ? ScriptStartReason.BinaryReplacement

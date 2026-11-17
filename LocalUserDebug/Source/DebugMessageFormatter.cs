@@ -12,6 +12,10 @@ internal static class DebugMessageFormatter
     internal static string Format(RuntimeDiagnosticMessage diagnostic)
     {
         ArgumentNullException.ThrowIfNull(diagnostic);
+        if (diagnostic.DisplayColor is not null)
+        {
+            return Clamp(Normalize(diagnostic.Message), MaximumCharacters);
+        }
         return diagnostic.Impact is RuntimeDiagnosticImpact.LifecycleUnavailable
             ? FormatFatal(diagnostic)
             : FormatStandard(diagnostic);

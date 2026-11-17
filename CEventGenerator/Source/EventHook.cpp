@@ -2474,13 +2474,30 @@ namespace
             return;
         }
         const auto& d = located.Diagnostics;
-        std::fprintf(file, "CEventGenerator 12/11/2026 - locator snapshot\n");
+        SYSTEMTIME localTime{};
+        GetLocalTime(&localTime);
+        std::fprintf(file,
+            "CEventGenerator 17/11/2026 - locator snapshot "
+            "started=%04u-%02u-%02uT%02u:%02u:%02u.%03u (local)\n",
+            static_cast<unsigned int>(localTime.wYear),
+            static_cast<unsigned int>(localTime.wMonth),
+            static_cast<unsigned int>(localTime.wDay),
+            static_cast<unsigned int>(localTime.wHour),
+            static_cast<unsigned int>(localTime.wMinute),
+            static_cast<unsigned int>(localTime.wSecond),
+            static_cast<unsigned int>(localTime.wMilliseconds));
         std::fprintf(file, "edition=%u build=%u state=%u failure=%u\n",
             std::to_underlying(located.Targets.Edition),
             located.Targets.GameBuild, std::to_underlying(located.State),
             std::to_underlying(d.Failure));
         std::fprintf(file, "receiver-shapes: ped=%u global=%u damage-pattern=%u\n",
             d.PedMatchCount, d.GlobalMatchCount, d.DamageMatchCount);
+        std::fprintf(file,
+            "fivem-receiver-path: status=%u ped=%u global=%u damage=%u "
+            "(4=accepted, 1=signature-mismatch, 2=boundary-rejected, "
+            "3=virtual-slot-rejected)\n",
+            d.FiveMReceiverPathStatus, d.FiveMPedSignatureCount,
+            d.FiveMGlobalSignatureCount, d.FiveMDamageSignatureCount);
         std::fprintf(file, "anchors: count=%u stack=%u type=%u\n",
             d.CEventCountAnchorCount, d.CEventStackAnchorCount,
             d.EventTypeAnchorCount);
@@ -2681,6 +2698,177 @@ namespace
                 stackPath.FirstBranchTargetRva,
                 stackPath.FirstBranchFallthroughRva,
                 stackPath.FirstBranchLeavesLocalPath ? "yes" : "no");
+        }
+        if (stackPath.LoopBackAnalyzed)
+        {
+            std::fprintf(file,
+                "  stack-loopback: from=0x%X to=0x%X "
+                "instructions=%u branches=%u reload=%u bypass-call=%u "
+                "terminal=%u unresolved=%u first-unresolved=0x%X "
+                "budget-exceeded=%s dominance=unproven "
+                "(bounded null-edge exploration only)\n",
+                stackPath.FirstBranchRva, stackPath.FirstBranchTargetRva,
+                stackPath.LoopBackInstructions, stackPath.LoopBackBranches,
+                stackPath.LoopBackReachesStackLoad,
+                stackPath.LoopBackReachesCallWithoutLoad,
+                stackPath.LoopBackTerminalExits,
+                stackPath.LoopBackUnresolvedExits,
+                stackPath.LoopBackFirstUnresolvedRva,
+                stackPath.LoopBackBudgetExceeded ? "yes" : "no");
+        }
+        if (stackPath.EntryAnalyzed)
+        {
+            const bool hasBypass = stackPath.EntryCallWithoutLoad != 0u;
+            const bool incomplete = stackPath.EntryUnresolvedExits != 0u ||
+                stackPath.EntryBudgetExceeded ||
+                stackPath.EntryCallWithUnknownWrite != 0u;
+            const char* finding = hasBypass ? "bypass-found" :
+                incomplete ? "unknown" :
+                stackPath.EntryCallWithOverwrite != 0u ?
+                    "register-overwrite" :
+                stackPath.EntryCallWithLoad != 0u ?
+                    "local-static-only" : "call-not-reached";
+            std::fprintf(file,
+                "  stack-entry-flow: entry=0x%X instructions=%u branches=%u "
+                "with-load=%u without-load=%u overwritten=%u "
+                "unknown-write=%u unresolved=%u first-unresolved=0x%X "
+                "budget-exceeded=%s result=%s "
+                "regions=%u cross=%u followed=%u rejected=%u "
+                "provisional=%u lower-depth-revisits=%u "
+                "loop-branches=%u indirect-exits=%u "
+                "indirect-static=%u "
+                "(bounded cross-function static graph, "
+                "no CEvent identity)\n",
+                stackPath.EntryFunctionRva,
+                stackPath.EntryInstructions, stackPath.EntryBranches,
+                stackPath.EntryCallWithLoad, stackPath.EntryCallWithoutLoad,
+                stackPath.EntryCallWithOverwrite,
+                stackPath.EntryCallWithUnknownWrite,
+                stackPath.EntryUnresolvedExits,
+                stackPath.EntryFirstUnresolvedRva,
+                stackPath.EntryBudgetExceeded ? "yes" : "no", finding,
+                stackPath.EntryAcceptedRegions,
+                stackPath.EntryCrossFunctionEdges,
+                stackPath.EntryCrossFollowed,
+                stackPath.EntryCrossRejected,
+                stackPath.EntryProvisionalRegions,
+                stackPath.EntryLowerDepthRevisits,
+                stackPath.EntryLoopBranches,
+                stackPath.EntryIndirectExits,
+                stackPath.EntryIndirectStaticCandidates);
+            for (std::uint32_t sample = 0u;
+                sample < stackPath.EntryIndirectSampleCount; ++sample)
+            {
+                const auto& edge = stackPath.EntryIndirectSamples[sample];
+                std::fprintf(file,
+                    "    stack-entry-indirect[%u]: at=0x%X "
+                    "previous=0x%X mode=%u base=%u disp=%d "
+                    "slot=0x%X target=0x%X status=%u "
+                    "dispatch-shape=%u stack-link=%u "
+                    "opcode=0x%X modrm=0x%X rex=0x%X sib=0x%X "
+                    "length=%u rax-kind=%u rax-def=0x%X "
+                    "rax-source=%u rax-disp=%d rax-known-rva=0x%X "
+                    "rax-def-opcode=0x%X rax-def-opcode2=0x%X "
+                    "rax-def-modrm=0x%X rax-def-length=%u "
+                    "rax-def-bytes=",
+                    sample, edge.SourceRva, edge.PreviousRva,
+                    edge.Mode, edge.BaseRegister, edge.Displacement,
+                    edge.SlotRva, edge.TargetRva, edge.Status,
+                    edge.DispatchShape, edge.StackObjectLink,
+                    edge.Opcode, edge.Modrm, edge.Rex, edge.Sib,
+                    edge.Length, edge.RaxSourceKind, edge.RaxDefinitionRva,
+                    edge.RaxSourceRegister, edge.RaxSourceDisplacement,
+                    edge.RaxKnownRva, edge.RaxDefinitionOpcode,
+                    edge.RaxDefinitionOpcode2, edge.RaxDefinitionModrm,
+                    edge.RaxDefinitionLength);
+                for (std::uint32_t index = 0;
+                    index < edge.RaxDefinitionByteCount; ++index)
+                {
+                    std::fprintf(file, "%02X", edge.RaxDefinitionBytes[index]);
+                }
+                const auto writeOrigin = [&](const char* label,
+                    const auto& origin)
+                {
+                    std::fprintf(file,
+                        " %s-kind=%u %s-def=0x%X %s-source=%u "
+                        "%s-disp=%d %s-known-rva=0x%X "
+                        "%s-opcode=0x%X %s-modrm=0x%X "
+                        "%s-length=%u %s-bytes=",
+                        label, origin.Kind, label, origin.DefinitionRva,
+                        label, origin.SourceRegister, label, origin.Displacement,
+                        label, origin.KnownRva, label, origin.Opcode,
+                        label, origin.Modrm, label, origin.Length,
+                        label);
+                    for (std::uint32_t index = 0u;
+                        index < origin.ByteCount; ++index)
+                    {
+                        std::fprintf(file, "%02X", origin.Bytes[index]);
+                    }
+                };
+                writeOrigin("base", edge.BaseOrigin);
+                writeOrigin("parent", edge.ParentOrigin);
+                writeOrigin("grandparent", edge.GrandparentOrigin);
+                std::fprintf(file,
+                    " (static provenance diagnostic only)\n");
+            }
+            std::fprintf(file,
+                "    stack-entry-traps: direct=%u fallthrough=%u "
+                "unverified=%u samples=%u (static paths only)\n",
+                stackPath.EntryTrapDirectEdges,
+                stackPath.EntryTrapFallthroughEdges,
+                stackPath.EntryTrapUnverifiedEdges,
+                stackPath.EntryTrapSampleCount);
+            for (std::uint32_t sample = 0u;
+                sample < stackPath.EntryTrapSampleCount; ++sample)
+            {
+                const auto& trap = stackPath.EntryTrapSamples[sample];
+                std::fprintf(file,
+                    "    stack-entry-trap[%u]: at=0x%X from=0x%X "
+                    "edge-kind=%u source-opcode=0x%X "
+                    "source-length=%u edge-verified=%s "
+                    "(branch feasibility unknown)\n",
+                    sample, trap.TrapRva, trap.SourceRva,
+                    trap.EdgeKind, trap.SourceOpcode,
+                    trap.SourceLength, trap.EdgeVerified ? "yes" : "no");
+            }
+            std::fprintf(file,
+                "    enhanced-admission-audit: structural=0x%X "
+                "blockers=0x%X eligible=no "
+                "(blockers: 1=cfg 2=identity 4=arguments "
+                "8=entity 16=damage 32=abi 64=dispatcher; "
+                "diagnostic-only)\n",
+                stackPath.StaticStructureSignals,
+                stackPath.AdmissionBlockers);
+            std::fprintf(file,
+                "    stack-entry-reasons: depth=%u indirect=%u "
+                "region=%u provisional=%u decode=%u "
+                "fallthrough=%u trap=%u other=%u\n",
+                stackPath.EntryUnresolvedReasonCounts[4],
+                stackPath.EntryUnresolvedReasonCounts[6],
+                stackPath.EntryUnresolvedReasonCounts[9],
+                stackPath.EntryUnresolvedReasonCounts[10],
+                stackPath.EntryUnresolvedReasonCounts[5],
+                stackPath.EntryUnresolvedReasonCounts[8],
+                stackPath.EntryUnresolvedReasonCounts[11],
+                stackPath.EntryUnresolvedExits -
+                stackPath.EntryUnresolvedReasonCounts[4] -
+                stackPath.EntryUnresolvedReasonCounts[6] -
+                stackPath.EntryUnresolvedReasonCounts[9] -
+                stackPath.EntryUnresolvedReasonCounts[10] -
+                stackPath.EntryUnresolvedReasonCounts[5] -
+                stackPath.EntryUnresolvedReasonCounts[8] -
+                stackPath.EntryUnresolvedReasonCounts[11]);
+            for (std::uint32_t sample = 0u;
+                sample < stackPath.EntryUnresolvedSampleCount; ++sample)
+            {
+                const auto& edge = stackPath.EntryUnresolvedSamples[sample];
+                std::fprintf(file,
+                    "    stack-entry-unresolved[%u]: from=0x%X "
+                    "to=0x%X reason=%u opcode=0x%X "
+                    "opcode2=0x%X modrm=0x%X length=%u\n",
+                    sample, edge.SourceRva, edge.TargetRva, edge.Reason,
+                    edge.Opcode, edge.Opcode2, edge.Modrm, edge.Length);
+            }
         }
         const auto printCfg = [file](const char* name,
             const EnhancedControlFlowEvidence& cfg)

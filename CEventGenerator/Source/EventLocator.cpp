@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cwchar>
 #include <span>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -172,6 +173,81 @@ namespace
         return matches;
     }
 
+    [[nodiscard]] std::vector<const std::byte*> FindAllExecutable(
+        ImageView image,
+        std::span<const PatternByte> pattern,
+        std::size_t maximum)
+    {
+        std::vector<const std::byte*> matches;
+        if (image.Base == nullptr || pattern.empty() || maximum == 0 ||
+            image.Size < pattern.size())
+        {
+            return matches;
+        }
+        matches.reserve(maximum);
+        const std::uintptr_t base =
+            reinterpret_cast<std::uintptr_t>(image.Base);
+        const std::uintptr_t limit = base + image.Size;
+        if (limit < base)
+        {
+            return matches;
+        }
+        for (std::uintptr_t address = base; address < limit;)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<const void*>(address),
+                    &info, sizeof(info)) != sizeof(info))
+            {
+                break;
+            }
+            const std::uintptr_t regionBase =
+                reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+            const std::uintptr_t regionLimit = regionBase + info.RegionSize;
+            if (regionLimit <= address || regionLimit < regionBase)
+            {
+                break;
+            }
+            const std::uintptr_t end = std::min(regionLimit, limit);
+            const DWORD protection = info.Protect & 0xFFu;
+            const bool executable = info.State == MEM_COMMIT &&
+                (info.Protect & PAGE_GUARD) == 0u &&
+                (protection == PAGE_EXECUTE ||
+                 protection == PAGE_EXECUTE_READ ||
+                 protection == PAGE_EXECUTE_READWRITE ||
+                 protection == PAGE_EXECUTE_WRITECOPY);
+            if (executable && end - address >= pattern.size())
+            {
+                for (std::uintptr_t current = address;
+                     current <= end - pattern.size(); ++current)
+                {
+                    bool matched = true;
+                    for (std::size_t index = 0; index < pattern.size(); ++index)
+                    {
+                        const PatternByte expected = pattern[index];
+                        if (expected >= 0 &&
+                            std::to_integer<std::uint8_t>(
+                                *reinterpret_cast<const std::byte*>(current + index)) !=
+                                static_cast<std::uint8_t>(expected))
+                        {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if (matched)
+                    {
+                        matches.push_back(
+                            reinterpret_cast<const std::byte*>(current));
+                        if (matches.size() == maximum)
+                        {
+                            return matches;
+                        }
+                    }
+                }
+            }
+            address = end;
+        }
+        return matches;
+    }
 
     [[nodiscard]] bool Contains(
         ImageView image,
@@ -904,6 +980,13 @@ namespace
         bool extended) noexcept
     {
         return low | (extended ? 8u : 0u);
+    }
+
+    [[nodiscard]] std::uint32_t ByteRegister(std::uint32_t low,
+        bool extended, bool rexPresent) noexcept
+    {
+        return !rexPresent && low >= 4u ? low - 4u :
+            GeneralRegister(low, extended);
     }
 
     [[nodiscard]] bool DecodeRegisterMove(const hde64s& instruction,
@@ -1820,6 +1903,1737 @@ namespace
         }
     }
 
+    void TraceEnhancedStackLoopBack(ImageView image,
+        CEventGenerator::EnhancedStackPathEvidence& evidence)
+    {
+        if ((evidence.Flags & 4u) == 0u ||
+            evidence.FirstBranchRva == 0u ||
+            !evidence.FirstBranchLeavesLocalPath ||
+            evidence.FirstBranchTargetRva == 0u)
+        {
+            return;
+        }
+        evidence.LoopBackAnalyzed = true;
+        const RuntimeFunctionView region = ResolveRuntimeFunction(image,
+            image.Base + evidence.StackLoadRva);
+        if (!region || region.Size() > 0x20000u)
+        {
+            ++evidence.LoopBackUnresolvedExits;
+            evidence.LoopBackFirstUnresolvedRva =
+                evidence.FirstBranchTargetRva;
+            return;
+        }
+        constexpr std::size_t instructionBudget = 256u;
+        constexpr std::size_t branchBudget = 64u;
+        std::vector<std::uint32_t> pending{evidence.FirstBranchTargetRva};
+        std::unordered_set<std::uint32_t> visited;
+        visited.reserve(instructionBudget);
+        const auto unresolved = [&](std::uint32_t address)
+        {
+            ++evidence.LoopBackUnresolvedExits;
+            if (evidence.LoopBackFirstUnresolvedRva == 0u)
+            {
+                evidence.LoopBackFirstUnresolvedRva = address;
+            }
+        };
+        while (!pending.empty() &&
+            evidence.LoopBackInstructions < instructionBudget &&
+            evidence.LoopBackBranches < branchBudget)
+        {
+            const std::uint32_t cursor = pending.back();
+            pending.pop_back();
+            if (cursor == evidence.StackLoadRva)
+            {
+                ++evidence.LoopBackReachesStackLoad;
+                continue;
+            }
+            if (cursor == evidence.CallsiteRva)
+            {
+                ++evidence.LoopBackReachesCallWithoutLoad;
+                continue;
+            }
+            if (!visited.insert(cursor).second)
+            {
+                continue;
+            }
+            if (cursor < region.BeginRva || cursor >= region.EndRva ||
+                !IsExecutableImageAddress(image, cursor))
+            {
+                unresolved(cursor);
+                continue;
+            }
+            std::array<std::uint8_t, 15> bytes{};
+            const std::uint32_t available = CaptureReadableBytes(
+                image, cursor, bytes);
+            hde64s instruction{};
+            const unsigned int length = available == 0u ? 0u :
+                hde64_disasm(bytes.data(), &instruction);
+            if (length == 0u || length > available ||
+                length > region.EndRva - cursor ||
+                (instruction.flags & F_ERROR) != 0u)
+            {
+                unresolved(cursor);
+                continue;
+            }
+            ++evidence.LoopBackInstructions;
+            const std::uint32_t next = cursor + length;
+            const bool jumpNear = instruction.opcode == 0xE9u;
+            const bool jumpShort = instruction.opcode == 0xEBu;
+            const bool jccShort = instruction.opcode >= 0x70u &&
+                instruction.opcode <= 0x7Fu;
+            const bool jccNear = instruction.opcode == 0x0Fu &&
+                instruction.opcode2 >= 0x80u &&
+                instruction.opcode2 <= 0x8Fu;
+            if (jumpNear || jumpShort || jccShort || jccNear)
+            {
+                ++evidence.LoopBackBranches;
+                const std::int64_t displacement = jumpNear || jccNear
+                    ? static_cast<std::int32_t>(instruction.imm.imm32)
+                    : static_cast<std::int8_t>(instruction.imm.imm8);
+                const std::int64_t target =
+                    static_cast<std::int64_t>(next) + displacement;
+                if (target < 0 || target > UINT32_MAX)
+                {
+                    unresolved(cursor);
+                }
+                else
+                {
+                    pending.push_back(static_cast<std::uint32_t>(target));
+                }
+                if (jccShort || jccNear)
+                {
+                    pending.push_back(next);
+                }
+                continue;
+            }
+            if (instruction.opcode == 0xC2u ||
+                instruction.opcode == 0xC3u ||
+                instruction.opcode == 0xCAu ||
+                instruction.opcode == 0xCBu)
+            {
+                ++evidence.LoopBackTerminalExits;
+                continue;
+            }
+            if ((instruction.opcode == 0xFFu &&
+                (instruction.flags & F_MODRM) != 0u &&
+                (instruction.modrm_reg == 4u ||
+                 instruction.modrm_reg == 5u)) ||
+                (instruction.opcode >= 0xE0u && instruction.opcode <= 0xE3u))
+            {
+                unresolved(cursor);
+                continue;
+            }
+            pending.push_back(next);
+        }
+        evidence.LoopBackBudgetExceeded = !pending.empty();
+        if (evidence.LoopBackBudgetExceeded)
+        {
+            unresolved(pending.back());
+        }
+    }
+
+    enum class StackRegisterEffect : std::uint8_t
+    {
+        Preserved,
+        Overwritten,
+        Unknown
+    };
+
+    [[nodiscard]] StackRegisterEffect InspectStackRegisterEffect(
+        const hde64s& instruction, std::uint32_t objectRegister) noexcept
+    {
+        const std::uint32_t opcode = instruction.opcode;
+        if (opcode == 0x90u || opcode == 0x85u ||
+            opcode == 0x39u || opcode == 0x3Bu ||
+            opcode == 0x3Du || opcode == 0x84u ||
+            opcode == 0xE8u || opcode == 0xE9u ||
+            opcode == 0xEBu || opcode == 0xC3u ||
+            opcode == 0xC2u ||
+            (opcode >= 0x70u && opcode <= 0x7Fu) ||
+            (opcode == 0x0Fu && instruction.opcode2 >= 0x80u &&
+                instruction.opcode2 <= 0x8Fu) ||
+            (opcode >= 0x50u && opcode <= 0x57u) ||
+            (opcode >= 0xE0u && opcode <= 0xE3u))
+        {
+            return StackRegisterEffect::Preserved;
+        }
+        if (opcode >= 0x58u && opcode <= 0x5Fu)
+        {
+            const std::uint32_t destination =
+                (opcode - 0x58u) + (instruction.rex_b != 0u ? 8u : 0u);
+            return destination == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if (opcode >= 0xB0u && opcode <= 0xB7u)
+        {
+            const auto encoded = opcode - 0xB0u;
+            const auto destination = instruction.rex == 0u &&
+                encoded >= 4u ? encoded - 4u :
+                GeneralRegister(encoded, instruction.rex_b != 0u);
+            return destination == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if (opcode >= 0xB8u && opcode <= 0xBFu)
+        {
+            const std::uint32_t destination =
+                (opcode - 0xB8u) + (instruction.rex_b != 0u ? 8u : 0u);
+            return destination == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if ((instruction.flags & F_MODRM) == 0u)
+        {
+            return StackRegisterEffect::Unknown;
+        }
+        const std::uint32_t reg = GeneralRegister(
+            instruction.modrm_reg, instruction.rex_r != 0u);
+        const std::uint32_t rm = GeneralRegister(
+            instruction.modrm_rm, instruction.rex_b != 0u);
+        if (opcode == 0x8Bu || opcode == 0x8Du ||
+            opcode == 0x33u || opcode == 0x03u || opcode == 0x2Bu)
+        {
+            return reg == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if (opcode == 0x89u || opcode == 0x31u ||
+            opcode == 0x01u || opcode == 0x29u ||
+            opcode == 0xC7u)
+        {
+            return instruction.modrm_mod == 3u && rm == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if (opcode == 0x83u || opcode == 0x81u)
+        {
+            if (instruction.modrm_reg == 7u)
+            {
+                return StackRegisterEffect::Preserved;
+            }
+            return instruction.modrm_mod == 3u && rm == objectRegister
+                ? StackRegisterEffect::Overwritten
+                : StackRegisterEffect::Preserved;
+        }
+        if (opcode == 0xFFu)
+        {
+            if (instruction.modrm_reg == 2u ||
+                instruction.modrm_reg == 3u)
+            {
+                return StackRegisterEffect::Preserved;
+            }
+            if (instruction.modrm_reg == 0u ||
+                instruction.modrm_reg == 1u)
+            {
+                return instruction.modrm_mod == 3u && rm == objectRegister
+                    ? StackRegisterEffect::Overwritten
+                    : StackRegisterEffect::Preserved;
+            }
+        }
+        return StackRegisterEffect::Unknown;
+    }
+
+    struct RaxDefinition final
+    {
+        std::uint32_t Kind{};
+        std::uint32_t InstructionRva{};
+        std::uint32_t SourceRegister{0xFFFFFFFFu};
+        std::int32_t Displacement{};
+        std::uintptr_t Absolute{};
+        bool operator==(const RaxDefinition&) const = default;
+    };
+
+    void AdvanceRaxDefinition(ImageView image, std::uint32_t rva,
+        unsigned int length, const hde64s& instruction,
+        RaxDefinition& definition) noexcept
+    {
+        const auto set = [&](std::uint32_t kind,
+            std::uint32_t reg = 0xFFFFFFFFu, std::int32_t displacement = 0,
+            std::uintptr_t absolute = 0u)
+        {
+            definition = {kind, rva, reg, displacement, absolute};
+        };
+        const auto reg = GeneralRegister(instruction.modrm_reg,
+            instruction.rex_r != 0u);
+        const auto rm = GeneralRegister(instruction.modrm_rm,
+            instruction.rex_b != 0u);
+        const auto byteReg = ByteRegister(instruction.modrm_reg,
+            instruction.rex_r != 0u, instruction.rex != 0u);
+        const auto byteRm = ByteRegister(instruction.modrm_rm,
+            instruction.rex_b != 0u, instruction.rex != 0u);
+        const auto displacement = [&]() -> std::int32_t
+        {
+            if ((instruction.flags & F_DISP8) != 0u)
+            {
+                return static_cast<std::int8_t>(instruction.disp.disp8);
+            }
+            if ((instruction.flags & F_DISP32) != 0u)
+            {
+                return static_cast<std::int32_t>(instruction.disp.disp32);
+            }
+            return 0;
+        };
+        if (instruction.opcode == 0xE8u ||
+            (instruction.opcode == 0xFFu &&
+             (instruction.flags & F_MODRM) != 0u &&
+             (instruction.modrm_reg == 2u || instruction.modrm_reg == 3u)))
+        {
+            set(5u);
+            return;
+        }
+        if (instruction.opcode >= 0x58u && instruction.opcode <= 0x5Fu)
+        {
+            if (instruction.opcode == 0x58u && instruction.rex_b == 0u)
+            {
+                set(6u);
+            }
+            return;
+        }
+        if (instruction.opcode >= 0xB0u && instruction.opcode <= 0xB7u)
+        {
+            if (ByteRegister(instruction.opcode - 0xB0u,
+                instruction.rex_b != 0u, instruction.rex != 0u) == 0u)
+            {
+                set(7u);
+            }
+            return;
+        }
+        if (instruction.opcode >= 0xB8u && instruction.opcode <= 0xBFu)
+        {
+            if (instruction.opcode == 0xB8u && instruction.rex_b == 0u)
+            {
+                if (instruction.rex_w != 0u &&
+                    (instruction.flags & F_IMM64) != 0u)
+                {
+                    set(1u, 0xFFFFFFFFu, 0,
+                        static_cast<std::uintptr_t>(instruction.imm.imm64));
+                }
+                else if ((instruction.flags & F_IMM32) != 0u)
+                {
+                    set(1u, 0xFFFFFFFFu, 0,
+                        static_cast<std::uintptr_t>(instruction.imm.imm32));
+                }
+                else
+                {
+                    set(7u);
+                }
+            }
+            return;
+        }
+        if (instruction.opcode == 0x0Fu &&
+            (instruction.flags & F_MODRM) != 0u)
+        {
+            if ((instruction.opcode2 >= 0x40u &&
+                 instruction.opcode2 <= 0x4Fu) ||
+                instruction.opcode2 == 0xAFu ||
+                instruction.opcode2 == 0xB6u ||
+                instruction.opcode2 == 0xB7u ||
+                instruction.opcode2 == 0xB8u ||
+                instruction.opcode2 == 0xBEu ||
+                instruction.opcode2 == 0xBFu ||
+                instruction.opcode2 == 0xBCu ||
+                instruction.opcode2 == 0xBDu)
+            {
+                if (reg == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode2 >= 0x90u &&
+                instruction.opcode2 <= 0x9Fu)
+            {
+                if (instruction.modrm_mod == 3u && byteRm == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+        }
+        if ((instruction.flags & F_MODRM) != 0u)
+        {
+            if (instruction.opcode == 0x63u)
+            {
+                if (reg == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x8Bu ||
+                instruction.opcode == 0x8Du)
+            {
+                if (reg != 0u)
+                {
+                    return;
+                }
+                if (instruction.opcode == 0x8Bu)
+                {
+                    if (instruction.modrm_mod == 3u)
+                    {
+                        if (rm != 0u || instruction.rex_w == 0u)
+                        {
+                            set(4u, rm);
+                        }
+                    }
+                    else
+                    {
+                        set(3u, (instruction.flags & F_SIB) != 0u ?
+                            0xFFFFFFFFu : rm, displacement());
+                    }
+                }
+                else if (instruction.modrm_mod == 0u &&
+                    instruction.modrm_rm == 5u &&
+                    (instruction.flags & F_SIB) == 0u &&
+                    (instruction.flags & F_DISP32) != 0u &&
+                    instruction.rex_w != 0u && instruction.p_67 == 0u &&
+                    instruction.p_seg == 0u)
+                {
+                    const std::int64_t target =
+                        static_cast<std::int64_t>(rva) + length +
+                        static_cast<std::int32_t>(instruction.disp.disp32);
+                    if (target >= 0 &&
+                        static_cast<std::uint64_t>(target) < image.Size)
+                    {
+                        set(2u, 0xFFFFFFFFu, displacement(),
+                            reinterpret_cast<std::uintptr_t>(image.Base +
+                                static_cast<std::size_t>(target)));
+                    }
+                    else
+                    {
+                        set(7u);
+                    }
+                }
+                else
+                {
+                    set(4u, (instruction.flags & F_SIB) != 0u ?
+                        0xFFFFFFFFu : rm, displacement());
+                }
+                return;
+            }
+            if (instruction.opcode == 0x89u)
+            {
+                if (instruction.modrm_mod == 3u && rm == 0u &&
+                    (reg != 0u || instruction.rex_w == 0u))
+                {
+                    set(4u, reg);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x31u || instruction.opcode == 0x33u)
+            {
+                const bool destinationIsRax =
+                    (instruction.opcode == 0x31u &&
+                     instruction.modrm_mod == 3u && rm == 0u) ||
+                    (instruction.opcode == 0x33u && reg == 0u);
+                if (destinationIsRax)
+                {
+                    if (instruction.modrm_mod == 3u && reg == 0u && rm == 0u)
+                    {
+                        set(8u, 0xFFFFFFFFu, 0, 0u);
+                    }
+                    else
+                    {
+                        set(7u);
+                    }
+                }
+                return;
+            }
+            if (instruction.opcode == 0x83u || instruction.opcode == 0x81u ||
+                instruction.opcode == 0x80u || instruction.opcode == 0xC7u ||
+                instruction.opcode == 0xC6u || instruction.opcode == 0xFFu)
+            {
+                if (instruction.opcode == 0xFFu)
+                {
+                    if (instruction.modrm_reg == 4u ||
+                        instruction.modrm_reg == 5u ||
+                        instruction.modrm_reg == 6u)
+                    {
+                        return;
+                    }
+                }
+                if ((instruction.opcode == 0x83u ||
+                     instruction.opcode == 0x81u ||
+                     instruction.opcode == 0x80u) &&
+                    instruction.modrm_reg == 7u)
+                {
+                    return;
+                }
+                if (instruction.modrm_mod == 3u &&
+                    ((instruction.opcode == 0x80u ||
+                      instruction.opcode == 0xC6u) ? byteRm : rm) == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x03u || instruction.opcode == 0x2Bu ||
+                instruction.opcode == 0x33u || instruction.opcode == 0x0Bu ||
+                instruction.opcode == 0x23u || instruction.opcode == 0x8Au)
+            {
+                if ((instruction.opcode == 0x8Au ? byteReg : reg) == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x01u || instruction.opcode == 0x29u ||
+                instruction.opcode == 0x09u || instruction.opcode == 0x21u ||
+                instruction.opcode == 0x88u)
+            {
+                if (instruction.modrm_mod == 3u &&
+                    (instruction.opcode == 0x88u ? byteRm : rm) == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x8Fu &&
+                instruction.modrm_reg == 0u)
+            {
+                if (instruction.modrm_mod == 3u && rm == 0u)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x39u || instruction.opcode == 0x3Bu ||
+                instruction.opcode == 0x85u || instruction.opcode == 0x84u)
+            {
+                return;
+            }
+        }
+        if (instruction.opcode == 0x90u || instruction.opcode == 0xE9u ||
+            instruction.opcode == 0xEBu || instruction.opcode == 0xC3u ||
+            instruction.opcode == 0xC2u || instruction.opcode == 0x3Du ||
+            instruction.opcode == 0x3Cu || instruction.opcode == 0xA8u ||
+            instruction.opcode == 0xA9u || instruction.opcode == 0x68u ||
+            instruction.opcode == 0x6Au || instruction.opcode == 0x9Cu ||
+            instruction.opcode == 0x9Du || instruction.opcode == 0xC9u ||
+            (instruction.opcode >= 0xF8u && instruction.opcode <= 0xFDu) ||
+            (instruction.opcode >= 0xE0u && instruction.opcode <= 0xE3u) ||
+            (instruction.opcode >= 0x50u && instruction.opcode <= 0x57u) ||
+            (instruction.opcode >= 0x70u && instruction.opcode <= 0x7Fu) ||
+            (instruction.opcode == 0x0Fu &&
+             ((instruction.opcode2 >= 0x80u && instruction.opcode2 <= 0x8Fu) ||
+              (instruction.opcode2 == 0x1Fu &&
+               instruction.modrm_reg == 0u))))
+        {
+            return;
+        }
+        set(7u);
+    }
+
+    void AdvanceNonvolatileDefinition(ImageView image, std::uint32_t rva,
+        unsigned int length, const hde64s& instruction,
+        RaxDefinition& definition,
+        std::uint32_t trackedRegister) noexcept
+    {
+        const auto set = [&](std::uint32_t kind,
+            std::uint32_t source = 0xFFFFFFFFu,
+            std::int32_t displacement = 0,
+            std::uintptr_t absolute = 0u)
+        {
+            definition = {kind, rva, source, displacement, absolute};
+        };
+        const auto reg = GeneralRegister(instruction.modrm_reg,
+            instruction.rex_r != 0u);
+        const auto rm = GeneralRegister(instruction.modrm_rm,
+            instruction.rex_b != 0u);
+        const auto byteReg = ByteRegister(instruction.modrm_reg,
+            instruction.rex_r != 0u, instruction.rex != 0u);
+        const auto byteRm = ByteRegister(instruction.modrm_rm,
+            instruction.rex_b != 0u, instruction.rex != 0u);
+        const auto displacement = [&]() -> std::int32_t
+        {
+            if ((instruction.flags & F_DISP8) != 0u)
+            {
+                return static_cast<std::int8_t>(instruction.disp.disp8);
+            }
+            if ((instruction.flags & F_DISP32) != 0u)
+            {
+                return static_cast<std::int32_t>(instruction.disp.disp32);
+            }
+            return 0;
+        };
+        if (instruction.opcode == 0xE8u ||
+            (instruction.opcode == 0xFFu &&
+             (instruction.flags & F_MODRM) != 0u &&
+             (instruction.modrm_reg == 2u || instruction.modrm_reg == 3u)))
+        {
+            return;
+        }
+        if (instruction.opcode >= 0x58u && instruction.opcode <= 0x5Fu)
+        {
+            if (GeneralRegister(instruction.opcode - 0x58u,
+                instruction.rex_b != 0u) == trackedRegister)
+            {
+                set(6u);
+            }
+            return;
+        }
+        if (instruction.opcode >= 0xB0u && instruction.opcode <= 0xB7u)
+        {
+            const auto destination = ByteRegister(
+                instruction.opcode - 0xB0u, instruction.rex_b != 0u,
+                instruction.rex != 0u);
+            if (destination == trackedRegister)
+            {
+                set(7u);
+            }
+            return;
+        }
+        if (instruction.opcode >= 0xB8u && instruction.opcode <= 0xBFu)
+        {
+            if (GeneralRegister(instruction.opcode - 0xB8u,
+                instruction.rex_b != 0u) == trackedRegister)
+            {
+                if (instruction.rex_w != 0u &&
+                    (instruction.flags & F_IMM64) != 0u)
+                {
+                    set(1u, 0xFFFFFFFFu, 0,
+                        static_cast<std::uintptr_t>(instruction.imm.imm64));
+                }
+                else if ((instruction.flags & F_IMM32) != 0u)
+                {
+                    set(1u, 0xFFFFFFFFu, 0,
+                        static_cast<std::uintptr_t>(instruction.imm.imm32));
+                }
+                else
+                {
+                    set(7u);
+                }
+            }
+            return;
+        }
+        if (instruction.opcode == 0x0Fu &&
+            (instruction.flags & F_MODRM) != 0u)
+        {
+            if ((instruction.opcode2 >= 0x40u &&
+                 instruction.opcode2 <= 0x4Fu) ||
+                instruction.opcode2 == 0xAFu ||
+                instruction.opcode2 == 0xB6u ||
+                instruction.opcode2 == 0xB7u ||
+                instruction.opcode2 == 0xB8u ||
+                instruction.opcode2 == 0xBEu ||
+                instruction.opcode2 == 0xBFu ||
+                instruction.opcode2 == 0xBCu ||
+                instruction.opcode2 == 0xBDu)
+            {
+                if (reg == trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode2 >= 0x90u &&
+                instruction.opcode2 <= 0x9Fu)
+            {
+                if (instruction.modrm_mod == 3u &&
+                    byteRm == trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+        }
+        if ((instruction.flags & F_MODRM) != 0u)
+        {
+            if (instruction.opcode == 0x63u)
+            {
+                if (reg == trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x8Bu || instruction.opcode == 0x8Du)
+            {
+                if (reg != trackedRegister)
+                {
+                    return;
+                }
+                if (instruction.opcode == 0x8Bu)
+                {
+                    if (instruction.modrm_mod == 3u)
+                    {
+                        set(4u, rm);
+                    }
+                    else
+                    {
+                        set(3u, (instruction.flags & F_SIB) != 0u ?
+                            0xFFFFFFFFu : rm, displacement());
+                    }
+                }
+                else if (instruction.modrm_mod == 0u &&
+                    instruction.modrm_rm == 5u &&
+                    (instruction.flags & F_SIB) == 0u &&
+                    (instruction.flags & F_DISP32) != 0u &&
+                    instruction.rex_w != 0u && instruction.p_67 == 0u &&
+                    instruction.p_seg == 0u)
+                {
+                    const std::int64_t target =
+                        static_cast<std::int64_t>(rva) + length +
+                        static_cast<std::int32_t>(instruction.disp.disp32);
+                    if (target >= 0 &&
+                        static_cast<std::uint64_t>(target) < image.Size)
+                    {
+                        set(2u, 0xFFFFFFFFu, displacement(),
+                            reinterpret_cast<std::uintptr_t>(image.Base +
+                                static_cast<std::size_t>(target)));
+                    }
+                    else
+                    {
+                        set(7u);
+                    }
+                }
+                else
+                {
+                    set(4u, (instruction.flags & F_SIB) != 0u ?
+                        0xFFFFFFFFu : rm, displacement());
+                }
+                return;
+            }
+            if (instruction.opcode == 0x89u)
+            {
+                if (instruction.modrm_mod == 3u && rm == trackedRegister)
+                {
+                    set(4u, reg);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x31u || instruction.opcode == 0x33u)
+            {
+                const bool destination =
+                    (instruction.opcode == 0x31u &&
+                     instruction.modrm_mod == 3u && rm == trackedRegister) ||
+                    (instruction.opcode == 0x33u && reg == trackedRegister);
+                if (destination)
+                {
+                    if (instruction.modrm_mod == 3u &&
+                        reg == trackedRegister && rm == trackedRegister)
+                    {
+                        set(8u, 0xFFFFFFFFu, 0, 0u);
+                    }
+                    else
+                    {
+                        set(7u);
+                    }
+                }
+                return;
+            }
+            if (instruction.opcode == 0x83u ||
+                instruction.opcode == 0x81u ||
+                instruction.opcode == 0x80u)
+            {
+                if (instruction.modrm_reg == 7u)
+                {
+                    return;
+                }
+                if (instruction.modrm_mod == 3u &&
+                    (instruction.opcode == 0x80u ? byteRm : rm) ==
+                        trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0xC7u ||
+                instruction.opcode == 0xC6u ||
+                instruction.opcode == 0xFFu)
+            {
+                if (instruction.opcode == 0xFFu &&
+                    (instruction.modrm_reg == 4u ||
+                     instruction.modrm_reg == 5u ||
+                     instruction.modrm_reg == 6u))
+                {
+                    return;
+                }
+                if (instruction.modrm_mod == 3u &&
+                    (instruction.opcode == 0xC6u ? byteRm : rm) ==
+                        trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x39u || instruction.opcode == 0x3Bu ||
+                instruction.opcode == 0x85u || instruction.opcode == 0x84u)
+            {
+                return;
+            }
+            if (instruction.opcode == 0x01u || instruction.opcode == 0x29u ||
+                instruction.opcode == 0x09u || instruction.opcode == 0x21u ||
+                instruction.opcode == 0x88u || instruction.opcode == 0x87u)
+            {
+                if (instruction.modrm_mod == 3u &&
+                    ((instruction.opcode == 0x88u ? byteRm : rm) ==
+                        trackedRegister ||
+                     (instruction.opcode == 0x87u && reg == trackedRegister)))
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x03u || instruction.opcode == 0x2Bu ||
+                instruction.opcode == 0x0Bu || instruction.opcode == 0x23u ||
+                instruction.opcode == 0x8Au)
+            {
+                if ((instruction.opcode == 0x8Au ? byteReg : reg) ==
+                    trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+            if (instruction.opcode == 0x8Fu &&
+                instruction.modrm_reg == 0u)
+            {
+                if (instruction.modrm_mod == 3u && rm == trackedRegister)
+                {
+                    set(7u);
+                }
+                return;
+            }
+        }
+        if (instruction.opcode == 0x90u || instruction.opcode == 0xE9u ||
+            instruction.opcode == 0xEBu || instruction.opcode == 0xC3u ||
+            instruction.opcode == 0xC2u || instruction.opcode == 0x3Du ||
+            instruction.opcode == 0x3Cu || instruction.opcode == 0xA8u ||
+            instruction.opcode == 0xA9u || instruction.opcode == 0x68u ||
+            instruction.opcode == 0x6Au || instruction.opcode == 0x9Cu ||
+            instruction.opcode == 0x9Du || instruction.opcode == 0xC9u ||
+            (instruction.opcode >= 0xF8u && instruction.opcode <= 0xFDu) ||
+            (instruction.opcode >= 0xE0u && instruction.opcode <= 0xE3u) ||
+            (instruction.opcode >= 0x50u && instruction.opcode <= 0x57u) ||
+            (instruction.opcode >= 0x70u && instruction.opcode <= 0x7Fu) ||
+            (instruction.opcode == 0x0Fu &&
+             ((instruction.opcode2 >= 0x80u &&
+               instruction.opcode2 <= 0x8Fu) ||
+              (instruction.opcode2 == 0x1Fu &&
+               instruction.modrm_reg == 0u))))
+        {
+            return;
+        }
+        set(7u);
+    }
+
+    struct IndirectJumpProbe final
+    {
+        std::uint32_t Mode{};
+        std::uint32_t Register{0xFFFFFFFFu};
+        std::int32_t Displacement{};
+        std::uint32_t SlotRva{};
+        std::uint32_t TargetRva{};
+        std::uint32_t Status{};
+    };
+
+    [[nodiscard]] IndirectJumpProbe ProbeStaticIndirectJump(
+        ImageView image, std::uint32_t source, unsigned int length,
+        const hde64s& instruction, std::uint32_t previousRva,
+        unsigned int previousLength) noexcept
+    {
+        IndirectJumpProbe result{};
+        if (instruction.modrm_mod == 3u)
+        {
+            result.Mode = 1u;
+            result.Register = GeneralRegister(instruction.modrm_rm,
+                instruction.rex_b != 0u);
+            if (previousRva != 0u &&
+                static_cast<std::uint64_t>(previousRva) + previousLength == source)
+            {
+                std::array<std::uint8_t, 15> previousBytes{};
+                const auto available = CaptureReadableBytes(image, previousRva,
+                    previousBytes);
+                hde64s previous{};
+                if (available >= previousLength && previousLength != 0u &&
+                    hde64_disasm(previousBytes.data(), &previous) == previousLength &&
+                    (previous.flags & F_ERROR) == 0u &&
+                    result.Register == GeneralRegister(0u, false))
+                {
+                    std::uint64_t absolute = 0u;
+                    bool known = false;
+                    if (previous.opcode == 0xB8u && previous.rex_w != 0u &&
+                        previous.rex_b == 0u &&
+                        (previous.flags & F_IMM64) != 0u)
+                    {
+                        absolute = previous.imm.imm64;
+                        known = true;
+                    }
+                    else if (previous.opcode == 0x8Du && previous.rex_w != 0u &&
+                        previous.modrm_reg == 0u && previous.rex_r == 0u &&
+                        previous.modrm_mod == 0u && previous.modrm_rm == 5u &&
+                        (previous.flags & F_DISP32) != 0u &&
+                        previous.p_67 == 0u && previous.p_seg == 0u)
+                    {
+                        const std::int64_t target =
+                            static_cast<std::int64_t>(previousRva) +
+                            previousLength +
+                            static_cast<std::int32_t>(previous.disp.disp32);
+                        if (target >= 0 &&
+                            static_cast<std::uint64_t>(target) < image.Size)
+                        {
+                            absolute = reinterpret_cast<std::uintptr_t>(
+                                image.Base + static_cast<std::size_t>(target));
+                            known = true;
+                        }
+                    }
+                    if (known)
+                    {
+                        const auto base = reinterpret_cast<std::uintptr_t>(image.Base);
+                        if (absolute >= base && absolute - base < image.Size)
+                        {
+                            const auto target = static_cast<std::uint32_t>(absolute - base);
+                            if (IsExecutableImageAddress(image, target) &&
+                                (FindImageSection(image, target).Characteristics &
+                                    IMAGE_SCN_MEM_EXECUTE) != 0u)
+                            {
+                                result.TargetRva = target;
+                                result.Status = 1u;
+                            }
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+        result.Mode = 2u;
+        result.Register = GeneralRegister(instruction.modrm_rm,
+            instruction.rex_b != 0u);
+        if ((instruction.flags & F_DISP8) != 0u)
+        {
+            result.Displacement = static_cast<std::int8_t>(instruction.disp.disp8);
+        }
+        else if ((instruction.flags & F_DISP32) != 0u)
+        {
+            result.Displacement = static_cast<std::int32_t>(instruction.disp.disp32);
+        }
+        if (instruction.modrm_mod != 0u || instruction.modrm_rm != 5u ||
+            (instruction.flags & F_SIB) != 0u ||
+            (instruction.flags & F_DISP32) == 0u ||
+            instruction.p_67 != 0u || instruction.p_seg != 0u)
+        {
+            return result;
+        }
+        result.Mode = 3u;
+        result.Register = 0xFFFFFFFFu;
+        const std::int64_t slot = static_cast<std::int64_t>(source) +
+            length + result.Displacement;
+        if (slot < 0 || static_cast<std::uint64_t>(slot) >= image.Size)
+        {
+            return result;
+        }
+        result.SlotRva = static_cast<std::uint32_t>(slot);
+        const SectionAtRva section = FindImageSection(image, result.SlotRva);
+        if (section.End <= result.SlotRva ||
+            (section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0u)
+        {
+            return result;
+        }
+        std::array<std::uint8_t, sizeof(std::uintptr_t)> pointerBytes{};
+        if (CaptureReadableBytes(image, result.SlotRva, pointerBytes) !=
+            pointerBytes.size())
+        {
+            return result;
+        }
+        std::uintptr_t absolute{};
+        std::memcpy(&absolute, pointerBytes.data(), sizeof(absolute));
+        const auto base = reinterpret_cast<std::uintptr_t>(image.Base);
+        if (absolute < base || absolute - base >= image.Size)
+        {
+            return result;
+        }
+        const auto target = static_cast<std::uint32_t>(absolute - base);
+        if (!IsExecutableImageAddress(image, target) ||
+            (FindImageSection(image, target).Characteristics &
+                IMAGE_SCN_MEM_EXECUTE) == 0u)
+        {
+            return result;
+        }
+        result.TargetRva = target;
+        result.Status = 2u;
+        return result;
+    }
+
+    [[nodiscard]] bool ResolveRaxDefinedJump(ImageView image,
+        const hde64s& instruction, const RaxDefinition& definition,
+        IndirectJumpProbe& probe) noexcept
+    {
+        if ((definition.Kind != 1u && definition.Kind != 2u) ||
+            probe.Register != 0u || probe.Status != 0u ||
+            instruction.modrm_reg != 4u)
+        {
+            return false;
+        }
+        std::uintptr_t absolute = definition.Absolute;
+        const auto base = reinterpret_cast<std::uintptr_t>(image.Base);
+        if (probe.Mode == 2u)
+        {
+            if (instruction.modrm_mod == 3u ||
+                (instruction.flags & F_SIB) != 0u)
+            {
+                return false;
+            }
+            if (probe.Displacement >= 0)
+            {
+                if (absolute > UINTPTR_MAX -
+                    static_cast<std::uintptr_t>(probe.Displacement))
+                {
+                    return false;
+                }
+                absolute += static_cast<std::uintptr_t>(probe.Displacement);
+            }
+            else
+            {
+                const auto magnitude = static_cast<std::uintptr_t>(
+                    -static_cast<std::int64_t>(probe.Displacement));
+                if (absolute < magnitude)
+                {
+                    return false;
+                }
+                absolute -= magnitude;
+            }
+            if (absolute < base || absolute - base > image.Size ||
+                image.Size - (absolute - base) < sizeof(std::uintptr_t))
+            {
+                return false;
+            }
+            const auto slot = static_cast<std::uint32_t>(absolute - base);
+            const auto section = FindImageSection(image, slot);
+            if (section.End < slot ||
+                section.End - slot < sizeof(std::uintptr_t) ||
+                (section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0u)
+            {
+                return false;
+            }
+            std::array<std::uint8_t, sizeof(std::uintptr_t)> bytes{};
+            if (CaptureReadableBytes(image, slot, bytes) != bytes.size())
+            {
+                return false;
+            }
+            std::memcpy(&absolute, bytes.data(), sizeof(absolute));
+            probe.SlotRva = slot;
+        }
+        else if (probe.Mode != 1u)
+        {
+            return false;
+        }
+        if (absolute < base || absolute - base >= image.Size)
+        {
+            return false;
+        }
+        const auto target = static_cast<std::uint32_t>(absolute - base);
+        if (!IsExecutableImageAddress(image, target) ||
+            (FindImageSection(image, target).Characteristics &
+                IMAGE_SCN_MEM_EXECUTE) == 0u)
+        {
+            return false;
+        }
+        probe.TargetRva = target;
+        probe.Status = probe.Mode == 1u ? 3u : 4u;
+        return true;
+    }
+
+    void TraceEnhancedStackEntryFlow(ImageView image,
+        CEventGenerator::EnhancedStackPathEvidence& evidence)
+    {
+        if ((evidence.Flags & 4u) == 0u ||
+            evidence.StackLoadRva == 0u || evidence.CallsiteRva == 0u)
+        {
+            return;
+        }
+        const RuntimeFunctionView rootRegion = ResolveRuntimeFunction(image,
+            image.Base + evidence.StackLoadRva);
+        if (!rootRegion || rootRegion.Size() > 0x20000u ||
+            evidence.CallsiteRva < rootRegion.BeginRva ||
+            evidence.CallsiteRva >= rootRegion.EndRva)
+        {
+            return;
+        }
+        evidence.EntryAnalyzed = true;
+        evidence.EntryFunctionRva = rootRegion.BeginRva;
+        constexpr std::uint32_t instructionBudget = 4096u;
+        constexpr std::uint32_t branchBudget = 1024u;
+        constexpr std::uint32_t crossDepthLimit = 6u;
+        constexpr std::size_t regionLimit = 12u;
+        constexpr std::uint32_t provisionalLimit = 4u;
+        struct EntryState final
+        {
+            std::uint32_t Rva{};
+            std::uint8_t Definition{};
+            std::uint8_t RegionIndex{};
+            std::uint8_t Depth{};
+            std::uint32_t PreviousRva{};
+            std::uint8_t PreviousLength{};
+            RaxDefinition Rax{};
+            RaxDefinition Rdi{};
+            RaxDefinition Rbx{};
+            RaxDefinition RaxBase{};
+            RaxDefinition RaxBaseParent{};
+            RaxDefinition RaxBaseGrandparent{};
+            RaxDefinition RdiBase{};
+            RaxDefinition RbxBase{};
+            RaxDefinition Rsi{};
+            RaxDefinition Rdx{};
+            std::uint32_t IncomingRva{};
+            std::uint8_t IncomingKind{};
+        };
+        struct EntryRegion final
+        {
+            RuntimeFunctionView Range{};
+            bool Provisional{};
+        };
+        std::vector<EntryRegion> regions{{rootRegion, false}};
+        std::vector<EntryState> pending{{rootRegion.BeginRva, 0u, 0u, 0u}};
+        struct VisitKey final
+        {
+            std::uint32_t Rva{};
+            std::uint32_t PreviousRva{};
+            std::uint8_t Definition{};
+            std::uint8_t Region{};
+            RaxDefinition Rax{};
+            RaxDefinition Rdi{};
+            RaxDefinition Rbx{};
+            RaxDefinition RaxBase{};
+            RaxDefinition RaxBaseParent{};
+            RaxDefinition RaxBaseGrandparent{};
+            RaxDefinition RdiBase{};
+            RaxDefinition RbxBase{};
+            RaxDefinition Rsi{};
+            RaxDefinition Rdx{};
+            bool operator==(const VisitKey&) const = default;
+        };
+        struct VisitHash final
+        {
+            [[nodiscard]] std::size_t operator()(const VisitKey& key) const noexcept
+            {
+                std::uint64_t value =
+                    (static_cast<std::uint64_t>(key.Rva) << 32u) |
+                    key.PreviousRva;
+                value ^= static_cast<std::uint64_t>(key.Definition) << 16u;
+                value ^= static_cast<std::uint64_t>(key.Region) << 24u;
+                const auto mix = [&](const RaxDefinition& source)
+                {
+                    value ^= static_cast<std::uint64_t>(source.Kind) *
+                        0xD6E8FEB86659FD93ULL;
+                    value ^= static_cast<std::uint64_t>(source.InstructionRva) *
+                        0x9E3779B185EBCA87ULL;
+                    value ^= static_cast<std::uint64_t>(source.SourceRegister) *
+                        0xA0761D6478BD642FULL;
+                    value ^= static_cast<std::uint32_t>(source.Displacement) *
+                        0xE7037ED1A0B428DBULL;
+                    value ^= static_cast<std::uint64_t>(source.Absolute) *
+                        0x8EBC6AF09C88C6E3ULL;
+                    value ^= value >> 33u;
+                    value *= 0xff51afd7ed558ccdULL;
+                };
+                mix(key.Rax);
+                mix(key.Rdi);
+                mix(key.Rbx);
+                mix(key.RaxBase);
+                mix(key.RaxBaseParent);
+                mix(key.RaxBaseGrandparent);
+                mix(key.RdiBase);
+                mix(key.RbxBase);
+                mix(key.Rsi);
+                mix(key.Rdx);
+                return static_cast<std::size_t>(value ^ (value >> 33u));
+            }
+        };
+        std::unordered_map<VisitKey, std::uint8_t, VisitHash> bestDepth;
+        bestDepth.reserve(instructionBudget);
+        evidence.EntryAcceptedRegions = 1u;
+        const auto unresolved = [&](std::uint32_t source,
+            std::uint32_t target, std::uint32_t reason,
+            const hde64s* instruction = nullptr,
+            unsigned int length = 0u)
+        {
+            ++evidence.EntryUnresolvedExits;
+            if (reason < evidence.EntryUnresolvedReasonCounts.size())
+            {
+                ++evidence.EntryUnresolvedReasonCounts[reason];
+            }
+            if (evidence.EntryFirstUnresolvedRva == 0u)
+            {
+                evidence.EntryFirstUnresolvedRva = target;
+            }
+            if (evidence.EntryUnresolvedSampleCount <
+                evidence.EntryUnresolvedSamples.size())
+            {
+                auto& sample = evidence.EntryUnresolvedSamples[
+                    evidence.EntryUnresolvedSampleCount++];
+                sample.SourceRva = source;
+                sample.TargetRva = target;
+                sample.Reason = reason;
+                if (instruction != nullptr)
+                {
+                    sample.Opcode = instruction->opcode;
+                    sample.Opcode2 = instruction->opcode2;
+                    sample.Modrm = instruction->modrm;
+                    sample.Length = length;
+                }
+            }
+        };
+        const auto enqueue = [&](const EntryState& source,
+            std::uint32_t target, std::uint8_t edgeKind)
+        {
+            const bool directBranch = edgeKind >= 2u;
+            const auto& current = regions[source.RegionIndex].Range;
+            if (target >= current.BeginRva && target < current.EndRva)
+            {
+                EntryState nextState = source;
+                nextState.Rva = target;
+                nextState.PreviousRva = directBranch ? 0u : source.Rva;
+                nextState.PreviousLength = directBranch ? 0u :
+                    static_cast<std::uint8_t>(target >= source.Rva ?
+                        target - source.Rva : 0u);
+                nextState.IncomingRva = source.Rva;
+                nextState.IncomingKind = edgeKind;
+                pending.push_back(nextState);
+                return;
+            }
+            ++evidence.EntryCrossFunctionEdges;
+            if (!directBranch)
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 8u);
+                return;
+            }
+            if (target >= image.Size)
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 1u);
+                return;
+            }
+            const SectionAtRva section = FindImageSection(image, target);
+            if ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) == 0u ||
+                !IsExecutableImageAddress(image, target))
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 2u);
+                return;
+            }
+            std::size_t index = regions.size();
+            for (std::size_t i = 0u; i < regions.size(); ++i)
+            {
+                const auto& range = regions[i].Range;
+                if (target >= range.BeginRva && target < range.EndRva)
+                {
+                    index = i;
+                    break;
+                }
+            }
+            RuntimeFunctionView destination{};
+            bool provisional = false;
+            if (index == regions.size())
+            {
+                destination = ResolveRuntimeFunction(image,
+                    image.Base + target);
+                if (!destination)
+                {
+                    const ProvisionalCodeProbe probe =
+                        ProbeUnwindlessBranchTarget(image, target, section);
+                    destination = probe.Region;
+                    provisional = static_cast<bool>(destination);
+                }
+                if (!destination || destination.Size() > 0x20000u ||
+                    target < destination.BeginRva ||
+                    target >= destination.EndRva)
+                {
+                    ++evidence.EntryCrossRejected;
+                    unresolved(source.Rva, target, 3u);
+                    return;
+                }
+            }
+            if (source.Depth >= crossDepthLimit)
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 4u);
+                return;
+            }
+            if (index == regions.size() && regions.size() >= regionLimit)
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 9u);
+                return;
+            }
+            if (index == regions.size() && provisional &&
+                evidence.EntryProvisionalRegions >= provisionalLimit)
+            {
+                ++evidence.EntryCrossRejected;
+                unresolved(source.Rva, target, 10u);
+                return;
+            }
+            if (index == regions.size())
+            {
+                index = regions.size();
+                regions.push_back({destination, provisional});
+                evidence.EntryAcceptedRegions =
+                    static_cast<std::uint32_t>(regions.size());
+                evidence.EntryProvisionalRegions += provisional ? 1u : 0u;
+            }
+            ++evidence.EntryCrossFollowed;
+            EntryState nextState = source;
+            nextState.Rva = target;
+            nextState.RegionIndex = static_cast<std::uint8_t>(index);
+            nextState.Depth = static_cast<std::uint8_t>(source.Depth + 1u);
+            nextState.PreviousRva = 0u;
+            nextState.PreviousLength = 0u;
+            nextState.IncomingRva = source.Rva;
+            nextState.IncomingKind = edgeKind;
+            pending.push_back(nextState);
+        };
+        while (!pending.empty() &&
+            evidence.EntryInstructions < instructionBudget &&
+            evidence.EntryBranches < branchBudget)
+        {
+            EntryState state = pending.back();
+            pending.pop_back();
+            if (state.Rva == evidence.CallsiteRva)
+            {
+                switch (state.Definition)
+                {
+                case 0u: ++evidence.EntryCallWithoutLoad; break;
+                case 1u: ++evidence.EntryCallWithLoad; break;
+                case 2u: ++evidence.EntryCallWithOverwrite; break;
+                default: ++evidence.EntryCallWithUnknownWrite; break;
+                }
+                continue;
+            }
+            const VisitKey key{state.Rva, state.PreviousRva,
+                state.Definition, state.RegionIndex, state.Rax,
+                state.Rdi, state.Rbx, state.RaxBase,
+                state.RaxBaseParent, state.RaxBaseGrandparent,
+                state.RdiBase, state.RbxBase, state.Rsi, state.Rdx};
+            const auto [it, inserted] = bestDepth.try_emplace(key, state.Depth);
+            if (!inserted)
+            {
+                if (state.Depth >= it->second)
+                {
+                    continue;
+                }
+                it->second = state.Depth;
+                ++evidence.EntryLowerDepthRevisits;
+            }
+            const auto& region = regions[state.RegionIndex].Range;
+            if (state.Rva < region.BeginRva ||
+                state.Rva >= region.EndRva ||
+                !IsExecutableImageAddress(image, state.Rva))
+            {
+                unresolved(state.Rva, state.Rva, 2u);
+                continue;
+            }
+            std::array<std::uint8_t, 15> bytes{};
+            const std::uint32_t available = CaptureReadableBytes(
+                image, state.Rva, bytes);
+            hde64s instruction{};
+            const unsigned int length = available == 0u ? 0u :
+                hde64_disasm(bytes.data(), &instruction);
+            if (length == 0u || length > available ||
+                length > region.EndRva - state.Rva ||
+                (instruction.flags & F_ERROR) != 0u)
+            {
+                unresolved(state.Rva, state.Rva, 5u);
+                continue;
+            }
+            ++evidence.EntryInstructions;
+            if (instruction.opcode == 0xCCu ||
+                (instruction.opcode == 0x0Fu &&
+                 instruction.opcode2 == 0x0Bu))
+            {
+                bool verified = false;
+                std::uint32_t predecessorOpcode{};
+                unsigned int predecessorLength{};
+                if (state.IncomingKind != 0u &&
+                    state.IncomingRva < image.Size)
+                {
+                    std::array<std::uint8_t, 15> predecessorBytes{};
+                    const auto readable = CaptureReadableBytes(image,
+                        state.IncomingRva, predecessorBytes);
+                    hde64s predecessor{};
+                    predecessorLength = readable == 0u ? 0u :
+                        hde64_disasm(predecessorBytes.data(), &predecessor);
+                    if (predecessorLength != 0u &&
+                        predecessorLength <= readable &&
+                        (predecessor.flags & F_ERROR) == 0u)
+                    {
+                        predecessorOpcode = predecessor.opcode;
+                        const auto following =
+                            static_cast<std::uint64_t>(state.IncomingRva) +
+                            predecessorLength;
+                        if (state.IncomingKind == 1u)
+                        {
+                            verified = following == state.Rva;
+                        }
+                        else
+                        {
+                            const bool isNearBranch = predecessor.opcode == 0xE9u ||
+                                (predecessor.opcode == 0x0Fu &&
+                                 predecessor.opcode2 >= 0x80u &&
+                                 predecessor.opcode2 <= 0x8Fu);
+                            const bool shortBranch =
+                                predecessor.opcode == 0xEBu ||
+                                (predecessor.opcode >= 0x70u &&
+                                 predecessor.opcode <= 0x7Fu) ||
+                                (predecessor.opcode >= 0xE0u &&
+                                 predecessor.opcode <= 0xE3u);
+                            if (isNearBranch || shortBranch)
+                            {
+                                const std::int64_t displacement = isNearBranch ?
+                                    static_cast<std::int32_t>(
+                                        predecessor.imm.imm32) :
+                                    static_cast<std::int8_t>(
+                                        predecessor.imm.imm8);
+                                verified = static_cast<std::int64_t>(following) +
+                                    displacement == state.Rva;
+                            }
+                        }
+                    }
+                }
+                if (!verified)
+                {
+                    ++evidence.EntryTrapUnverifiedEdges;
+                }
+                else if (state.IncomingKind == 1u)
+                {
+                    ++evidence.EntryTrapFallthroughEdges;
+                }
+                else
+                {
+                    ++evidence.EntryTrapDirectEdges;
+                }
+                if (evidence.EntryTrapSampleCount <
+                    evidence.EntryTrapSamples.size())
+                {
+                    auto& sample = evidence.EntryTrapSamples[
+                        evidence.EntryTrapSampleCount++];
+                    sample.TrapRva = state.Rva;
+                    sample.SourceRva = state.IncomingRva;
+                    sample.EdgeKind = state.IncomingKind;
+                    sample.SourceOpcode = predecessorOpcode;
+                    sample.SourceLength = predecessorLength;
+                    sample.EdgeVerified = verified;
+                }
+                unresolved(state.Rva, state.Rva, 11u,
+                    &instruction, length);
+                continue;
+            }
+            if (state.Rva == evidence.StackLoadRva)
+            {
+                state.Definition = 1u;
+            }
+            else if (state.Definition == 1u)
+            {
+                switch (InspectStackRegisterEffect(instruction,
+                    evidence.ObjectRegister))
+                {
+                case StackRegisterEffect::Overwritten:
+                    state.Definition = 2u;
+                    break;
+                case StackRegisterEffect::Unknown:
+                    state.Definition = 3u;
+                    break;
+                default:
+                    break;
+                }
+            }
+            const RaxDefinition previousRax = state.Rax;
+            const RaxDefinition previousRdi = state.Rdi;
+            const RaxDefinition previousRbx = state.Rbx;
+            const RaxDefinition previousRsi = state.Rsi;
+            const RaxDefinition previousRdx = state.Rdx;
+            const RaxDefinition previousRaxBase = state.RaxBase;
+            const RaxDefinition previousRaxBaseParent = state.RaxBaseParent;
+            const RaxDefinition previousRdiBase = state.RdiBase;
+            const RaxDefinition previousRbxBase = state.RbxBase;
+            AdvanceRaxDefinition(image, state.Rva, length,
+                instruction, state.Rax);
+            AdvanceNonvolatileDefinition(image, state.Rva, length,
+                instruction, state.Rdi, 7u);
+            AdvanceNonvolatileDefinition(image, state.Rva, length,
+                instruction, state.Rbx, 3u);
+            AdvanceNonvolatileDefinition(image, state.Rva, length,
+                instruction, state.Rsi, 6u);
+            if (instruction.opcode == 0xE8u ||
+                (instruction.opcode == 0xFFu &&
+                 (instruction.flags & F_MODRM) != 0u &&
+                 (instruction.modrm_reg == 2u ||
+                  instruction.modrm_reg == 3u)))
+            {
+                state.Rdx = {7u, state.Rva};
+            }
+            else
+            {
+                AdvanceNonvolatileDefinition(image, state.Rva, length,
+                    instruction, state.Rdx, 2u);
+            }
+            if (state.Rax.InstructionRva == state.Rva)
+            {
+                if (state.Rax.SourceRegister == 7u &&
+                    (state.Rax.Kind == 3u || state.Rax.Kind == 4u))
+                {
+                    state.RaxBase = previousRdi;
+                    state.RaxBaseParent = previousRdiBase;
+                    state.RaxBaseGrandparent = {};
+                }
+                else if (state.Rax.SourceRegister == 0u &&
+                    (state.Rax.Kind == 3u || state.Rax.Kind == 4u))
+                {
+                    state.RaxBase = previousRax;
+                    state.RaxBaseParent = previousRaxBase;
+                    state.RaxBaseGrandparent = previousRaxBaseParent;
+                }
+                else if (state.Rax.SourceRegister == 3u &&
+                    (state.Rax.Kind == 3u || state.Rax.Kind == 4u))
+                {
+                    state.RaxBase = previousRbx;
+                    state.RaxBaseParent = previousRbxBase;
+                    state.RaxBaseGrandparent = {};
+                }
+                else
+                {
+                    state.RaxBase = {};
+                    state.RaxBaseParent = {};
+                    state.RaxBaseGrandparent = {};
+                }
+            }
+            if (state.Rdi.InstructionRva == state.Rva)
+            {
+                state.RdiBase = (state.Rdi.Kind == 3u ||
+                    state.Rdi.Kind == 4u) ?
+                    state.Rdi.SourceRegister == 0u ? previousRax :
+                    state.Rdi.SourceRegister == 3u ? previousRbx :
+                    state.Rdi.SourceRegister == 7u ? previousRdi :
+                    state.Rdi.SourceRegister == 6u ? previousRsi :
+                    RaxDefinition{} : RaxDefinition{};
+            }
+            if (state.Rbx.InstructionRva == state.Rva)
+            {
+                state.RbxBase = (state.Rbx.Kind == 3u ||
+                    state.Rbx.Kind == 4u) ?
+                    state.Rbx.SourceRegister == 0u ? previousRax :
+                    state.Rbx.SourceRegister == 7u ? previousRdi :
+                    state.Rbx.SourceRegister == 3u ? previousRbx :
+                    state.Rbx.SourceRegister == 2u ? previousRdx :
+                    RaxDefinition{} : RaxDefinition{};
+            }
+            const std::uint32_t next = state.Rva + length;
+            const bool nearJump = instruction.opcode == 0xE9u;
+            const bool shortJump = instruction.opcode == 0xEBu;
+            const bool shortConditional = instruction.opcode >= 0x70u &&
+                instruction.opcode <= 0x7Fu;
+            const bool nearConditional = instruction.opcode == 0x0Fu &&
+                instruction.opcode2 >= 0x80u &&
+                instruction.opcode2 <= 0x8Fu;
+            const bool loopConditional = instruction.opcode >= 0xE0u &&
+                instruction.opcode <= 0xE3u;
+            if (nearJump || shortJump ||
+                shortConditional || nearConditional || loopConditional)
+            {
+                ++evidence.EntryBranches;
+                const std::int64_t displacement =
+                    nearJump || nearConditional
+                    ? static_cast<std::int32_t>(instruction.imm.imm32)
+                    : static_cast<std::int8_t>(instruction.imm.imm8);
+                const std::int64_t target =
+                    static_cast<std::int64_t>(next) + displacement;
+                if (target < 0 || target > UINT32_MAX)
+                {
+                    unresolved(state.Rva, state.Rva, 1u);
+                }
+                else
+                {
+                    enqueue(state, static_cast<std::uint32_t>(target),
+                        shortConditional || nearConditional || loopConditional ?
+                            std::uint8_t{3u} : std::uint8_t{2u});
+                }
+                if (shortConditional || nearConditional || loopConditional)
+                {
+                    if (loopConditional)
+                    {
+                        ++evidence.EntryLoopBranches;
+                    }
+                    enqueue(state, next, 1u);
+                }
+                continue;
+            }
+            if (instruction.opcode == 0xC2u ||
+                instruction.opcode == 0xC3u ||
+                instruction.opcode == 0xCAu ||
+                instruction.opcode == 0xCBu)
+            {
+                continue;
+            }
+            if (instruction.opcode == 0xFFu &&
+                (instruction.flags & F_MODRM) != 0u &&
+                (instruction.modrm_reg == 4u ||
+                 instruction.modrm_reg == 5u))
+            {
+                ++evidence.EntryIndirectExits;
+                auto probe = instruction.modrm_reg == 4u ?
+                    ProbeStaticIndirectJump(image, state.Rva, length,
+                        instruction, state.PreviousRva,
+                        state.PreviousLength) : IndirectJumpProbe{};
+                if (probe.Status == 0u && instruction.modrm_reg == 4u)
+                {
+                    static_cast<void>(ResolveRaxDefinedJump(
+                        image, instruction, state.Rax, probe));
+                }
+                if (evidence.EntryIndirectSampleCount <
+                    evidence.EntryIndirectSamples.size())
+                {
+                    auto& sample = evidence.EntryIndirectSamples[
+                        evidence.EntryIndirectSampleCount++];
+                    sample.SourceRva = state.Rva;
+                    sample.PreviousRva = state.PreviousRva;
+                    sample.Mode = probe.Mode;
+                    sample.BaseRegister = probe.Register;
+                    sample.Displacement = probe.Displacement;
+                    sample.SlotRva = probe.SlotRva;
+                    sample.TargetRva = probe.TargetRva;
+                    sample.Status = probe.Status;
+                    if (probe.Mode == 2u &&
+                        probe.Register == 0u &&
+                        probe.Displacement == 0x38 &&
+                        state.Rax.Kind == 3u &&
+                        state.Rax.SourceRegister == 7u &&
+                        state.Rax.Displacement == 0x368 &&
+                        state.RaxBase.Kind == 3u &&
+                        state.RaxBase.Displacement == 0x10A0)
+                    {
+                        sample.DispatchShape = 1u;
+                    }
+                    else if (probe.Mode == 1u &&
+                        probe.Register == 0u &&
+                        state.Rax.Kind == 3u &&
+                        state.Rax.SourceRegister == 0u &&
+                        state.Rax.Displacement == 0x30 &&
+                        state.RaxBase.Kind == 3u &&
+                        state.RaxBase.SourceRegister == 3u &&
+                        state.RaxBase.Displacement == 0)
+                    {
+                        sample.DispatchShape = 2u;
+                    }
+                    sample.StackObjectLink =
+                        state.RaxBase.InstructionRva ==
+                            evidence.StackLoadRva ||
+                        state.RaxBaseParent.InstructionRva ==
+                            evidence.StackLoadRva ? 1u : 0u;
+                    sample.Opcode = instruction.opcode;
+                    sample.Modrm = instruction.modrm;
+                    sample.Rex = instruction.rex;
+                    sample.Sib = instruction.sib;
+                    sample.Length = length;
+                    sample.RaxSourceKind = state.Rax.Kind;
+                    sample.RaxDefinitionRva = state.Rax.InstructionRva;
+                    sample.RaxSourceRegister = state.Rax.SourceRegister;
+                    sample.RaxSourceDisplacement = state.Rax.Displacement;
+                    const auto captureOrigin = [&](
+                        const RaxDefinition& source,
+                        CEventGenerator::EnhancedStackPathEvidence::
+                            IndirectJumpDiagnostic::OriginDiagnostic& target)
+                    {
+                        target.Kind = source.Kind;
+                        target.DefinitionRva = source.InstructionRva;
+                        target.SourceRegister = source.SourceRegister;
+                        target.Displacement = source.Displacement;
+                        const auto base =
+                            reinterpret_cast<std::uintptr_t>(image.Base);
+                        if (source.Absolute >= base &&
+                            source.Absolute - base < image.Size)
+                        {
+                            target.KnownRva = static_cast<std::uint32_t>(
+                                source.Absolute - base);
+                        }
+                        if (source.InstructionRva >= image.Size ||
+                            source.InstructionRva == 0u)
+                        {
+                            return;
+                        }
+                        std::array<std::uint8_t, 15> bytes{};
+                        const auto available = CaptureReadableBytes(
+                            image, source.InstructionRva, bytes);
+                        hde64s definitionInstruction{};
+                        const unsigned int decoded = available == 0u ? 0u :
+                            hde64_disasm(bytes.data(), &definitionInstruction);
+                        if (decoded == 0u || decoded > available ||
+                            (definitionInstruction.flags & F_ERROR) != 0u)
+                        {
+                            return;
+                        }
+                        target.Opcode = definitionInstruction.opcode;
+                        target.Modrm = definitionInstruction.modrm;
+                        target.Length = decoded;
+                        target.ByteCount = std::min<std::uint32_t>(decoded,
+                            static_cast<std::uint32_t>(target.Bytes.size()));
+                        std::copy_n(bytes.begin(), target.ByteCount,
+                            target.Bytes.begin());
+                    };
+                    captureOrigin(state.RaxBase, sample.BaseOrigin);
+                    captureOrigin(state.RaxBaseParent, sample.ParentOrigin);
+                    captureOrigin(state.RaxBaseGrandparent,
+                        sample.GrandparentOrigin);
+                    if (state.Rax.InstructionRva < image.Size)
+                    {
+                        std::array<std::uint8_t, 15> definitionBytes{};
+                        const auto available = CaptureReadableBytes(
+                            image, state.Rax.InstructionRva, definitionBytes);
+                        hde64s definitionInstruction{};
+                        const auto definitionLength = available == 0u ? 0u :
+                            hde64_disasm(definitionBytes.data(),
+                                &definitionInstruction);
+                        if (definitionLength != 0u &&
+                            definitionLength <= available &&
+                            (definitionInstruction.flags & F_ERROR) == 0u)
+                        {
+                            sample.RaxDefinitionOpcode = definitionInstruction.opcode;
+                            sample.RaxDefinitionOpcode2 = definitionInstruction.opcode2;
+                            sample.RaxDefinitionModrm = definitionInstruction.modrm;
+                            sample.RaxDefinitionLength = definitionLength;
+                            sample.RaxDefinitionByteCount =
+                                std::min<std::uint32_t>(definitionLength,
+                                    static_cast<std::uint32_t>(
+                                        sample.RaxDefinitionBytes.size()));
+                            std::copy_n(definitionBytes.begin(),
+                                sample.RaxDefinitionByteCount,
+                                sample.RaxDefinitionBytes.begin());
+                        }
+                    }
+                    const auto base = reinterpret_cast<std::uintptr_t>(image.Base);
+                    if (state.Rax.Absolute >= base &&
+                        state.Rax.Absolute - base < image.Size)
+                    {
+                        sample.RaxKnownRva = static_cast<std::uint32_t>(
+                            state.Rax.Absolute - base);
+                    }
+                }
+                if (probe.Status != 0u)
+                {
+                    ++evidence.EntryIndirectStaticCandidates;
+                    enqueue(state, probe.TargetRva, 2u);
+                }
+                else
+                {
+                    unresolved(state.Rva, state.Rva, 6u,
+                        &instruction, length);
+                }
+                continue;
+            }
+            enqueue(state, next, 1u);
+        }
+        evidence.EntryBudgetExceeded = !pending.empty() ||
+            evidence.EntryInstructions >= instructionBudget ||
+            evidence.EntryBranches >= branchBudget;
+        if (evidence.EntryBudgetExceeded)
+        {
+            unresolved(pending.empty() ? rootRegion.BeginRva :
+                pending.back().Rva,
+                pending.empty() ? rootRegion.BeginRva :
+                pending.back().Rva, 7u);
+        }
+    }
+
     void RecordEnhancedStackPathEvidence(ImageView image,
         CEventGenerator::EventLocatorDiagnostics& diagnostics)
     {
@@ -1957,6 +3771,30 @@ namespace
             }
             break;
         }
+        TraceEnhancedStackLoopBack(image, evidence);
+        TraceEnhancedStackEntryFlow(image, evidence);
+        evidence.StaticStructureSignals =
+            (evidence.StackLoadRva != 0u ? 1u : 0u) |
+            ((evidence.Flags & 4u) != 0u ? 2u : 0u) |
+            (evidence.LoopBackReachesStackLoad != 0u ? 4u : 0u) |
+            (evidence.EntryCallWithLoad != 0u ? 8u : 0u);
+        for (std::uint32_t index = 0u;
+            index < evidence.EntryIndirectSampleCount; ++index)
+        {
+            if (evidence.EntryIndirectSamples[index].DispatchShape != 0u)
+            {
+                evidence.StaticStructureSignals |= 16u;
+                break;
+            }
+        }
+        evidence.AdmissionBlockers =
+            (!evidence.EntryAnalyzed || evidence.EntryBudgetExceeded ||
+             evidence.EntryUnresolvedExits != 0u ||
+             evidence.EntryCallWithLoad == 0u ||
+             evidence.EntryCallWithoutLoad != 0u ||
+             evidence.EntryCallWithOverwrite != 0u ||
+             evidence.EntryCallWithUnknownWrite != 0u ? 1u : 0u) |
+            2u | 4u | 8u | 16u | 32u | 64u;
         diagnostics.EnhancedStackPath = evidence;
     }
 
@@ -2293,12 +4131,14 @@ namespace
         result.Targets.DamageFunction = const_cast<std::byte*>(
             damageMatches[0] + DamageEntryOffset);
         result.Targets.DamageProcessFunction = FindLegacyDamageProcess(image);
+        const std::uint32_t legacySlotShift =
+            result.Targets.GameBuild >= 2802 ? 6u : 0u;
         result.Targets.EventIdVFuncOffset =
-            static_cast<std::uint32_t>(3u * sizeof(void*));
+            (3u + legacySlotShift) * static_cast<std::uint32_t>(sizeof(void*));
         result.Targets.EventArgumentsVFuncOffset =
-            static_cast<std::uint32_t>(6u * sizeof(void*));
+            (6u + legacySlotShift) * static_cast<std::uint32_t>(sizeof(void*));
         result.Targets.EventEntityVFuncOffset =
-            static_cast<std::uint32_t>(25u * sizeof(void*));
+            (25u + legacySlotShift) * static_cast<std::uint32_t>(sizeof(void*));
         result.Diagnostics.EventTypeVFuncOffset =
             result.Targets.EventIdVFuncOffset;
 
@@ -2327,11 +4167,136 @@ namespace
         return result;
     }
 
+    [[nodiscard]] const std::byte* ResolveFiveMReceiverEntry(
+        ImageView image,
+        const std::byte* match,
+        std::size_t entryBackOffset,
+        std::size_t patternLength) noexcept
+    {
+        if (!Contains(image, match, patternLength))
+        {
+            return nullptr;
+        }
+        const std::size_t rva = static_cast<std::size_t>(match - image.Base);
+        if (rva < entryBackOffset)
+        {
+            return nullptr;
+        }
+        const auto frame = ResolveRuntimeFunction(image, match);
+        if (!frame || frame.BeginRva != rva - entryBackOffset ||
+            frame.EndRva < rva + patternLength)
+        {
+            return nullptr;
+        }
+        const auto* entry = image.Base + frame.BeginRva;
+        MEMORY_BASIC_INFORMATION memory{};
+        if (VirtualQuery(entry, &memory, sizeof(memory)) != sizeof(memory) ||
+            memory.State != MEM_COMMIT ||
+            (memory.Protect & PAGE_GUARD) != 0)
+        {
+            return nullptr;
+        }
+        const DWORD pageProtection = memory.Protect & 0xFFu;
+        if (pageProtection != PAGE_EXECUTE &&
+            pageProtection != PAGE_EXECUTE_READ &&
+            pageProtection != PAGE_EXECUTE_READWRITE &&
+            pageProtection != PAGE_EXECUTE_WRITECOPY)
+        {
+            return nullptr;
+        }
+        return entry;
+    }
+
+    [[nodiscard]] bool TryLocateEnhancedFiveMReceivers(
+        ImageView image,
+        CEventGenerator::EventLocatorResult& result)
+    {
+        using namespace CEventGenerator;
+        const auto ped = FindAllExecutable(image, PedEventPattern, 3);
+        const auto global = FindAllExecutable(image, GlobalEventPattern, 2);
+        const auto damage = FindAllExecutable(image, DamageEventPattern, 2);
+        auto& diagnostic = result.Diagnostics;
+        diagnostic.FiveMPedSignatureCount =
+            static_cast<std::uint32_t>(ped.size());
+        diagnostic.FiveMGlobalSignatureCount =
+            static_cast<std::uint32_t>(global.size());
+        diagnostic.FiveMDamageSignatureCount =
+            static_cast<std::uint32_t>(damage.size());
+        diagnostic.FiveMReceiverPathStatus = 1;
+        if (ped.size() != 2 || global.size() != 1 || damage.size() != 1)
+        {
+            return false;
+        }
+
+        constexpr std::size_t EventEntryBackOffset = 0x36;
+        constexpr std::size_t DamageEntryBackOffset = 0x1F;
+        std::array<const std::byte*, 3> functions{
+            ResolveFiveMReceiverEntry(image, ped[0], EventEntryBackOffset,
+                PedEventPattern.size()),
+            ResolveFiveMReceiverEntry(image, ped[1], EventEntryBackOffset,
+                PedEventPattern.size()),
+            ResolveFiveMReceiverEntry(image, global[0], EventEntryBackOffset,
+                GlobalEventPattern.size())
+        };
+        const std::byte* damageEntry = ResolveFiveMReceiverEntry(
+            image, damage[0], DamageEntryBackOffset, DamageEventPattern.size());
+        diagnostic.FiveMReceiverPathStatus = 2;
+        if (std::any_of(functions.begin(), functions.end(),
+                [](const std::byte* function) { return function == nullptr; }) ||
+            damageEntry == nullptr ||
+            functions[0] == functions[1] || functions[0] == functions[2] ||
+            functions[1] == functions[2] ||
+            std::find(functions.begin(), functions.end(), damageEntry) !=
+                functions.end())
+        {
+            return false;
+        }
+
+        constexpr std::uint32_t FiveMIdSlot = 0x48;
+        const auto typeAnchors = FindAllExecutable(image, EnhancedEventTypePattern, 2);
+        diagnostic.EventTypeAnchorCount =
+            static_cast<std::uint32_t>(typeAnchors.size());
+        diagnostic.FiveMReceiverPathStatus = 3;
+        if (typeAnchors.size() != 1 ||
+            !Contains(image, typeAnchors[0] +
+                EnhancedEventTypePattern.size(), sizeof(std::uint8_t)) ||
+            !ResolveRuntimeFunction(image, typeAnchors[0]) ||
+            ByteAt(typeAnchors[0] + EnhancedEventTypePattern.size()) !=
+                FiveMIdSlot)
+        {
+            return false;
+        }
+
+        for (std::size_t index = 0; index < functions.size(); ++index)
+        {
+            result.Targets.Functions[index] =
+                const_cast<std::byte*>(functions[index]);
+        }
+        result.Targets.DamageFunction = const_cast<std::byte*>(damageEntry);
+        result.Targets.DamageProcessFunction = nullptr;
+        result.Targets.EventIdVFuncOffset = FiveMIdSlot;
+        result.Targets.EventArgumentsVFuncOffset = 0x60;
+        result.Targets.EventEntityVFuncOffset = 0xF8;
+        diagnostic.PedMatchCount = 2;
+        diagnostic.GlobalMatchCount = 1;
+        diagnostic.DamageMatchCount = 1;
+        diagnostic.EventTypeVFuncOffset = FiveMIdSlot;
+        diagnostic.FiveMReceiverPathStatus = 4;
+        diagnostic.Failure = LocatorFailure::None;
+        result.State = Status::Ready;
+        return true;
+    }
+
     [[nodiscard]] CEventGenerator::EventLocatorResult LocateEnhanced(
         ImageView image,
         CEventGenerator::EventLocatorResult result)
     {
         using namespace CEventGenerator;
+
+        if (TryLocateEnhancedFiveMReceivers(image, result))
+        {
+            return result;
+        }
 
         constexpr std::size_t SearchLimit = 4096;
         const auto directPedMatches = FindEnhancedReceivers(

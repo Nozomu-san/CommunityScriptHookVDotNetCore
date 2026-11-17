@@ -53,6 +53,11 @@ type ReloadLog(extensionsDirectory: string, enabled: bool, diagnostics: IRuntime
     member this.Information(message: string) =
         this.Write("Information", message)
 
+    member this.Success(message: string) =
+        this.Write("Information", message)
+        diagnostics.Notify(
+            "Script4Reload", message, RuntimeUserNotificationColor.Green)
+
     member this.Warning(message: string) =
         this.Write("Warning", message)
         diagnostics.Warning("Script4Reload", message)

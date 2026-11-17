@@ -220,7 +220,20 @@ public enum ScriptLifecycleTransitionReason
 
 public sealed record ScriptLifecycleTransitionPlan(
     ScriptLifecycleTransitionReason Reason,
-    IReadOnlyList<string>? TargetPackages = null);
+    IReadOnlyList<string>? TargetPackages = null,
+    string? RequestedBy = null)
+{
+    public int SourceChangeCount { get; init; }
+
+    public ScriptLifecycleTransitionPlan(
+        ScriptLifecycleTransitionReason reason,
+        IReadOnlyList<string>? targetPackages,
+        string? requestedBy,
+        int sourceChangeCount) : this(reason, targetPackages, requestedBy)
+    {
+        SourceChangeCount = sourceChangeCount;
+    }
+}
 
 public sealed record ScriptLifecycleTransitionResult(
     ulong LifecycleEpoch,

@@ -5,7 +5,15 @@ using System.Security.Cryptography;
 
 namespace CommunityScriptHookVDotNetCore.Source;
 
-internal sealed class SecurityBlockedException(string diagnostic) : Exception(diagnostic)
+internal closed class SecurityAdmissionException(string diagnostic) : Exception(diagnostic)
+{
+}
+
+internal sealed class SecurityBlockedException(string diagnostic) : SecurityAdmissionException(diagnostic)
+{
+}
+
+internal sealed class SecurityValidationFailedException(string diagnostic) : SecurityAdmissionException(diagnostic)
 {
 }
 
@@ -30,6 +38,14 @@ internal static class SecurityAdmission
             (error == ErrorVirusInfected || error == ErrorVirusDeleted);
     }
 
+    internal static void ClearTemporaryBuffer(byte[]? buffer)
+    {
+        if (buffer is not null)
+        {
+            CryptographicOperations.ZeroMemory(buffer);
+        }
+    }
+
     internal static void CheckCapturedImage(
         string sourcePath,
         byte[] image,
@@ -49,12 +65,11 @@ internal static class SecurityAdmission
         try
         {
             int init = AmsiInitialize("CommunityScriptHookVDotNetCore", out context);
-            if (init < 0 || context == 0)
+            if (init != 0 || context == 0)
             {
-                log.Warning(
-                    $"Security scanner unavailable for '{Path.GetFileName(sourcePath)}'; " +
-                    "the source remains subject to OS file protection and contract validation.");
-                return;
+                throw new SecurityValidationFailedException(
+                    $"AMSI initialization failed for '{Path.GetFileName(sourcePath)}' " +
+                    $"(HRESULT 0x{init:X8}); the source was not admitted.");
             }
             int scan = AmsiScanBuffer(
                 context,
@@ -63,12 +78,11 @@ internal static class SecurityAdmission
                 sourcePath,
                 0,
                 out result);
-            if (scan < 0)
+            if (scan != 0)
             {
-                log.Warning(
-                    $"Security scanner did not return a verdict for " +
-                    $"'{Path.GetFileName(sourcePath)}' (HRESULT 0x{scan:X8}).");
-                return;
+                throw new SecurityValidationFailedException(
+                    $"AMSI scan failed for '{Path.GetFileName(sourcePath)}' " +
+                    $"(HRESULT 0x{scan:X8}); the source was not admitted.");
             }
         }
         catch (DllNotFoundException)
@@ -81,10 +95,9 @@ internal static class SecurityAdmission
         }
         catch (ExternalException exception)
         {
-            log.Warning(
-                $"Security scanner failed for '{Path.GetFileName(sourcePath)}': " +
+            throw new SecurityValidationFailedException(
+                $"AMSI scan failed for '{Path.GetFileName(sourcePath)}': " +
                 exception.Message);
-            return;
         }
         finally
         {

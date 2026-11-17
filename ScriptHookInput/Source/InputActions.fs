@@ -2,6 +2,8 @@ namespace ScriptHookInput.Source
 
 open System
 open System.Collections.Generic
+open System.Threading
+open System.Threading.Tasks
 
 [<Sealed>]
 type InputActionBinding(name: string, inputs: IEnumerable<InputBinding>) =
@@ -35,11 +37,17 @@ type IInputAction =
     inherit IDisposable
     abstract Name: string
     abstract State: InputState
+    abstract States: IReadOnlyList<InputState>
+    abstract WaitForPressAsync: cancellationToken: CancellationToken -> Task<InputState>
+    abstract WaitForReleaseAsync: cancellationToken: CancellationToken -> Task<InputState>
+    abstract WaitForMatchAsync: predicate: Func<IReadOnlyList<InputState>, bool> * cancellationToken: CancellationToken -> Task<InputState>
 
 type IInputActions =
     abstract Create: binding: InputActionBinding -> IInputAction
     abstract Create: name: string * inputs: string -> IInputAction
     abstract CreateSingle: name: string * input: string -> IInputAction
+    abstract CreateChord: binding: InputActionBinding -> IInputAction
+    abstract CreateChord: name: string * inputs: string -> IInputAction
 
 type IScriptHookInput =
     inherit IInputActions

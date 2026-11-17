@@ -1,16 +1,15 @@
 using System.Reflection;
 using CommunityScriptHookVDotNetCore.Source;
-using StandardGameOperations.Source;
 
 [assembly: AssemblyMetadata("CSHVDNC.Role", "RuntimeExtension")]
 [assembly: AssemblyMetadata("CSHVDNC.Id", "LocalUserDebug")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.EntryType",
     "LocalUserDebug.Source.LocalUserDebugExtension")]
-[assembly: AssemblyMetadata("CSHVDNC.Provides", "user.debug")]
+[assembly: AssemblyMetadata("CSHVDNC.Provides", "user.debug;game.notifications")]
 [assembly: AssemblyMetadata(
     "CSHVDNC.Requires",
-    "runtime.diagnostics;game.notifications")]
+    "runtime.diagnostics;native.standard")]
 
 namespace LocalUserDebug.Source;
 
@@ -30,9 +29,9 @@ internal sealed class LocalUserDebugExtension : IScript4RuntimeExtension
                 "LocalUserDebug is already initialized.");
         }
 
-        _runtime = new(
-            context.Diagnostics,
-            context.Services.GetRequired<INotificationOperations>());
+        NotificationOperations notifications = new();
+        context.Services.Register<INotificationOperations>(notifications);
+        _runtime = new(context.Diagnostics, notifications);
         return Task.CompletedTask;
     }
 

@@ -6,8 +6,8 @@ namespace LocalNativeMemories.Source;
 internal sealed class PoolAdmission
 {
     private const int BatchCount = 4;
-    private static readonly long DecisionDeadlineTicks = 7L * Stopwatch.Frequency / 4L;
-    private static readonly long BatchIntervalTicks = Stopwatch.Frequency / 5L;
+    private const int MaximumCountGap = 2;
+    private static readonly long RoundDeadlineTicks = 2L * Stopwatch.Frequency;
     private static readonly LocalPoolKinds[] PoolOrder =
     [
         LocalPoolKinds.Peds,
@@ -17,21 +17,21 @@ internal sealed class PoolAdmission
 
     private readonly EntityPools _pools;
     private readonly IRuntimeInformationSink _information;
+    private readonly IRuntimeDiagnosticSink _notifications;
     private long _readyStartedAt;
-    private long _lastSampleAt;
-    private long _lastAdvanceAt;
-    private ulong _lastAdvanceFrame;
     private ulong _advanceCount;
     private readonly PoolAdmissionEvidence[,] _samples = new PoolAdmissionEvidence[BatchCount, 3];
-    private readonly long[] _sampleStartedAt = new long[BatchCount];
     private int _collected;
-    private int _missed;
     private bool _admitted;
 
-    internal PoolAdmission(EntityPools pools, IRuntimeInformationSink information)
+    internal PoolAdmission(
+        EntityPools pools,
+        IRuntimeInformationSink information,
+        IRuntimeDiagnosticSink notifications)
     {
         _pools = pools ?? throw new ArgumentNullException(nameof(pools));
         _information = information ?? throw new ArgumentNullException(nameof(information));
+        _notifications = notifications ?? throw new ArgumentNullException(nameof(notifications));
     }
 
     private static double ToMilliseconds(long ticks) =>
@@ -44,88 +44,68 @@ internal sealed class PoolAdmission
             return true;
         }
 
-        long now = Stopwatch.GetTimestamp();
-        long callGap = _lastAdvanceAt == 0
-            ? 0L : Math.Max(0L, now - _lastAdvanceAt);
-        ulong frameGap = _advanceCount != 0 &&
-            hostFrameIndex >= _lastAdvanceFrame
-            ? hostFrameIndex - _lastAdvanceFrame : 0UL;
         ++_advanceCount;
-        _lastAdvanceAt = now;
-        _lastAdvanceFrame = hostFrameIndex;
         if (_readyStartedAt == 0)
         {
-            _readyStartedAt = now;
+            _readyStartedAt = Stopwatch.GetTimestamp();
             _information.Information("Checking memory layout compatibility...");
-            _information.Information(
-                "LNM admission implementation=v5r11 policy=per-batch " +
-                "churn=diagnostic-only requiredBatches=4 " +
-                "fallback=diagnostic-only");
+            _notifications.Notify(
+                "LocalNativeMemories",
+                "Checking game memory layout compatibility...",
+                RuntimeUserNotificationColor.Blue);
             _information.Information(
                 $"LNM admission clock-start frame={hostFrameIndex} " +
-                $"deadlineMs={ToMilliseconds(DecisionDeadlineTicks):F1} " +
-                $"sampleIntervalMs={ToMilliseconds(BatchIntervalTicks):F1} " +
-                $"requiredBatches={BatchCount}.");
+                $"roundDeadlineMs={ToMilliseconds(RoundDeadlineTicks):F1} " +
+                $"requiredRounds={BatchCount} maximumCountGap={MaximumCountGap}.");
         }
 
-        long elapsed = Math.Max(0L, now - _readyStartedAt);
-        if (_advanceCount > 1u && callGap >= BatchIntervalTicks * 2L)
+        while (_collected < BatchCount)
         {
+            int round = _collected + 1;
+            long startedAt = Stopwatch.GetTimestamp();
+            bool passed = CaptureBatch();
+            long elapsed = Stopwatch.GetTimestamp() - startedAt;
+            if (elapsed >= RoundDeadlineTicks)
+            {
+                _information.Information(
+                    $"LNM admission decision=FAIL round={round}/{BatchCount} " +
+                    $"reason=timeout elapsedMs={ToMilliseconds(elapsed):F1} " +
+                    $"deadlineMs={ToMilliseconds(RoundDeadlineTicks):F1}.");
+                throw new InvalidOperationException(
+                    $"LNM memory layout admission timed out during round {round}/{BatchCount}.");
+            }
+            if (!passed)
+            {
+                _information.Information(
+                    $"LNM admission decision=FAIL round={round}/{BatchCount} " +
+                    "reason=incompatible-pool-evidence.");
+                throw new InvalidOperationException(
+                    $"LNM memory layout admission failed during round {round}/{BatchCount}.");
+            }
+
+            ++_collected;
             _information.Information(
-                $"LNM admission advance-gap frame={hostFrameIndex} " +
-                $"frameDelta={frameGap} " +
+                $"LNM admission round={round}/{BatchCount} result=PASS " +
                 $"elapsedMs={ToMilliseconds(elapsed):F1} " +
-                $"sincePreviousAdvanceMs={ToMilliseconds(callGap):F1} " +
-                $"completedBatches={_collected}/{BatchCount}.");
-        }
-        if (_collected < BatchCount && elapsed < DecisionDeadlineTicks &&
-            (_collected == 0 || now - _lastSampleAt >= BatchIntervalTicks))
-        {
-            long captureStartedAt = Stopwatch.GetTimestamp();
-            _sampleStartedAt[_collected] = captureStartedAt;
-            CaptureBatch();
-            long captureEndedAt = Stopwatch.GetTimestamp();
-            _lastSampleAt = now;
-            long nextEligibleAt = _lastSampleAt + BatchIntervalTicks;
-            _information.Information(
-                $"LNM admission timing batch={_collected}/{BatchCount} " +
-                $"frame={hostFrameIndex} advanceCalls={_advanceCount} " +
-                $"captureMs={ToMilliseconds(captureEndedAt - captureStartedAt):F1} " +
-                $"elapsedAtEndMs={ToMilliseconds(captureEndedAt - _readyStartedAt):F1} " +
-                $"nextSampleEligibleMs={ToMilliseconds(nextEligibleAt - _readyStartedAt):F1} " +
-                $"remainingDeadlineMs={ToMilliseconds(DecisionDeadlineTicks - (captureEndedAt - _readyStartedAt)):F1}.");
+                $"remainingDeadlineMs={ToMilliseconds(RoundDeadlineTicks - elapsed):F1}.");
         }
 
-        if (_collected == BatchCount && _missed == 0)
-        {
-            Evaluate();
-            _pools.GrantAdmission();
-            _information.Information(
-                $"LNM admission decision=PASS batches={_collected}/{BatchCount} " +
-                $"frame={hostFrameIndex} advanceCalls={_advanceCount} " +
-                $"elapsedMs={ToMilliseconds(Stopwatch.GetTimestamp() - _readyStartedAt):F1} " +
-                "all pools verified; GUID layout is now ready for modding.");
-            _admitted = true;
-            return true;
-        }
-
-        if (elapsed >= DecisionDeadlineTicks)
-        {
-            _information.Information(
-                $"LNM admission decision=FAIL completeBatches={_collected - _missed}/{BatchCount} " +
-                $"failedBatches={_missed} elapsedMs={ToMilliseconds(elapsed):F1} " +
-                $"frame={hostFrameIndex} advanceCalls={_advanceCount}; " +
-                "required observations were not all certified.");
-            throw new InvalidOperationException(
-                $"LNM memory layout admission is incomplete: " +
-                $"valid batches={_collected}/{BatchCount}, failures={_missed}. " +
-                "The layout is not certified for this runtime session.");
-        }
-
-        return false;
+        Evaluate();
+        _pools.GrantAdmission();
+        _information.Information(
+            $"LNM admission decision=PASS rounds={_collected}/{BatchCount} " +
+            $"frame={hostFrameIndex} advanceCalls={_advanceCount} " +
+            $"elapsedMs={ToMilliseconds(Stopwatch.GetTimestamp() - _readyStartedAt):F1} " +
+            "all pools verified; GUID layout is now ready for modding.");
+        _admitted = true;
+        _notifications.Notify(
+            "LocalNativeMemories",
+            "Memory compatibility verified. LocalNativeMemories is ready.",
+            RuntimeUserNotificationColor.Green);
+        return true;
     }
 
-    private void CaptureBatch()
+    private bool CaptureBatch()
     {
         int batch = _collected + 1;
         PoolAdmissionEvidence[] current = new PoolAdmissionEvidence[PoolOrder.Length];
@@ -157,13 +137,14 @@ internal sealed class PoolAdmission
             bool directValid = sample.Direct.IsConsistent;
             bool enumeratedValid = enumerated >= 0 && enumerated <= capacity;
             bool guidValid = enumerated == 0 || sample.GuidVerified;
-            bool valid = directValid && enumeratedValid && guidValid;
+            bool valid = difference <= MaximumCountGap &&
+                directValid && enumeratedValid && guidValid;
             _information.Information(
                 $"LNM admission batch={batch}/{BatchCount} pool={kind} " +
                 $"result={(valid ? "PASS" : "FAIL")} probeMs={probeMs:F1} " +
                 $"capacity={capacity} directActive={active} " +
                 $"enumerated={enumerated} gap={difference} " +
-                $"countsEqual={(difference == 0)} " +
+                $"countsEqual={(difference == 0)} maximumCountGap={MaximumCountGap} " +
                 $"directValid={directValid} enumeratedInRange={enumeratedValid} " +
                 $"guidVerified={sample.GuidVerified} guidRequired={enumerated != 0} " +
                 $"guidValid={guidValid}; {probeDetails}.");
@@ -182,27 +163,16 @@ internal sealed class PoolAdmission
                 _samples[_collected, kindIndex] = current[kindIndex];
             }
         }
-        else
-        {
-            ++_missed;
-        }
         _information.Information(
             $"LNM admission batch={batch}/{BatchCount} " +
-            $"result={(complete ? "PASS" : "FAIL")} " +
-            $"failedBatches={_missed}; only complete batches are eligible for certification.");
-        ++_collected;
+            $"result={(complete ? "PASS" : "FAIL")}; " +
+            "only complete batches are eligible for certification.");
+        return complete;
     }
 
     private void Evaluate()
     {
         string? firstFailure = null;
-        bool lateSampling = false;
-        for (int index = 1; index < BatchCount; ++index)
-        {
-            long interval = _sampleStartedAt[index] - _sampleStartedAt[index - 1];
-            lateSampling |= interval > BatchIntervalTicks * 2L;
-        }
-
         for (int kindIndex = 0; kindIndex < PoolOrder.Length; ++kindIndex)
         {
             LocalPoolKinds kind = PoolOrder[kindIndex];
@@ -227,8 +197,7 @@ internal sealed class PoolAdmission
                 totalGap += gap;
                 hasGuidEvidence |= sample.GuidVerified;
 
-                int tolerance = (int)Math.Max(2L,
-                    Math.Min(8L, (maximumInBatch + 49L) / 50L));
+                int tolerance = MaximumCountGap;
                 bool directValid = sample.Direct.IsConsistent;
                 bool enumeratedValid = enumeratedCount >= 0 &&
                     enumeratedCount <= sample.Direct.Capacity;
@@ -275,8 +244,6 @@ internal sealed class PoolAdmission
                 $"batchAgreementPass={allBatchesPass} maxGap={maximumGap} " +
                 $"firstFailedBatch={firstFailedBatch} " +
                 $"guidEvidence={hasGuidEvidence} guidEvidencePass={guidEvidencePass} " +
-                $"lateSampling={lateSampling} " +
-                $"meanFallback={(lateSampling ? "diagnostic-only" : "not-needed")} " +
                 $"meanGap={meanGap:F2} meanDirectChange={meanDirectMovement:F2} " +
                 $"meanEnumeratedChange={meanEnumeratedMovement:F2}.");
             if (!passed && firstFailure is null)

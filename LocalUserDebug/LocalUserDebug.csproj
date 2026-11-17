@@ -5,16 +5,16 @@
     <Nullable>enable</Nullable>
     <Platforms>x64</Platforms>
     <AssemblyTitle>In-game Logging tool</AssemblyTitle>
-    <AssemblyVersion>15.10.2026.0</AssemblyVersion>
-    <FileVersion>15.10.2026.0</FileVersion>
     <Authors>Nozomu-san</Authors>
+    <AssemblyVersion>17.11.2026.0</AssemblyVersion>
+    <FileVersion>17.11.2026.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="Alloc8orStandardNatives">
+      <HintPath>..\Alloc8orStandardNatives\bin\x64\Release\net11.0\Alloc8orStandardNatives.dll</HintPath>
+    </Reference>
     <Reference Include="CommunityScriptHookVDotNetCore">
       <HintPath>..\CommunityScriptHookVDotNetCore\bin\x64\Release\net11.0\CommunityScriptHookVDotNetCore.dll</HintPath>
-    </Reference>
-    <Reference Include="StandardGameOperations">
-      <HintPath>..\StandardGameOperations\bin\x64\Release\net11.0\StandardGameOperations.dll</HintPath>
     </Reference>
   </ItemGroup>
 </Project>

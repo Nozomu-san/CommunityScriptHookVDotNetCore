@@ -110,6 +110,7 @@ internal sealed class RuntimeSession : IDisposable
             files.Log,
             _diagnostics);
         _packages.AttachExtensionReloadController(_extensions);
+        _packages.SetExtensionPendingProbe(_extensions.HasPendingReferencedExtension);
 
         _services.RegisterRuntimeOnly<IRawNativeTransport>(_native);
         _services.Register<IManualNativeInvoker>(_native);
@@ -198,25 +199,21 @@ internal sealed class RuntimeSession : IDisposable
                 _request.PerformanceFrequency);
 
             _extensions.AdvanceInitialization();
-            if (!_rootInitializationCommitted &&
-                !_extensions.AdvanceAdmissionFrame(extensionFrame))
-            {
-                return;
-            }
+            _ = _extensions.AdvanceAdmissionFrame(extensionFrame);
 
             if (!_rootInitializationCommitted)
             {
-                _packages.SetUnavailableRuntimeAssemblies(
-                    _extensions.UnavailableAssemblyNames);
-                _ = _extensions.DrainNewUnavailableAssemblyNames();
                 _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);
                 _packages.BeginInitialActivation();
                 _rootInitializationCommitted = true;
             }
 
+            _packages.SetUnavailableRuntimeAssemblies(
+                _extensions.UnavailableAssemblyNames);
             _packages.AdvanceInitialActivation(frame.FrameIndex);
             if (!_packages.InitialActivationCompleted)
             {
+                _extensions.AdvanceHostFrame(extensionFrame);
                 return;
             }
 
@@ -227,7 +224,6 @@ internal sealed class RuntimeSession : IDisposable
                 return;
             }
 
-            _extensions.AdvanceAdmissionFrame(extensionFrame);
             _packages.AdvanceTransitionOperations(frame.FrameIndex);
             if (!_packages.IsLifecycleDispatchPaused)
             {

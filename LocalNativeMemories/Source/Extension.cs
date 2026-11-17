@@ -62,7 +62,10 @@ internal sealed class LocalNativeMemoriesExtension :
         _pools = pools;
         IRuntimeInformationSink information =
             context.Services.GetRequired<IRuntimeInformationSink>();
-        _admission = new PoolAdmission(pools, information);
+        _admission = new PoolAdmission(
+            pools,
+            information,
+            context.Services.GetRequired<IRuntimeDiagnosticSink>());
         return Task.CompletedTask;
     }
 

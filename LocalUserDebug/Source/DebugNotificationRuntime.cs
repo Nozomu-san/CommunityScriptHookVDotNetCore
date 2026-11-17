@@ -1,12 +1,11 @@
 using CommunityScriptHookVDotNetCore.Source;
-using StandardGameOperations.Source;
 
 namespace LocalUserDebug.Source;
 
 internal sealed class DebugNotificationRuntime : IDisposable
 {
-    private readonly INotificationOperations _notifications;
     private readonly IRuntimeDiagnosticReader _diagnostics;
+    private readonly INotificationOperations _notifications;
     private RuntimeDiagnosticMessage? _pendingMessage;
     private readonly IRuntimeDiagnosticEvents? _events;
     private int _signalRevision = 1;
@@ -46,7 +45,17 @@ internal sealed class DebugNotificationRuntime : IDisposable
                 return;
             }
             int revision = Volatile.Read(ref _signalRevision);
-            if (!_diagnostics.TryRead(out _pendingMessage))
+            while (_pendingMessage is null &&
+                   _diagnostics.TryRead(out RuntimeDiagnosticMessage? candidate))
+            {
+                if (candidate.DisplayColor is not null ||
+                    candidate.Severity is RuntimeDiagnosticSeverity.Warning or
+                        RuntimeDiagnosticSeverity.Error)
+                {
+                    _pendingMessage = candidate;
+                }
+            }
+            if (_pendingMessage is null)
             {
                 _seenRevision = revision;
                 return;
@@ -54,10 +63,18 @@ internal sealed class DebugNotificationRuntime : IDisposable
         }
 
         RuntimeDiagnosticMessage message = _pendingMessage;
-        GameNotificationColor color = message.Severity switch
+        GameNotificationColor color = message.DisplayColor switch
         {
-            RuntimeDiagnosticSeverity.Error => GameNotificationColor.Red,
-            _ => GameNotificationColor.Yellow
+            RuntimeUserNotificationColor.Green => GameNotificationColor.Green,
+            RuntimeUserNotificationColor.Blue => GameNotificationColor.Blue,
+            RuntimeUserNotificationColor.Purple => GameNotificationColor.Purple,
+            RuntimeUserNotificationColor.Yellow => GameNotificationColor.Yellow,
+            RuntimeUserNotificationColor.Red => GameNotificationColor.Red,
+            RuntimeUserNotificationColor.Orange => GameNotificationColor.Orange,
+            RuntimeUserNotificationColor.White => GameNotificationColor.White,
+            _ => message.Severity is RuntimeDiagnosticSeverity.Error
+                ? GameNotificationColor.Red
+                : GameNotificationColor.Yellow
         };
 
         int handle = _notifications.Post(
@@ -65,7 +82,7 @@ internal sealed class DebugNotificationRuntime : IDisposable
             color,
             blink: message.Severity is RuntimeDiagnosticSeverity.Error,
             showInBrief: true,
-            forced: true);
+            forced: false);
 
         if (handle >= 0)
         {

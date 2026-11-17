@@ -5,7 +5,20 @@ namespace CommunityScriptHookVDotNetCore.Source;
 public enum RuntimeDiagnosticSeverity
 {
     Warning,
-    Error
+    Error,
+    Information,
+    Manual
+}
+
+public enum RuntimeUserNotificationColor
+{
+    Green,
+    Blue,
+    Purple,
+    Yellow,
+    Red,
+    Orange,
+    White
 }
 
 public enum RuntimeDiagnosticImpact
@@ -23,7 +36,10 @@ public sealed record RuntimeDiagnosticMessage(
     string Message,
     string? Origin,
     RuntimeDiagnosticImpact Impact,
-    string? Summary);
+    string? Summary)
+{
+    public RuntimeUserNotificationColor? DisplayColor { get; init; }
+}
 
 public interface IRuntimeDiagnosticReader
 {
@@ -43,6 +59,14 @@ public interface IRuntimeInformationSink
 
 public interface IRuntimeDiagnosticSink
 {
+    void Information(string source, string message, string? origin = null) { }
+
+    void Notify(
+        string source,
+        string message,
+        RuntimeUserNotificationColor color,
+        string? origin = null) { }
+
     void Warning(string source, string message, string? origin = null);
 
     void Error(
@@ -73,6 +97,29 @@ internal sealed class RuntimeDiagnosticHub :
     private ulong _sequence;
     private bool _epochActive = true;
     private bool _disposed;
+
+    public void Information(string source, string message, string? origin = null) =>
+        Publish(
+            RuntimeDiagnosticSeverity.Information,
+            source,
+            message,
+            origin,
+            RuntimeDiagnosticImpact.None,
+            null);
+
+    public void Notify(
+        string source,
+        string message,
+        RuntimeUserNotificationColor color,
+        string? origin = null) =>
+        Publish(
+            RuntimeDiagnosticSeverity.Manual,
+            source,
+            message,
+            origin,
+            RuntimeDiagnosticImpact.None,
+            null,
+            color);
 
     public void Warning(string source, string message, string? origin = null) =>
         Publish(
@@ -184,13 +231,15 @@ internal sealed class RuntimeDiagnosticHub :
         string message,
         string? origin,
         RuntimeDiagnosticImpact impact,
-        string? summary)
+        string? summary,
+        RuntimeUserNotificationColor? displayColor = null)
     {
         if (string.IsNullOrWhiteSpace(message))
         {
             return;
         }
 
+        bool deliver;
         lock (_gate)
         {
             if (_disposed)
@@ -209,14 +258,21 @@ internal sealed class RuntimeDiagnosticHub :
                 message.Trim(),
                 string.IsNullOrWhiteSpace(origin) ? null : origin.Trim(),
                 impact,
-                string.IsNullOrWhiteSpace(summary) ? null : summary.Trim()));
+                string.IsNullOrWhiteSpace(summary) ? null : summary.Trim())
+            {
+                DisplayColor = displayColor
+            });
 
-            if (!_epochActive)
+            deliver = !_epochActive ||
+                severity is RuntimeDiagnosticSeverity.Manual or
+                    RuntimeDiagnosticSeverity.Warning or
+                    RuntimeDiagnosticSeverity.Error;
+            if (deliver)
             {
                 _readableCount = _journal.Count;
             }
         }
-        if (!_epochActive)
+        if (deliver)
         {
             NotifyReaders();
         }

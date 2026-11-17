@@ -52,11 +52,19 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     private StagedReloadImage? _initialStaged;
     private Queue<StagedPackageImage>? _initialPrepareQueue;
     private Queue<string>? _initialStartQueue;
-    private ScriptPackage? _initialStartingPackage;
+    private static readonly int MaximumConcurrentInitialStarts =
+        Math.Clamp(Environment.ProcessorCount, 2, 8);
+    private readonly Dictionary<string, ScriptPackage> _initialStartingPackages =
+        [with(StringComparer.OrdinalIgnoreCase)];
+    private Func<IReadOnlyList<string>, bool>? _extensionPendingProbe;
     private bool _initialActivationStarted;
     private bool _initialActivationCompleted;
     private bool _lifecycleDispatchPaused;
     private bool _shutdown;
+
+    internal void SetExtensionPendingProbe(
+        Func<IReadOnlyList<string>, bool> probe) =>
+        _extensionPendingProbe = probe ?? throw new ArgumentNullException(nameof(probe));
 
     internal bool InitialActivationStarted => _initialActivationStarted;
     internal bool InitialActivationCompleted => _initialActivationCompleted;
@@ -249,7 +257,9 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             return;
         }
 
-        if (_initialPrepareQueue.Count != 0)
+        long deadline = Stopwatch.GetTimestamp() +
+            Math.Max(1L, Stopwatch.Frequency / 500L);
+        while (_initialPrepareQueue.Count != 0)
         {
             StagedPackageImage image = _initialPrepareQueue.Dequeue();
             List<StagedPackageImage> dependencies = [];
@@ -292,7 +302,10 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             {
                 AddPreparedPackage(package);
             }
-            return;
+            if (Stopwatch.GetTimestamp() >= deadline)
+            {
+                return;
+            }
         }
 
         _initialPrepareQueue = null;
@@ -314,26 +327,26 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             return;
         }
 
-        if (_initialStartingPackage is not null)
+        foreach (ScriptPackage starting in _initialStartingPackages.Values.ToArray())
         {
-            PackageLifecycleProgress progress =
-                _initialStartingPackage.AdvanceStartInstances();
+            PackageLifecycleProgress progress = starting.AdvanceStartInstances();
             PropagateClassFaults();
             if (progress is PackageLifecycleProgress.Pending)
             {
-                return;
+                continue;
             }
-
+            _initialStartingPackages.Remove(starting.Name);
             if (progress is PackageLifecycleProgress.Failed)
             {
                 _log.Error(
-                    $"Package '{_initialStartingPackage.Name}' has no active " +
+                    $"Package '{starting.Name}' has no active " +
                     "Script4 class; its RAM generation is retained for S4R restart.");
             }
-            _initialStartingPackage = null;
         }
 
-        while (_initialStartQueue.Count != 0)
+        int candidates = _initialStartQueue.Count;
+        while (candidates-- > 0 &&
+               _initialStartingPackages.Count < MaximumConcurrentInitialStarts)
         {
             string name = _initialStartQueue.Dequeue();
             ScriptPackage? package = FindActivePackage(name);
@@ -341,7 +354,11 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             {
                 continue;
             }
-
+            if (MustWaitForPackageDependencies(package))
+            {
+                _initialStartQueue.Enqueue(name);
+                continue;
+            }
             string? admissionFailure = ValidateLifecycleAdmission(package);
             if (admissionFailure is not null)
             {
@@ -356,15 +373,29 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                     summary: $"Package '{name}' was rejected before initial lifecycle activation.");
                 continue;
             }
-
             package.BeginStartInstances(
                 ScriptStartReason.InitialActivation,
                 _lifecycleEpoch);
-            _initialStartingPackage = package;
-            return;
+            _initialStartingPackages.Add(name, package);
         }
 
-        CompleteInitialActivation();
+        if (_initialStartQueue.Count == 0 && _initialStartingPackages.Count == 0)
+        {
+            CompleteInitialActivation();
+        }
+    }
+
+    private bool MustWaitForPackageDependencies(ScriptPackage package)
+    {
+        PackageDescriptor? descriptor = _catalog.FirstOrDefault(value =>
+            value.Name.Equals(package.Name, StringComparison.OrdinalIgnoreCase));
+        if (descriptor is null)
+        {
+            return false;
+        }
+        return descriptor.DependencyPackageNames.Any(
+            _initialStartingPackages.ContainsKey) ||
+            _extensionPendingProbe?.Invoke(descriptor.ReferencedAssemblyNames) == true;
     }
 
     private void CompleteInitialActivation()
@@ -383,7 +414,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
     {
         _initialActivationState = InitialActivationState.Failed;
         _initialActivationLifetime?.Cancel();
-        _initialStartingPackage = null;
+        _initialStartingPackages.Clear();
         _initialResolveTask = null;
         _initialStaged = null;
         _initialPrepareQueue = null;
@@ -441,9 +472,10 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                 return $"Package '{package.Name}' requires missing assembly '{requiredName}'.";
             }
             if (required.Kind == ScriptPackageKind.Executable &&
-                FindActivePackage(requiredName)?.EntryAssembly is null)
+                FindActivePackage(requiredName) is not
+                    { EntryAssembly: not null, ActiveScriptCount: > 0 })
             {
-                return $"Package '{package.Name}' requires unavailable executable assembly '{requiredName}'.";
+                return $"Package '{package.Name}' requires inactive executable assembly '{requiredName}'.";
             }
         }
         try
@@ -542,7 +574,13 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         _activeOperation?.Advance(this);
         if (_activeOperation?.Snapshot.IsTerminal == true)
         {
+            LifecycleTransitionOperation completed = _activeOperation;
             _activeOperation = null;
+            if (completed.IsScript4ReloadSelfUnload)
+            {
+                _operations.Remove(completed);
+                completed.Dispose();
+            }
         }
     }
 
@@ -639,7 +677,7 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
         _shutdown = true;
         _lifecycleDispatchPaused = true;
         _initialActivationLifetime?.Cancel();
-        _initialStartingPackage = null;
+        _initialStartingPackages.Clear();
         _initialCaptureTask = null;
         _initialResolveTask = null;
         _initialStaged = null;

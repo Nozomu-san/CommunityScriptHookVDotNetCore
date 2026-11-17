@@ -35,8 +35,7 @@ internal readonly record struct RuntimeExtensionReloadSnapshot(
 
 internal interface IRuntimeExtensionReloadController
 {
-    RuntimeExtensionReloadPlan CaptureReloadPlan();
-    RuntimeExtensionReloadPlan CaptureRestartPlan();
+    RuntimeExtensionReloadPlan CaptureReloadPlan(bool restartActive);
     void BeginReload(RuntimeExtensionReloadPlan plan);
     void AdvanceReload();
     RuntimeExtensionReloadSnapshot ReloadSnapshot { get; }
@@ -107,6 +106,41 @@ internal sealed class RuntimeExtensionManager(
 
     internal bool InitializationCompleted => _initializationCompleted;
 
+    internal bool HasPendingReferencedExtension(
+        IReadOnlyList<string> references)
+    {
+        if (references.Count == 0 || _committedSnapshot is null)
+        {
+            return false;
+        }
+        Queue<string> pending = new(references);
+        HashSet<string> visited = [with(StringComparer.OrdinalIgnoreCase)];
+        while (pending.TryDequeue(out string? name))
+        {
+            if (!visited.Add(name))
+            {
+                continue;
+            }
+            RuntimeExtensionDescriptor? extension = _committedDescriptors
+                .FirstOrDefault(descriptor => descriptor.AssemblyName.Equals(
+                    name, StringComparison.OrdinalIgnoreCase));
+            if (extension is not null &&
+                !_unavailableAssemblies.Contains(extension.AssemblyName) &&
+                !_admittedExtensionIds.Contains(extension.Id))
+            {
+                return true;
+            }
+            if (_committedSnapshot.TryGet(name, out RootAssemblyImage? image))
+            {
+                foreach (string reference in ReadReferencedAssemblyNames(image))
+                {
+                    pending.Enqueue(reference);
+                }
+            }
+        }
+        return false;
+    }
+
     RuntimeExtensionReloadSnapshot IRuntimeExtensionReloadController.ReloadSnapshot =>
         new(
             _reloadState,
@@ -143,7 +177,7 @@ internal sealed class RuntimeExtensionManager(
             $"{MaximumConcurrentInitializations} concurrent lifecycle operation(s).");
     }
 
-    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureReloadPlan()
+    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureReloadPlan(bool restartActive)
     {
         EnsureRuntimeThread();
         if (!_initializationCompleted || _reloadState is not RuntimeExtensionReloadState.Idle and
@@ -168,34 +202,16 @@ internal sealed class RuntimeExtensionManager(
         IReadOnlyList<string> binaryTargets = ComputeReloadTargets(
             _committedSnapshot, snapshot, previous, discovered);
         HashSet<string> targets = [with(binaryTargets, StringComparer.OrdinalIgnoreCase)];
-        targets.UnionWith(_active.Select(active => active.Descriptor.Id));
+        if (restartActive)
+        {
+            targets.UnionWith(_active.Select(active => active.Descriptor.Id));
+        }
         return new(
             snapshot,
             discovered,
             previous,
             [.. targets.OrderBy(id => id, StringComparer.OrdinalIgnoreCase)],
             binaryTargets);
-    }
-
-    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureRestartPlan()
-    {
-        EnsureRuntimeThread();
-        if (!_initializationCompleted || _committedSnapshot is null ||
-            _reloadState is RuntimeExtensionReloadState.Retiring or
-                RuntimeExtensionReloadState.Initializing ||
-            _initializing.Count != 0 || _pendingInitialization.Count != 0)
-        {
-            throw new InvalidOperationException(
-                "Runtime extensions cannot restart while another lifecycle operation is active.");
-        }
-        return new(
-            _committedSnapshot,
-            _committedDescriptors,
-            _committedDescriptors,
-            [.. _active.Select(active => active.Descriptor.Id)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)],
-            []);
     }
 
     private IReadOnlyList<string> ComputeReloadTargets(
@@ -1093,7 +1109,7 @@ internal sealed class RuntimeExtensionManager(
     public void AdvanceHostFrame(RuntimeExtensionFrameContext context)
     {
         ObserveRetirements();
-        if (!_initializationCompleted)
+        if (!_initializationPrepared)
         {
             return;
         }
@@ -1102,8 +1118,7 @@ internal sealed class RuntimeExtensionManager(
         foreach (ActiveRuntimeExtension active in frame)
         {
             if (active.Unavailable ||
-                (active.Instance is IRuntimeExtensionAdmissionProbe &&
-                 !_admittedExtensionIds.Contains(active.Descriptor.Id)))
+                !_admittedExtensionIds.Contains(active.Descriptor.Id))
             {
                 continue;
             }
@@ -1832,24 +1847,22 @@ internal static class RuntimeExtensionPlacement
         string destination,
         RuntimeLog log)
     {
-        bool sourceWins =
-            !File.Exists(destination) ||
-            CompareCandidates(source, destination) > 0;
+        if (File.Exists(destination))
+        {
+            string comparison = CompareCandidates(source, destination) > 0
+                ? "newer"
+                : "not newer";
+            log.Warning(
+                $"Root extension '{Path.GetFileName(source)}' was preserved " +
+                $"because the extensions-directory copy already exists; " +
+                $"the root source is {comparison}. No DLL was overwritten.");
+            return;
+        }
 
-        if (sourceWins)
-        {
-            File.Move(source, destination, overwrite: true);
-            log.Information(
-                $"Root extension '{Path.GetFileName(source)}' was moved to " +
-                $"'{Path.GetDirectoryName(destination)}'.");
-        }
-        else
-        {
-            File.Delete(source);
-            log.Information(
-                $"Root extension '{Path.GetFileName(source)}' was discarded " +
-                "because the extensions-directory copy is newer or equivalent.");
-        }
+        File.Move(source, destination);
+        log.Information(
+            $"Root extension '{Path.GetFileName(source)}' was moved to " +
+            $"'{Path.GetDirectoryName(destination)}'.");
 
         foreach (string extension in SidecarExtensions)
         {
@@ -1870,15 +1883,10 @@ internal static class RuntimeExtensionPlacement
 
         string destination =
             Path.ChangeExtension(destinationAssembly, extension);
-        if (!File.Exists(destination) ||
-            File.GetLastWriteTimeUtc(source) >
-                File.GetLastWriteTimeUtc(destination))
+        if (!File.Exists(destination))
         {
-            File.Move(source, destination, overwrite: true);
-            return;
+            File.Move(source, destination);
         }
-
-        File.Delete(source);
     }
 
     private static int CompareCandidates(
@@ -2022,78 +2030,116 @@ internal sealed class RootAssemblySnapshot
             [with(StringComparer.OrdinalIgnoreCase)];
         HashSet<string> blockedNames =
             [with(StringComparer.OrdinalIgnoreCase)];
-        foreach (string path in Directory
-                     .EnumerateFiles(
-                         rootDirectory,
-                         "*.dll",
-                         SearchOption.TopDirectoryOnly)
-                     .OrderBy(
-                         value => value,
-                         StringComparer.OrdinalIgnoreCase))
+        bool completed = false;
+        try
         {
-            byte[]? inspectedBytes = null;
-            try
+            foreach (string path in Directory
+                         .EnumerateFiles(
+                             rootDirectory,
+                             "*.dll",
+                             SearchOption.TopDirectoryOnly)
+                         .OrderBy(
+                             value => value,
+                             StringComparer.OrdinalIgnoreCase))
             {
-                string fullPath = Path.GetFullPath(path);
-                inspectedBytes = ReadStableImage(fullPath);
-                SecurityAdmission.CheckCapturedImage(fullPath, inspectedBytes, log);
-                string assemblyName = ReadAssemblyName(inspectedBytes);
-                if (assemblyName.Equals(
-                        excludedAssemblyName,
-                        StringComparison.OrdinalIgnoreCase))
+                byte[]? inspectedBytes = null;
+                byte[]? acceptedBytes = null;
+                byte[]? symbols = null;
+                bool retained = false;
+                try
                 {
-                    continue;
-                }
+                    string fullPath = Path.GetFullPath(path);
+                    inspectedBytes = ReadStableImage(fullPath);
+                    SecurityAdmission.CheckCapturedImage(fullPath, inspectedBytes, log);
+                    string assemblyName = ReadAssemblyName(inspectedBytes);
+                    if (assemblyName.Equals(
+                            excludedAssemblyName,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
 
-                string pdbPath = Path.ChangeExtension(fullPath, ".pdb");
-                byte[]? symbols = File.Exists(pdbPath)
-                    ? TryReadStableImage(pdbPath)
-                    : null;
-                if (!images.TryAdd(
-                        assemblyName,
-                        new(
-                            fullPath,
+                    acceptedBytes = [.. inspectedBytes];
+                    string pdbPath = Path.ChangeExtension(fullPath, ".pdb");
+                    symbols = File.Exists(pdbPath)
+                        ? TryReadStableImage(pdbPath)
+                        : null;
+                    if (!images.TryAdd(
                             assemblyName,
-                            inspectedBytes,
-                            symbols)))
-                {
-                    throw new InvalidOperationException(
-                        $"More than one root assembly has simple name '{assemblyName}'.");
+                            new(
+                                fullPath,
+                                assemblyName,
+                                acceptedBytes,
+                                symbols)))
+                    {
+                        throw new InvalidOperationException(
+                            $"More than one root assembly has simple name '{assemblyName}'.");
+                    }
+                    retained = true;
                 }
-            }
-            catch (BadImageFormatException)
-            {
-            }
-            catch (SecurityBlockedException exception)
-            {
-                RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
-                log.Error(
-                    exception.Message,
-                    source: Path.GetFileName(path),
-                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
-                    summary: "A security verdict prevented activation of this extension source.");
-            }
-            catch (IOException exception)
-            {
-                if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                catch (BadImageFormatException)
+                {
+                }
+                catch (SecurityAdmissionException exception)
                 {
                     RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                    string summary = exception switch
+                    {
+                        SecurityBlockedException =>
+                            "A security verdict prevented activation of this extension source.",
+                        SecurityValidationFailedException =>
+                            "Security validation failed; this extension source was not admitted."
+                    };
+                    log.Error(
+                        exception.Message,
+                        source: Path.GetFileName(path),
+                        impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                        summary: summary);
                 }
-                LogSourceReadFailure(path, exception, log);
-            }
-            catch (UnauthorizedAccessException exception)
-            {
-                if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                catch (IOException exception)
                 {
-                    RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                    if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                    {
+                        RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                    }
+                    LogSourceReadFailure(path, exception, log);
                 }
-                LogSourceReadFailure(path, exception, log);
+                catch (UnauthorizedAccessException exception)
+                {
+                    if (SecurityAdmission.IsAntivirusFileBlock(exception))
+                    {
+                        RecordBlockedIdentity(path, inspectedBytes, previous, blockedNames);
+                    }
+                    LogSourceReadFailure(path, exception, log);
+                }
+                finally
+                {
+                    SecurityAdmission.ClearTemporaryBuffer(inspectedBytes);
+                    if (!retained)
+                    {
+                        SecurityAdmission.ClearTemporaryBuffer(acceptedBytes);
+                        SecurityAdmission.ClearTemporaryBuffer(symbols);
+                    }
+                }
+            }
+
+            log.Information(
+                $"Committed {images.Count} root managed assembly image(s) to one immutable RAM snapshot.");
+            RootAssemblySnapshot snapshot = new(images, Array.AsReadOnly([.. blockedNames]));
+            completed = true;
+            return snapshot;
+        }
+        finally
+        {
+            if (!completed)
+            {
+                foreach (RootAssemblyImage image in images.Values)
+                {
+                    SecurityAdmission.ClearTemporaryBuffer(image.Assembly);
+                    SecurityAdmission.ClearTemporaryBuffer(image.Symbols);
+                }
             }
         }
-
-        log.Information(
-            $"Committed {images.Count} root managed assembly image(s) to one immutable RAM snapshot.");
-        return new(images, Array.AsReadOnly([.. blockedNames]));
     }
 
     private static void RecordBlockedIdentity(
@@ -2164,8 +2210,16 @@ internal sealed class RootAssemblySnapshot
             bufferSize: 64 * 1024,
             FileOptions.SequentialScan);
         byte[] image = GC.AllocateUninitializedArray<byte>(checked((int)stream.Length));
-        stream.ReadExactly(image);
-        return image;
+        try
+        {
+            stream.ReadExactly(image);
+            return image;
+        }
+        catch
+        {
+            SecurityAdmission.ClearTemporaryBuffer(image);
+            throw;
+        }
     }
 
     private static byte[]? TryReadStableImage(string path)

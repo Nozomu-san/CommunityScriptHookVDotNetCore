@@ -1,7 +1,7 @@
 using System.Text;
 using Alloc8orStandardNatives.Source;
 
-namespace StandardGameOperations.Source;
+namespace LocalUserDebug.Source;
 
 public enum GameNotificationColor
 {
@@ -300,7 +300,7 @@ internal sealed class NotificationOperations : INotificationOperations
                 showInBrief);
     }
 
-    private static List<string> SplitUtf8(string value)
+    internal static List<string> SplitUtf8(string value)
     {
         List<string> result = [];
         StringBuilder builder = new();

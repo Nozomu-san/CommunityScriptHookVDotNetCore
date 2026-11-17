@@ -59,13 +59,14 @@ internal static class PackageImageCapture
         RuntimeLog log,
         CancellationToken cancellationToken)
     {
+        Dictionary<string, PackageAssemblyImage> captured =
+            [with(StringComparer.OrdinalIgnoreCase)];
+        bool completed = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             string root = Path.GetFullPath(scriptsDirectory);
             Dictionary<string, CapturedPackageImage> packages =
-                [with(StringComparer.OrdinalIgnoreCase)];
-            Dictionary<string, PackageAssemblyImage> captured =
                 [with(StringComparer.OrdinalIgnoreCase)];
             HashSet<string> blockedNames =
                 [with(StringComparer.OrdinalIgnoreCase)];
@@ -79,20 +80,23 @@ internal static class PackageImageCapture
                     continue;
                 }
 
+                byte[]? temporaryAssembly = null;
+                byte[]? acceptedAssembly = null;
+                byte[]? symbols = null;
+                bool retained = false;
                 try
                 {
-                    byte[] assemblyBytes;
                     await using (FileStream stream = OpenReadFence(assemblyPath))
                     {
-                        assemblyBytes = await ReadAllAsync(
+                        temporaryAssembly = await ReadAllAsync(
                             stream, cancellationToken).ConfigureAwait(false);
                     }
                     SecurityAdmission.CheckCapturedImage(
-                        assemblyPath, assemblyBytes, log);
+                        assemblyPath, temporaryAssembly, log);
+                    acceptedAssembly = [.. temporaryAssembly];
 
                     string symbolsPath = Path.ChangeExtension(
                         assemblyPath, ".pdb");
-                    byte[]? symbols = null;
                     if (File.Exists(symbolsPath))
                     {
                         await using FileStream symbolStream =
@@ -102,16 +106,24 @@ internal static class PackageImageCapture
                     }
 
                     captured[packageName] = new(
-                        assemblyPath, assemblyBytes, symbols);
+                        assemblyPath, acceptedAssembly, symbols);
+                    retained = true;
                 }
-                catch (SecurityBlockedException exception)
+                catch (SecurityAdmissionException exception)
                 {
                     blockedNames.Add(packageName);
+                    string summary = exception switch
+                    {
+                        SecurityBlockedException =>
+                            "Security scanning blocked this scripts4 source.",
+                        SecurityValidationFailedException =>
+                            "Security validation failed; this scripts4 source was not admitted."
+                    };
                     log.Error(
                         exception.Message,
                         source: packageName,
                         impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
-                        summary: "Security scanning blocked this scripts4 source.");
+                        summary: summary);
                 }
                 catch (IOException exception) when (
                     SecurityAdmission.IsAntivirusFileBlock(exception))
@@ -132,6 +144,15 @@ internal static class PackageImageCapture
                         source: packageName,
                         impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
                         summary: "The operating system blocked this scripts4 source.");
+                }
+                finally
+                {
+                    SecurityAdmission.ClearTemporaryBuffer(temporaryAssembly);
+                    if (!retained)
+                    {
+                        SecurityAdmission.ClearTemporaryBuffer(acceptedAssembly);
+                        SecurityAdmission.ClearTemporaryBuffer(symbols);
+                    }
                 }
             }
 
@@ -160,10 +181,12 @@ internal static class PackageImageCapture
                 packages[packageName] = new(descriptor, [image]);
             }
 
-            return CaptureAttempt.Success(new(
+            CapturedReloadImage result = new(
                 Array.AsReadOnly(packageNames.ToArray()),
                 new ReadOnlyDictionary<string, CapturedPackageImage>(packages),
-                Array.AsReadOnly([.. blockedNames])));
+                Array.AsReadOnly([.. blockedNames]));
+            completed = true;
+            return CaptureAttempt.Success(result);
         }
         catch (OperationCanceledException)
         {
@@ -177,6 +200,17 @@ internal static class PackageImageCapture
                 ArgumentException)
         {
             return CaptureAttempt.Retry(exception.Message);
+        }
+        finally
+        {
+            if (!completed)
+            {
+                foreach (PackageAssemblyImage image in captured.Values)
+                {
+                    SecurityAdmission.ClearTemporaryBuffer(image.Assembly);
+                    SecurityAdmission.ClearTemporaryBuffer(image.Symbols);
+                }
+            }
         }
     }
 
@@ -234,9 +268,17 @@ internal static class PackageImageCapture
 
         byte[] image = GC.AllocateUninitializedArray<byte>(
             checked((int)stream.Length));
-        await stream.ReadExactlyAsync(image, cancellationToken)
-            .ConfigureAwait(false);
-        return image;
+        try
+        {
+            await stream.ReadExactlyAsync(image, cancellationToken)
+                .ConfigureAwait(false);
+            return image;
+        }
+        catch
+        {
+            SecurityAdmission.ClearTemporaryBuffer(image);
+            throw;
+        }
     }
 }
 

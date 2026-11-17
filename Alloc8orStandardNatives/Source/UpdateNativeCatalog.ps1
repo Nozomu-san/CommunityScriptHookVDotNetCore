@@ -10,11 +10,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not [string]::IsNullOrWhiteSpace($InspectName) -and
-    -not [string]::IsNullOrWhiteSpace($InspectHash)) {
-    throw 'Specify either -InspectName or -InspectHash, not both.'
-}
-
 $compilerSource = @'
 #nullable enable
 using System;
@@ -232,43 +227,6 @@ public static class CatalogCompiler
         RequireFile(legacyPath);
         RequireFile(enhancedPath);
         List<NativeRecord> records = ReadAndMerge(legacyPath, enhancedPath);
-
-        // Update decisions depend on the native descriptors stored in the
-        // Brotli catalog, not on the bytes of either generated C# source file
-        // or incidental whitespace/order changes in the JSON inputs.
-        CatalogImage? committed = null;
-        if (File.Exists(dataPath))
-        {
-            try
-            {
-                committed = ReadGeneratedCatalog(dataPath);
-            }
-            catch (InvalidDataException)
-            {
-                // Malformed/corrupt catalog cannot establish equivalence.
-                // Regenerate it from the validated JSON source records.
-            }
-        }
-
-        if (committed is not null &&
-            CatalogRecordsEqual(records, committed.Records))
-        {
-            if (!File.Exists(standardPath))
-            {
-                WriteAtomic(standardPath, RenderStandardNatives(records));
-                Console.WriteLine(
-                    $"Brotli native catalog unchanged ({records.Count} descriptors); " +
-                    "restored missing StandardNatives.cs.");
-            }
-            else
-            {
-                Console.WriteLine(
-                    $"Brotli native catalog unchanged ({records.Count} descriptors); " +
-                    "no generated files were written.");
-            }
-            PrintProofSamples(records);
-            return 0;
-        }
 
         byte[] sourceFingerprint = ComputeSourceFingerprint(
             legacyPath,
@@ -1083,24 +1041,6 @@ public static class CatalogCompiler
             ? values[index]
             : throw new InvalidDataException("Invalid string-pool index.");
 
-    private static bool CatalogRecordsEqual(
-        IReadOnlyList<NativeRecord> expected,
-        IReadOnlyList<NativeRecord> actual)
-    {
-        if (expected.Count != actual.Count)
-        {
-            return false;
-        }
-        for (int index = 0; index < expected.Count; ++index)
-        {
-            if (!RecordEquals(expected[index], actual[index]))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private static void AssertEquivalent(
         IReadOnlyList<NativeRecord> expected,
         IReadOnlyList<NativeRecord> actual)
@@ -1406,11 +1346,14 @@ public static class CatalogCompiler
         }
     }
 
-    // Called only after the Brotli catalog differs from the committed
-    // native descriptor list, or when a generated file is missing.
     private static bool WriteAtomic(string path, string content)
     {
         byte[] updated = Utf8.GetBytes(content);
+        if (File.Exists(path) &&
+            File.ReadAllBytes(path).AsSpan().SequenceEqual(updated))
+        {
+            return false;
+        }
         string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -1677,40 +1620,49 @@ public static class CatalogCompiler
 }
 '@
 
-$typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompiler'
-if ($null -eq ($typeName -as [type])) {
-    $compilerOptions = @(
-        '/langversion:preview',
-        '/nullable:enable',
-        '/optimize+',
-        '/checked+',
-        '/warnaserror+'
-    )
-
-    $arguments = @{
-        TypeDefinition = $compilerSource
-        Language = 'CSharp'
-        CompilerOptions = $compilerOptions
-        ErrorAction = 'Stop'
+try {
+    if (-not [string]::IsNullOrWhiteSpace($InspectName) -and
+        -not [string]::IsNullOrWhiteSpace($InspectHash)) {
+        throw 'Specify either -InspectName or -InspectHash, not both.'
     }
 
-    $referenceDirectory = Join-Path $PSHOME 'ref'
-    if (Test-Path -LiteralPath $referenceDirectory -PathType Container) {
-        $references = @(
-            Get-ChildItem -LiteralPath $referenceDirectory -Filter '*.dll' -File |
-                ForEach-Object { $_.FullName }
+    $typeName = 'Alloc8orStandardNatives.CatalogTool.CatalogCompiler'
+    if ($null -eq ($typeName -as [type])) {
+        $compilerOptions = @(
+            '/langversion:preview',
+            '/nullable:enable',
+            '/optimize+',
+            '/checked+',
+            '/warnaserror+'
         )
-        if ($references.Count -gt 0) {
-            $arguments.ReferencedAssemblies = $references
-        }
-    }
-    Add-Type @arguments
-}
 
-[Alloc8orStandardNatives.CatalogTool.CatalogCompiler]::Run(
-    $PSScriptRoot,
-    $InspectName,
-    $InspectHash,
-    $VerifyOnly.IsPresent
-) | Out-Null
-Pause
+        $arguments = @{
+            TypeDefinition = $compilerSource
+            Language = 'CSharp'
+            CompilerOptions = $compilerOptions
+            ErrorAction = 'Stop'
+        }
+
+        $referenceDirectory = Join-Path $PSHOME 'ref'
+        if (Test-Path -LiteralPath $referenceDirectory -PathType Container) {
+            $references = @(
+                Get-ChildItem -LiteralPath $referenceDirectory -Filter '*.dll' -File |
+                    ForEach-Object { $_.FullName }
+            )
+            if ($references.Count -gt 0) {
+                $arguments.ReferencedAssemblies = $references
+            }
+        }
+        Add-Type @arguments
+    }
+
+    [Alloc8orStandardNatives.CatalogTool.CatalogCompiler]::Run(
+        $PSScriptRoot,
+        $InspectName,
+        $InspectHash,
+        $VerifyOnly.IsPresent
+    ) | Out-Null
+}
+finally {
+    Pause
+}
