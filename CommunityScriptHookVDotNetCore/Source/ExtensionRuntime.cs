@@ -23,6 +23,10 @@ internal sealed record RuntimeExtensionReloadPlan(
     IReadOnlyList<string> TargetIds,
     IReadOnlyList<string> BinaryTargetIds);
 
+internal sealed record RootCaptureCandidate(
+    RootAssemblySnapshot Snapshot,
+    IReadOnlyList<RuntimeExtensionDescriptor> Descriptors);
+
 internal readonly record struct RuntimeExtensionReloadSnapshot(
     RuntimeExtensionReloadState State,
     int TargetCount,
@@ -35,7 +39,11 @@ internal readonly record struct RuntimeExtensionReloadSnapshot(
 
 internal interface IRuntimeExtensionReloadController
 {
-    RuntimeExtensionReloadPlan CaptureReloadPlan(bool restartActive);
+    Task<RootCaptureCandidate> CaptureReloadCandidateAsync(
+        CancellationToken cancellationToken);
+    RuntimeExtensionReloadPlan FinalizeReloadPlan(
+        RootCaptureCandidate candidate,
+        bool restartActive);
     void BeginReload(RuntimeExtensionReloadPlan plan);
     void AdvanceReload();
     RuntimeExtensionReloadSnapshot ReloadSnapshot { get; }
@@ -97,6 +105,9 @@ internal sealed class RuntimeExtensionManager(
     private RuntimeExtensionReloadPlan? _reloadPlan;
     private RuntimeExtensionReloadState _reloadState;
     private string? _reloadDiagnostic;
+    private Task<RootCaptureCandidate>? _initialCaptureTask;
+    private Task<IReadOnlyDictionary<string, string>>? _preloadTask;
+    private bool _assembliesPreloaded;
     private bool _initializationPrepared;
     private bool _initializationCompleted;
     private bool _shutdown;
@@ -105,6 +116,8 @@ internal sealed class RuntimeExtensionManager(
         _unavailableAssemblies;
 
     internal bool InitializationCompleted => _initializationCompleted;
+
+    internal bool AssembliesPreloaded => _assembliesPreloaded;
 
     internal bool HasPendingReferencedExtension(
         IReadOnlyList<string> references)
@@ -158,26 +171,14 @@ internal sealed class RuntimeExtensionManager(
                 "Runtime-extension initialization was already prepared.");
         }
 
-        RuntimeExtensionPlacement.Reconcile(
-            rootDirectory,
-            extensionsDirectory,
-            log);
-        RootAssemblySnapshot snapshot = RootAssemblySnapshot.Capture(
-            extensionsDirectory,
-            ContractAssemblyName,
-            log);
-        IReadOnlyList<RuntimeExtensionDescriptor> discovered =
-            RuntimeExtensionDiscovery.Discover(snapshot, log);
-        PrepareGeneration(snapshot, discovered, reviveOwners: false);
-
+        _initialCaptureTask = CaptureCandidateAsync(previous: null,
+            CancellationToken.None);
         _initializationPrepared = true;
-        log.Information(
-            $"Prepared {_pendingInitialization.Count} runtime extension(s) " +
-            $"from '{extensionsDirectory}' with at most " +
-            $"{MaximumConcurrentInitializations} concurrent lifecycle operation(s).");
+        log.Information("Root extension image capture was queued off the managed frame thread.");
     }
 
-    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.CaptureReloadPlan(bool restartActive)
+    Task<RootCaptureCandidate> IRuntimeExtensionReloadController.CaptureReloadCandidateAsync(
+        CancellationToken cancellationToken)
     {
         EnsureRuntimeThread();
         if (!_initializationCompleted || _reloadState is not RuntimeExtensionReloadState.Idle and
@@ -187,6 +188,14 @@ internal sealed class RuntimeExtensionManager(
                 "Runtime extensions cannot be captured while another lifecycle operation is active.");
         }
 
+        return CaptureCandidateAsync(_committedSnapshot, cancellationToken);
+    }
+
+    private Task<RootCaptureCandidate> CaptureCandidateAsync(
+        RootAssemblySnapshot? previous,
+        CancellationToken cancellationToken) => Task.Run(() =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         RuntimeExtensionPlacement.Reconcile(
             rootDirectory,
             extensionsDirectory,
@@ -195,9 +204,21 @@ internal sealed class RuntimeExtensionManager(
             extensionsDirectory,
             ContractAssemblyName,
             log,
-            _committedSnapshot);
-        IReadOnlyList<RuntimeExtensionDescriptor> discovered =
-            RuntimeExtensionDiscovery.Discover(snapshot, log);
+            previous);
+        cancellationToken.ThrowIfCancellationRequested();
+        return new RootCaptureCandidate(
+            snapshot, RuntimeExtensionDiscovery.Discover(snapshot, log));
+    }, cancellationToken);
+
+    RuntimeExtensionReloadPlan IRuntimeExtensionReloadController.FinalizeReloadPlan(
+        RootCaptureCandidate candidate,
+        bool restartActive)
+    {
+        EnsureRuntimeThread();
+        ArgumentNullException.ThrowIfNull(candidate);
+
+        RootAssemblySnapshot snapshot = candidate.Snapshot;
+        IReadOnlyList<RuntimeExtensionDescriptor> discovered = candidate.Descriptors;
         IReadOnlyList<RuntimeExtensionDescriptor> previous = _committedDescriptors;
         IReadOnlyList<string> binaryTargets = ComputeReloadTargets(
             _committedSnapshot, snapshot, previous, discovered);
@@ -337,6 +358,7 @@ internal sealed class RuntimeExtensionManager(
             {
                 active.Unavailable = true;
                 active.Authority.ForceRevoke();
+                _admittedExtensionIds.Remove(active.Descriptor.Id);
                 foreach (string capability in active.Descriptor.Provides)
                 {
                     _availableCapabilities.Remove(capability);
@@ -421,10 +443,16 @@ internal sealed class RuntimeExtensionManager(
                 binaryTargetIds: [with(
                     plan.BinaryTargetIds,
                     StringComparer.OrdinalIgnoreCase)]);
+            BeginPreload();
             _reloadState = RuntimeExtensionReloadState.Initializing;
         }
 
         if (_reloadState is not RuntimeExtensionReloadState.Initializing)
+        {
+            return;
+        }
+
+        if (!AdvancePreload())
         {
             return;
         }
@@ -560,6 +588,90 @@ internal sealed class RuntimeExtensionManager(
                 .OrderBy(value => value.Id, StringComparer.OrdinalIgnoreCase));
     }
 
+    private void BeginPreload()
+    {
+        _assembliesPreloaded = false;
+        RootAssemblyResolver resolver = _resolver
+            ?? throw new InvalidOperationException("The root assembly resolver is unavailable.");
+        RuntimeExtensionDescriptor[] targets = [.. _pendingInitialization];
+        _preloadTask = Task.Run<IReadOnlyDictionary<string, string>>(() =>
+        {
+            Dictionary<string, string> faults =
+                [with(StringComparer.OrdinalIgnoreCase)];
+            Dictionary<string, Assembly> loaded =
+                [with(StringComparer.OrdinalIgnoreCase)];
+
+            foreach (RuntimeExtensionDescriptor descriptor in targets)
+            {
+                try
+                {
+                    loaded[descriptor.Id] = resolver.LoadRootAssembly(
+                        descriptor.AssemblyName);
+                }
+                catch (Exception error)
+                {
+                    faults[descriptor.Id] = error.ToString();
+                }
+            }
+
+            foreach (RuntimeExtensionDescriptor descriptor in targets)
+            {
+                if (!loaded.TryGetValue(descriptor.Id, out Assembly? assembly))
+                    continue;
+                try
+                {
+                    _ = assembly.GetTypes();
+                    _ = assembly.GetType(descriptor.EntryType, throwOnError: true);
+                }
+                catch (Exception error)
+                {
+                    faults[descriptor.Id] = error.ToString();
+                }
+            }
+            return faults;
+        });
+    }
+
+    private bool AdvancePreload()
+    {
+        if (_assembliesPreloaded)
+            return true;
+        Task<IReadOnlyDictionary<string, string>>? preload = _preloadTask;
+        if (preload is null || !preload.IsCompleted)
+            return false;
+
+        IReadOnlyDictionary<string, string> failures;
+        try
+        {
+            failures = preload.GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            failures = _pendingInitialization.ToDictionary(
+                value => value.Id,
+                _ => exception.ToString(),
+                StringComparer.OrdinalIgnoreCase);
+        }
+        _preloadTask = null;
+
+        foreach (RuntimeExtensionDescriptor descriptor in _pendingInitialization)
+        {
+            if (!failures.TryGetValue(descriptor.Id, out string? error))
+                continue;
+            MarkUnavailable(descriptor);
+            log.Error(
+                $"Runtime extension '{descriptor.Id}' failed the RAM preload barrier: {error}",
+                source: descriptor.Id,
+                origin: descriptor.EntryType,
+                impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                summary: $"Extension '{descriptor.Id}' was quarantined before initialization.");
+        }
+        _pendingInitialization.RemoveAll(value => failures.ContainsKey(value.Id));
+        _assembliesPreloaded = true;
+        log.Information("The root assembly preload barrier is complete.");
+        return true;
+    }
+
     private void EnsureRuntimeThread()
     {
         if (Environment.CurrentManagedThreadId != _runtimeThreadId)
@@ -581,6 +693,32 @@ internal sealed class RuntimeExtensionManager(
             throw new InvalidOperationException(
                 "Runtime-extension initialization has not been prepared.");
         }
+
+        if (_initialCaptureTask is { } capture)
+        {
+            if (!capture.IsCompleted)
+                return;
+            _initialCaptureTask = null;
+            try
+            {
+                RootCaptureCandidate candidate = capture.GetAwaiter().GetResult();
+                PrepareGeneration(candidate.Snapshot, candidate.Descriptors,
+                    reviveOwners: false);
+                BeginPreload();
+            }
+            catch (Exception exception)
+            {
+                log.Error($"Initial root RAM capture failed: {exception}",
+                    impact: RuntimeDiagnosticImpact.LifecycleUnavailable,
+                    summary: "Root extensions were unavailable at startup.");
+                _initializationCompleted = true;
+                _assembliesPreloaded = true;
+                return;
+            }
+        }
+
+        if (!AdvancePreload())
+            return;
 
         ObserveInitializing();
         StartReadyInitializations();
@@ -1203,6 +1341,18 @@ internal sealed class RuntimeExtensionManager(
             }
         }
 
+        if (_initialCaptureTask is { } initialCapture)
+        {
+            try { await initialCapture.ConfigureAwait(false); }
+            catch (Exception) { }
+            _initialCaptureTask = null;
+        }
+        if (_preloadTask is { } preload)
+        {
+            try { await preload.ConfigureAwait(false); }
+            catch (Exception) { }
+            _preloadTask = null;
+        }
         await DrainRetirementsAsync().ConfigureAwait(false);
     }
 
@@ -1531,10 +1681,12 @@ internal sealed class ManagedLifecycleOperation : IDisposable
     private readonly ManagedLifecycleAuthority _authority = new();
     private readonly Task _operation;
     private int _disposed;
+    private int _executionClockStarted;
 
     private ManagedLifecycleOperation(
-        Func<CancellationToken, Task> operationFactory,
+        Func<CancellationToken, Action, Task> operationFactory,
         TimeSpan timeout,
+        bool startClockWithExecution,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operationFactory);
@@ -1548,10 +1700,6 @@ internal sealed class ManagedLifecycleOperation : IDisposable
 
         _externalCancellation = cancellationToken;
         _timeout = new();
-        if (timeout != Timeout.InfiniteTimeSpan)
-        {
-            _timeout.CancelAfter(timeout);
-        }
         _combined = cancellationToken.CanBeCanceled
             ? CancellationTokenSource.CreateLinkedTokenSource(
                 _timeout.Token,
@@ -1569,7 +1717,16 @@ internal sealed class ManagedLifecycleOperation : IDisposable
                 using IDisposable scope =
                     ManagedLifecycleAuthorityContext.Enter(_authority);
                 operationToken.ThrowIfCancellationRequested();
-                await operationFactory(operationToken).ConfigureAwait(false);
+                void StartExecutionClock()
+                {
+                    if (timeout != Timeout.InfiniteTimeSpan &&
+                        Interlocked.Exchange(ref _executionClockStarted, 1) == 0)
+                        _timeout.CancelAfter(timeout);
+                }
+                if (startClockWithExecution)
+                    StartExecutionClock();
+                await operationFactory(operationToken, StartExecutionClock)
+                    .ConfigureAwait(false);
                 if (!_authority.TryCommit())
                 {
                     operationToken.ThrowIfCancellationRequested();
@@ -1583,7 +1740,15 @@ internal sealed class ManagedLifecycleOperation : IDisposable
         Func<CancellationToken, Task> operationFactory,
         TimeSpan timeout,
         CancellationToken cancellationToken = default) =>
-        new(operationFactory, timeout, cancellationToken);
+        new((token, _) => operationFactory(token), timeout,
+            startClockWithExecution: true, cancellationToken: cancellationToken);
+
+    internal static ManagedLifecycleOperation StartAfterPreparation(
+        Func<CancellationToken, Action, Task> operationFactory,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        new(operationFactory, timeout,
+            startClockWithExecution: false, cancellationToken: cancellationToken);
 
     internal ManagedLifecycleAuthority Authority => _authority;
 

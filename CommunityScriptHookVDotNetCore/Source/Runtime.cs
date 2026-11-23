@@ -201,6 +201,12 @@ internal sealed class RuntimeSession : IDisposable
             _extensions.AdvanceInitialization();
             _ = _extensions.AdvanceAdmissionFrame(extensionFrame);
 
+            if (!_rootInitializationCommitted && !_extensions.AssembliesPreloaded)
+            {
+                _extensions.AdvanceHostFrame(extensionFrame);
+                return;
+            }
+
             if (!_rootInitializationCommitted)
             {
                 _diagnostics.EnterPhase(RuntimeDiagnosticPhase.Scripts4);

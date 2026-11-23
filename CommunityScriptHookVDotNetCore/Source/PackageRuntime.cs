@@ -96,7 +96,6 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
                 "The initial scripts4 package activation was already started.");
         }
 
-        PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
         _initialActivationStarted = true;
         _initialActivationState = InitialActivationState.CapturingImages;
         _initialActivationLifetime = new();
@@ -158,13 +157,17 @@ internal sealed partial class PackageManager : IReloadRuntimeHost
             _initialActivationLifetime?.Token
             ?? throw new InvalidOperationException(
                 "The initial scripts4 activation lifetime is unavailable.");
-        string[] names = EnumerateDiskPackageNames();
         _initialCaptureTask = Task.Run(
-            () => PackageImageCapture.CaptureAsync(
-                _scriptsDirectory,
-                names,
-                _log,
-                cancellationToken),
+            () =>
+            {
+                PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
+                string[] names = EnumerateDiskPackageNames();
+                return PackageImageCapture.CaptureAsync(
+                    _scriptsDirectory,
+                    names,
+                    _log,
+                    cancellationToken);
+            },
             cancellationToken);
     }
 
@@ -1521,10 +1524,12 @@ internal sealed class ScriptInstance(
         }
 
         _startReason = reason;
-        _startup = ManagedLifecycleOperation.Start(
-            async token =>
+        _startup = ManagedLifecycleOperation.StartAfterPreparation(
+            async (token, startExecutionClock) =>
             {
                 await applyLibraryPatterns(script, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                startExecutionClock();
                 await script.StartAsync(new(
                     packageName,
                     services,

@@ -9,6 +9,7 @@
 namespace CEventGenerator
 {
     inline constexpr std::size_t EnhancedDiagnosticCandidateCapacity = 16;
+    inline constexpr std::size_t EnhancedReceiverAbiSampleCapacity = 20;
     inline constexpr std::size_t EnhancedProducerDiagnosticCapacity = 16;
     inline constexpr std::size_t EnhancedDispatchCallsiteDiagnosticCapacity = 16;
     inline constexpr std::size_t EnhancedDispatchCalleeDiagnosticCapacity = 16;
@@ -428,6 +429,48 @@ namespace CEventGenerator
         bool BudgetExceeded{};
     };
 
+    struct EnhancedReceiverAbiSample final
+    {
+        std::uint32_t EntryRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t CalleeRva{};
+        std::uint32_t LastRdxWriteRva{};
+        std::uint32_t ContextRva{};
+        std::uint32_t ContextLength{};
+        std::array<std::uint8_t, 32> Context{};
+        std::uint32_t Kind{};
+        std::uint32_t State{};
+    };
+
+    struct EnhancedIncomingCallSample final
+    {
+        std::uint32_t Role{};
+        std::uint32_t CallerRva{};
+        std::uint32_t CallsiteRva{};
+        std::uint32_t TargetRva{};
+        std::uint32_t DecodedBoundary{};
+        std::uint32_t CfgBoundary{};
+        std::uint32_t CfgInstructions{};
+        std::uint32_t CfgEdges{};
+        std::uint32_t CfgUnknownExits{};
+        std::uint32_t CfgArgumentBoundary{};
+        std::uint32_t CfgArgumentVisits{};
+        std::uint32_t CfgArgumentEdges{};
+        std::uint32_t CfgArgumentUnknownExits{};
+        std::uint32_t CfgRcxMask{};
+        std::uint32_t CfgRdxMask{};
+        std::uint32_t CfgRcxWriteRva{};
+        std::uint32_t CfgRdxWriteRva{};
+        std::uint32_t LinearBranches{};
+        std::uint32_t RcxState{};
+        std::uint32_t RdxState{};
+        std::uint32_t RcxWriteRva{};
+        std::uint32_t RdxWriteRva{};
+        std::uint32_t ContextRva{};
+        std::uint32_t ContextLength{};
+        std::array<std::uint8_t, 32> Context{};
+    };
+
     struct EventLocatorDiagnostics final
     {
         LocatorFailure Failure{LocatorFailure::None};
@@ -446,6 +489,30 @@ namespace CEventGenerator
         std::uint32_t EnhancedUsedPointerFallback{};
         std::uint32_t EnhancedCorrelationGroupCount{};
         std::uint32_t EnhancedMixedCalleeCount{};
+        std::uint32_t EnhancedHybridPedOutgoingZero{};
+        std::uint32_t EnhancedHybridGlobalOutgoingZero{};
+        std::uint32_t EnhancedHybridPedForwarded{};
+        std::uint32_t EnhancedHybridGlobalForwarded{};
+        std::uint32_t EnhancedHybridPedAddressDerived{};
+        std::uint32_t EnhancedHybridGlobalAddressDerived{};
+        std::uint32_t EnhancedHybridAbiSampleCount{};
+        std::uint32_t EnhancedHybridCorrelationGroupCount{};
+        std::array<std::uint32_t, 3> EnhancedHybridSelectedEntries{};
+        std::uint32_t EnhancedHybridSelectedCalleeRva{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCallCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingDecodedCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingUnresolvedCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCfgCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCfgArgumentCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCfgRdxDataCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCfgRdxZeroCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingCfgUnresolvedCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingRdxZeroCounts{};
+        std::array<std::uint32_t, 3> EnhancedIncomingRdxDataCounts{};
+        std::uint32_t EnhancedIncomingCallSampleCount{};
+        std::array<EnhancedIncomingCallSample, 18> EnhancedIncomingCallSamples{};
+        std::array<EnhancedReceiverAbiSample,
+            EnhancedReceiverAbiSampleCapacity> EnhancedHybridAbiSamples{};
         std::uint32_t CEventCountAnchorCount{};
         std::uint32_t CEventStackAnchorCount{};
         std::uint32_t EventTypeAnchorCount{};
@@ -558,3 +625,6 @@ namespace CEventGenerator
 
     [[nodiscard]] EventLocatorResult LocateEventHooks() noexcept;
 }
+
+
+

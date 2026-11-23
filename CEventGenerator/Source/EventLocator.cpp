@@ -630,6 +630,186 @@ namespace
         return result;
     }
 
+    struct EnhancedSecondArgumentObservation final
+    {
+        std::uint32_t State{};
+        std::uint32_t WriteRva{};
+    };
+
+    [[nodiscard]] EnhancedSecondArgumentObservation ObserveEnhancedSecondArgument(
+        ImageView image, const EnhancedReceiverCandidate& candidate) noexcept
+    {
+        EnhancedSecondArgumentObservation result{};
+        if (candidate.Transfer == nullptr || candidate.Callsite == nullptr ||
+            candidate.Transfer >= candidate.Callsite ||
+            !Contains(image, candidate.Transfer, 1) ||
+            !Contains(image, candidate.Callsite, 1))
+        {
+            return result;
+        }
+        const auto extent = static_cast<std::size_t>(
+            candidate.Callsite - candidate.Transfer);
+        if (extent > 64u)
+        {
+            return result;
+        }
+        const std::byte* cursor = candidate.Transfer;
+        for (std::uint32_t instructions = 0;
+             cursor < candidate.Callsite && instructions < 20u; ++instructions)
+        {
+            const auto remaining = static_cast<std::size_t>(
+                candidate.Callsite - cursor);
+            std::array<std::uint8_t, 15> bytes{};
+            const auto available = std::min(bytes.size(), remaining);
+            std::memcpy(bytes.data(), cursor, available);
+            hde64s instruction{};
+            const unsigned int length = hde64_disasm(bytes.data(), &instruction);
+            if (length == 0u || length > available ||
+                (instruction.flags & F_ERROR) != 0u)
+            {
+                return {};
+            }
+            const auto opcode = instruction.opcode;
+            if (opcode == 0xE8u || opcode == 0xE9u || opcode == 0xEBu ||
+                (opcode >= 0x70u && opcode <= 0x7Fu) ||
+                (opcode >= 0xE0u && opcode <= 0xE3u) ||
+                (opcode == 0x0Fu && instruction.opcode2 >= 0x80u &&
+                 instruction.opcode2 <= 0x8Fu) || opcode == 0xFFu)
+            {
+                return {};
+            }
+            const bool modrm = (instruction.flags & F_MODRM) != 0u;
+            const bool rdxReg = modrm && instruction.rex_r == 0u &&
+                instruction.modrm_reg == 2u;
+            const bool rdxRm = modrm && instruction.rex_b == 0u &&
+                instruction.modrm_rm == 2u && instruction.modrm_mod == 3u;
+            std::uint32_t newState = 0u;
+            bool written = false;
+            if (rdxRm && ((opcode == 0x31u && rdxReg) ||
+                          (opcode == 0x29u && rdxReg)))
+            {
+                newState = 1u;
+                written = true;
+            }
+            else if (rdxReg && instruction.modrm_mod == 3u &&
+                ((opcode == 0x33u && rdxRm) ||
+                 (opcode == 0x2Bu && rdxRm)))
+            {
+                newState = 1u;
+                written = true;
+            }
+            else if (opcode == 0xBAu && instruction.rex_b == 0u)
+            {
+                newState = instruction.rex_w == 0u &&
+                    (instruction.flags & F_IMM32) != 0u &&
+                    instruction.imm.imm32 == 0u ? 1u : 0u;
+                written = true;
+            }
+            else if ((opcode == 0x8Bu || opcode == 0x8Du) && rdxReg)
+            {
+                newState = instruction.rex_w == 0u ? 0u :
+                    opcode == 0x8Du || instruction.modrm_mod != 3u ? 3u : 2u;
+                written = true;
+            }
+            else if (opcode == 0x89u && rdxRm)
+            {
+                newState = instruction.rex_w != 0u ? 2u : 0u;
+                written = true;
+            }
+            else if (rdxRm && (opcode == 0x01u || opcode == 0x09u ||
+                opcode == 0x21u || opcode == 0x29u || opcode == 0x31u ||
+                opcode == 0x81u || opcode == 0x83u || opcode == 0xC7u))
+            {
+                written = true;
+            }
+            else if (rdxReg && (opcode == 0x03u || opcode == 0x0Bu ||
+                opcode == 0x23u || opcode == 0x2Bu || opcode == 0x33u))
+            {
+                written = true;
+            }
+            if (written)
+            {
+                result.State = newState;
+                result.WriteRva = static_cast<std::uint32_t>(cursor - image.Base);
+            }
+            cursor += length;
+        }
+        if (cursor != candidate.Callsite)
+        {
+            return {};
+        }
+        return result;
+    }
+
+    void RecordEnhancedOutgoingAbi(
+        ImageView image,
+        const std::vector<EnhancedReceiverCandidate>& input,
+        std::uint32_t kind,
+        CEventGenerator::EventLocatorDiagnostics& diagnostics)
+    {
+        for (const auto& candidate : input)
+        {
+            const auto abi = ObserveEnhancedSecondArgument(image, candidate);
+            if (abi.State == 1u)
+            {
+                if (kind == 1u) ++diagnostics.EnhancedHybridPedOutgoingZero;
+                else ++diagnostics.EnhancedHybridGlobalOutgoingZero;
+            }
+            if (abi.State == 2u)
+            {
+                if (kind == 1u) ++diagnostics.EnhancedHybridPedForwarded;
+                else ++diagnostics.EnhancedHybridGlobalForwarded;
+            }
+            if (abi.State == 3u)
+            {
+                if (kind == 1u) ++diagnostics.EnhancedHybridPedAddressDerived;
+                else ++diagnostics.EnhancedHybridGlobalAddressDerived;
+            }
+            if (abi.State != 0u)
+            {
+                const std::uint32_t stateQuota = kind == 1u
+                    ? 4u : (abi.State == 3u ? 2u : 3u);
+                std::uint32_t sameStateCount = 0;
+                for (std::uint32_t j = 0;
+                     j < diagnostics.EnhancedHybridAbiSampleCount; ++j)
+                {
+                    const auto& sample = diagnostics.EnhancedHybridAbiSamples[j];
+                    if (sample.Kind == kind && sample.State == abi.State)
+                    {
+                        ++sameStateCount;
+                    }
+                }
+                const std::uint32_t index = sameStateCount < stateQuota &&
+                    diagnostics.EnhancedHybridAbiSampleCount <
+                        diagnostics.EnhancedHybridAbiSamples.size()
+                    ? diagnostics.EnhancedHybridAbiSampleCount++ : UINT32_MAX;
+                if (index != UINT32_MAX)
+                {
+                    auto& entry = diagnostics.EnhancedHybridAbiSamples[index];
+                    entry.EntryRva = static_cast<std::uint32_t>(
+                        candidate.Entry - image.Base);
+                    entry.CallsiteRva = static_cast<std::uint32_t>(
+                        candidate.Callsite - image.Base);
+                    entry.CalleeRva = static_cast<std::uint32_t>(
+                        candidate.Callee - image.Base);
+                    entry.LastRdxWriteRva = abi.WriteRva;
+                    entry.ContextRva = static_cast<std::uint32_t>(
+                        candidate.Transfer - image.Base);
+                    const auto available = image.Size - entry.ContextRva;
+                    const auto windowLength = static_cast<std::size_t>(
+                        candidate.Callsite - candidate.Transfer) +
+                        (candidate.Indirect ? 6u : 5u);
+                    entry.ContextLength = static_cast<std::uint32_t>(
+                        std::min({entry.Context.size(), available, windowLength}));
+                    std::memcpy(entry.Context.data(),
+                        image.Base + entry.ContextRva, entry.ContextLength);
+                    entry.Kind = kind;
+                    entry.State = abi.State;
+                }
+            }
+        }
+    }
+
     struct EnhancedReceiverTriplet final
     {
         std::array<const std::byte*, 3> Entries{};
@@ -705,6 +885,745 @@ namespace
             result.Callee = nullptr;
         }
         return result;
+    }
+
+    struct IncomingCallTrace final
+    {
+        std::uint32_t Boundary{};
+        std::uint32_t Branches{};
+        std::uint32_t RcxState{};
+        std::uint32_t RdxState{};
+        std::uint32_t RcxWriteOffset{UINT32_MAX};
+        std::uint32_t RdxWriteOffset{UINT32_MAX};
+    };
+
+    [[nodiscard]] IncomingCallTrace TraceIncomingCallerCode(
+        const std::byte* code, std::size_t callOffset) noexcept
+    {
+        IncomingCallTrace trace{};
+        if (code == nullptr || callOffset > 32768u)
+        {
+            return trace;
+        }
+        std::size_t cursor = 0u;
+        while (cursor < callOffset)
+        {
+            const auto available = std::min<std::size_t>(
+                15u, callOffset - cursor);
+            std::array<std::uint8_t, 15> bytes{};
+            std::memcpy(bytes.data(), code + cursor, available);
+            hde64s instruction{};
+            const auto length = hde64_disasm(bytes.data(), &instruction);
+            if (length == 0u || length > available ||
+                (instruction.flags & F_ERROR) != 0u ||
+                instruction.opcode == 0xCCu)
+            {
+                return trace;
+            }
+            const auto op = instruction.opcode;
+            const bool modrm = (instruction.flags & F_MODRM) != 0u;
+            const auto reg = static_cast<std::uint32_t>(
+                instruction.modrm_reg + (instruction.rex_r != 0u ? 8u : 0u));
+            const auto rm = static_cast<std::uint32_t>(
+                instruction.modrm_rm + (instruction.rex_b != 0u ? 8u : 0u));
+            const bool registerRm = modrm && instruction.modrm_mod == 3u;
+            const auto write = [&](std::uint32_t destination,
+                                   std::uint32_t state)
+            {
+                if (destination == 1u)
+                {
+                    trace.RcxState = state;
+                    trace.RcxWriteOffset = static_cast<std::uint32_t>(cursor);
+                }
+                else if (destination == 2u)
+                {
+                    trace.RdxState = state;
+                    trace.RdxWriteOffset = static_cast<std::uint32_t>(cursor);
+                }
+            };
+            const auto invalidate = [&]()
+            {
+                trace.RcxState = trace.RdxState = 0u;
+                trace.RcxWriteOffset = trace.RdxWriteOffset = UINT32_MAX;
+            };
+            const bool conditional =
+                (op >= 0x70u && op <= 0x7Fu) ||
+                (op >= 0xE0u && op <= 0xE3u) ||
+                (op == 0x0Fu && instruction.opcode2 >= 0x80u &&
+                 instruction.opcode2 <= 0x8Fu);
+            const bool transfer = op == 0xE8u || op == 0xE9u ||
+                op == 0xEBu || op == 0xFFu || conditional;
+            if (transfer)
+            {
+                ++trace.Branches;
+                invalidate();
+            }
+            else if (op == 0x8Bu && modrm)
+            {
+                write(reg, instruction.rex_w != 0u
+                    ? (registerRm ? 2u : 3u) : 0u);
+            }
+            else if (op == 0x8Du && modrm)
+            {
+                write(reg, instruction.rex_w != 0u ? 3u : 0u);
+            }
+            else if (op == 0x89u && registerRm)
+            {
+                write(rm, instruction.rex_w != 0u ? 2u : 0u);
+            }
+            else if ((op == 0x31u || op == 0x29u) && registerRm)
+            {
+                write(rm, reg == rm ? 1u : 0u);
+            }
+            else if ((op == 0x33u || op == 0x2Bu) && registerRm)
+            {
+                write(reg, reg == rm ? 1u : 0u);
+            }
+            else if ((op >= 0xB8u && op <= 0xBFu))
+            {
+                const auto dest = static_cast<std::uint32_t>(
+                    op - 0xB8u + (instruction.rex_b != 0u ? 8u : 0u));
+                const bool zero = (instruction.flags & F_IMM64) != 0u
+                    ? instruction.imm.imm64 == 0u
+                    : (instruction.flags & F_IMM32) != 0u &&
+                      instruction.imm.imm32 == 0u;
+                write(dest, zero ? 1u : 4u);
+            }
+            else if (op == 0xC7u && registerRm &&
+                     instruction.modrm_reg == 0u)
+            {
+                write(rm, instruction.imm.imm32 == 0u ? 1u : 4u);
+            }
+            else if (op == 0x81u || op == 0x83u || op == 0x01u ||
+                     op == 0x09u || op == 0x21u || op == 0x29u ||
+                     op == 0x31u || op == 0xC1u || op == 0xD1u)
+            {
+                if (registerRm && !(op == 0x81u &&
+                    instruction.modrm_reg == 7u))
+                {
+                    write(rm, 0u);
+                }
+            }
+            else if (op == 0x03u || op == 0x0Bu || op == 0x23u ||
+                     op == 0x2Bu || op == 0x33u)
+            {
+                if (modrm) write(reg, 0u);
+            }
+            else if (op >= 0x58u && op <= 0x5Fu)
+            {
+                write(static_cast<std::uint32_t>(
+                    op - 0x58u + (instruction.rex_b != 0u ? 8u : 0u)), 0u);
+            }
+            else if (op == 0xC3u || op == 0xC2u || op == 0xCBu ||
+                     op == 0xCAu)
+            {
+                return trace;
+            }
+            cursor += length;
+        }
+        std::array<std::uint8_t, 15> bytes{};
+        std::memcpy(bytes.data(), code + callOffset, 5u);
+        hde64s call{};
+        const auto callLength = hde64_disasm(bytes.data(), &call);
+        if (cursor == callOffset && callLength == 5u &&
+            call.opcode == 0xE8u && (call.flags & F_ERROR) == 0u)
+        {
+            trace.Boundary = 1u;
+            if (trace.RcxWriteOffset == UINT32_MAX ||
+                callOffset - trace.RcxWriteOffset > 96u)
+            {
+                trace.RcxState = 0u;
+                trace.RcxWriteOffset = UINT32_MAX;
+            }
+            if (trace.RdxWriteOffset == UINT32_MAX ||
+                callOffset - trace.RdxWriteOffset > 96u)
+            {
+                trace.RdxState = 0u;
+                trace.RdxWriteOffset = UINT32_MAX;
+            }
+        }
+        return trace;
+    }
+
+    struct IncomingCfgTrace final
+    {
+        std::uint32_t Boundary{};
+        std::uint32_t Instructions{};
+        std::uint32_t Edges{};
+        std::uint32_t UnknownExits{};
+    };
+
+    [[nodiscard]] IncomingCfgTrace TraceIncomingCallerGraph(
+        const std::byte* code, std::size_t functionSize,
+        std::size_t callOffset)
+    {
+        IncomingCfgTrace result{};
+        if (code == nullptr || callOffset >= functionSize ||
+            callOffset >= 32768u)
+        {
+            return result;
+        }
+        functionSize = std::min<std::size_t>(functionSize, 32768u);
+        std::vector<std::uint8_t> visited(functionSize);
+        std::vector<std::uint32_t> pending{0u};
+        while (!pending.empty() && result.Instructions < 16384u)
+        {
+            std::size_t cursor = pending.back();
+            pending.pop_back();
+            while (cursor < functionSize && !visited[cursor] &&
+                   result.Instructions < 16384u)
+            {
+                visited[cursor] = 1u;
+                ++result.Instructions;
+                const auto available = std::min<std::size_t>(
+                    15u, functionSize - cursor);
+                std::array<std::uint8_t, 15> bytes{};
+                std::memcpy(bytes.data(), code + cursor, available);
+                hde64s instruction{};
+                const auto length = hde64_disasm(bytes.data(), &instruction);
+                if (length == 0u || length > available ||
+                    (instruction.flags & F_ERROR) != 0u)
+                {
+                    ++result.UnknownExits;
+                    break;
+                }
+                const auto op = instruction.opcode;
+                if (cursor == callOffset && op == 0xE8u && length == 5u)
+                {
+                    result.Boundary = 1u;
+                    return result;
+                }
+                if (op == 0xC3u || op == 0xC2u || op == 0xCBu ||
+                    op == 0xCAu || op == 0xCCu ||
+                    (op == 0x0Fu && instruction.opcode2 == 0x0Bu))
+                {
+                    break;
+                }
+                const bool conditional =
+                    (op >= 0x70u && op <= 0x7Fu) ||
+                    (op >= 0xE0u && op <= 0xE3u) ||
+                    (op == 0x0Fu && instruction.opcode2 >= 0x80u &&
+                     instruction.opcode2 <= 0x8Fu);
+                const bool directJump = op == 0xE9u || op == 0xEBu;
+                if (conditional || directJump)
+                {
+                    const bool shortDisplacement =
+                        (op >= 0x70u && op <= 0x7Fu) ||
+                        (op >= 0xE0u && op <= 0xE3u) || op == 0xEBu;
+                    const auto displacement = shortDisplacement
+                        ? static_cast<std::int64_t>(
+                            static_cast<std::int8_t>(instruction.imm.imm8))
+                        : static_cast<std::int64_t>(
+                            static_cast<std::int32_t>(instruction.imm.imm32));
+                    const auto target = static_cast<std::int64_t>(cursor) +
+                        static_cast<std::int64_t>(length) + displacement;
+                    ++result.Edges;
+                    if (target >= 0 &&
+                        static_cast<std::uint64_t>(target) < functionSize)
+                    {
+                        if (!visited[static_cast<std::size_t>(target)])
+                        {
+                            pending.push_back(static_cast<std::uint32_t>(target));
+                        }
+                    }
+                    else
+                    {
+                        ++result.UnknownExits;
+                    }
+                    if (directJump)
+                    {
+                        break;
+                    }
+                }
+                if (op == 0xFFu &&
+                    (instruction.flags & F_MODRM) != 0u &&
+                    (instruction.modrm_reg == 4u ||
+                     instruction.modrm_reg == 5u))
+                {
+                    ++result.UnknownExits;
+                    break;
+                }
+                if (op == 0xEAu)
+                {
+                    ++result.UnknownExits;
+                    break;
+                }
+                cursor += length;
+            }
+        }
+        if (!pending.empty())
+        {
+            ++result.UnknownExits;
+        }
+        return result;
+    }
+
+    struct IncomingCfgArgumentTrace final
+    {
+        std::uint32_t Boundary{};
+        std::uint32_t Visits{};
+        std::uint32_t Edges{};
+        std::uint32_t UnknownExits{};
+        std::uint32_t RcxMask{};
+        std::uint32_t RdxMask{};
+        std::uint32_t RcxWriteOffset{UINT32_MAX};
+        std::uint32_t RdxWriteOffset{UINT32_MAX};
+    };
+
+    struct IncomingCfgRegisterState final
+    {
+        std::uint32_t RcxMask{16u};
+        std::uint32_t RdxMask{16u};
+        std::uint32_t RcxWriteOffset{UINT32_MAX};
+        std::uint32_t RdxWriteOffset{UINT32_MAX};
+    };
+
+    [[nodiscard]] IncomingCfgArgumentTrace TraceIncomingCallerArgumentsGraph(
+        const std::byte* code, std::size_t functionSize,
+        std::size_t callOffset)
+    {
+        IncomingCfgArgumentTrace result{};
+        if (code == nullptr || callOffset >= functionSize ||
+            callOffset >= 32768u)
+        {
+            return result;
+        }
+        functionSize = std::min<std::size_t>(functionSize, 32768u);
+        std::vector<IncomingCfgRegisterState> entries(functionSize);
+        std::vector<std::uint8_t> seen(functionSize);
+        std::vector<std::uint32_t> pending;
+        const auto merge = [](IncomingCfgRegisterState& destination,
+                              const IncomingCfgRegisterState& source)
+        {
+            const auto old = destination;
+            destination.RcxMask |= source.RcxMask;
+            destination.RdxMask |= source.RdxMask;
+            if (destination.RcxWriteOffset != source.RcxWriteOffset)
+                destination.RcxWriteOffset = UINT32_MAX;
+            if (destination.RdxWriteOffset != source.RdxWriteOffset)
+                destination.RdxWriteOffset = UINT32_MAX;
+            return destination.RcxMask != old.RcxMask ||
+                destination.RdxMask != old.RdxMask ||
+                destination.RcxWriteOffset != old.RcxWriteOffset ||
+                destination.RdxWriteOffset != old.RdxWriteOffset;
+        };
+        const auto enqueue = [&](std::size_t offset,
+                                 const IncomingCfgRegisterState& state)
+        {
+            if (offset >= functionSize)
+            {
+                ++result.UnknownExits;
+                return;
+            }
+            if (seen[offset] == 0u)
+            {
+                seen[offset] = 1u;
+                entries[offset] = state;
+                pending.push_back(static_cast<std::uint32_t>(offset));
+            }
+            else if (merge(entries[offset], state))
+            {
+                pending.push_back(static_cast<std::uint32_t>(offset));
+            }
+        };
+        enqueue(0u, IncomingCfgRegisterState{});
+        while (!pending.empty() && result.Visits < 32768u)
+        {
+            const auto offset = pending.back();
+            pending.pop_back();
+            auto state = entries[offset];
+            ++result.Visits;
+            const auto available = std::min<std::size_t>(
+                15u, functionSize - offset);
+            std::array<std::uint8_t, 15> bytes{};
+            std::memcpy(bytes.data(), code + offset, available);
+            hde64s instruction{};
+            const auto length = hde64_disasm(bytes.data(), &instruction);
+            if (length == 0u || length > available ||
+                (instruction.flags & F_ERROR) != 0u)
+            {
+                ++result.UnknownExits;
+                continue;
+            }
+            const auto op = instruction.opcode;
+            if (offset == callOffset && op == 0xE8u && length == 5u)
+            {
+                if (result.Boundary == 0u)
+                {
+                    result.Boundary = 1u;
+                    result.RcxMask = state.RcxMask;
+                    result.RdxMask = state.RdxMask;
+                    result.RcxWriteOffset = state.RcxWriteOffset;
+                    result.RdxWriteOffset = state.RdxWriteOffset;
+                }
+                else
+                {
+                    IncomingCfgRegisterState accumulated{
+                        result.RcxMask, result.RdxMask,
+                        result.RcxWriteOffset, result.RdxWriteOffset};
+                    merge(accumulated, state);
+                    result.RcxMask = accumulated.RcxMask;
+                    result.RdxMask = accumulated.RdxMask;
+                    result.RcxWriteOffset = accumulated.RcxWriteOffset;
+                    result.RdxWriteOffset = accumulated.RdxWriteOffset;
+                }
+                continue;
+            }
+            if (op == 0xC3u || op == 0xC2u || op == 0xCBu ||
+                op == 0xCAu || op == 0xCCu ||
+                (op == 0x0Fu && instruction.opcode2 == 0x0Bu))
+            {
+                continue;
+            }
+            const bool modrm = (instruction.flags & F_MODRM) != 0u;
+            const auto reg = static_cast<std::uint32_t>(
+                instruction.modrm_reg + (instruction.rex_r != 0u ? 8u : 0u));
+            const auto rm = static_cast<std::uint32_t>(
+                instruction.modrm_rm + (instruction.rex_b != 0u ? 8u : 0u));
+            const bool registerRm = modrm && instruction.modrm_mod == 3u;
+            const auto write = [&](std::uint32_t destination,
+                                   std::uint32_t mask)
+            {
+                if (destination == 1u)
+                {
+                    state.RcxMask = mask;
+                    state.RcxWriteOffset = static_cast<std::uint32_t>(offset);
+                }
+                else if (destination == 2u)
+                {
+                    state.RdxMask = mask;
+                    state.RdxWriteOffset = static_cast<std::uint32_t>(offset);
+                }
+            };
+            if (op == 0x8Bu && modrm)
+            {
+                write(reg, instruction.rex_w != 0u ?
+                    (registerRm ? 2u : 4u) : 16u);
+            }
+            else if (op == 0x8Du && modrm)
+            {
+                write(reg, instruction.rex_w != 0u ? 4u : 16u);
+            }
+            else if (op == 0x89u && registerRm)
+            {
+                write(rm, instruction.rex_w != 0u ? 2u : 16u);
+            }
+            else if ((op == 0x31u || op == 0x29u) && registerRm)
+            {
+                write(rm, reg == rm ? 1u : 16u);
+            }
+            else if ((op == 0x33u || op == 0x2Bu) && registerRm)
+            {
+                write(reg, reg == rm ? 1u : 16u);
+            }
+            else if (op >= 0xB8u && op <= 0xBFu)
+            {
+                const auto destination = static_cast<std::uint32_t>(
+                    op - 0xB8u + (instruction.rex_b != 0u ? 8u : 0u));
+                const bool zero = (instruction.flags & F_IMM64) != 0u
+                    ? instruction.imm.imm64 == 0u
+                    : (instruction.flags & F_IMM32) != 0u &&
+                      instruction.imm.imm32 == 0u;
+                write(destination, zero ? 1u : 8u);
+            }
+            else if (op == 0xC7u && registerRm &&
+                     instruction.modrm_reg == 0u)
+            {
+                write(rm, instruction.imm.imm32 == 0u ? 1u : 8u);
+            }
+            else if (op >= 0x58u && op <= 0x5Fu)
+            {
+                write(static_cast<std::uint32_t>(
+                    op - 0x58u + (instruction.rex_b != 0u ? 8u : 0u)), 16u);
+            }
+            else if ((op == 0x81u || op == 0x83u || op == 0x01u ||
+                      op == 0x09u || op == 0x21u || op == 0x29u ||
+                      op == 0x31u || op == 0xC1u || op == 0xD1u ||
+                      op == 0x87u) && registerRm)
+            {
+                if (!((op == 0x81u || op == 0x83u) &&
+                      instruction.modrm_reg == 7u))
+                    write(rm, 16u);
+                if (op == 0x87u) write(reg, 16u);
+            }
+            else if ((op == 0x03u || op == 0x0Bu || op == 0x23u ||
+                      op == 0x2Bu || op == 0x33u) && modrm)
+            {
+                write(reg, 16u);
+            }
+            const bool conditional =
+                (op >= 0x70u && op <= 0x7Fu) ||
+                (op >= 0xE0u && op <= 0xE3u) ||
+                (op == 0x0Fu && instruction.opcode2 >= 0x80u &&
+                 instruction.opcode2 <= 0x8Fu);
+            const bool directJump = op == 0xE9u || op == 0xEBu;
+            if (conditional || directJump)
+            {
+                const bool shortDisplacement =
+                    (op >= 0x70u && op <= 0x7Fu) ||
+                    (op >= 0xE0u && op <= 0xE3u) || op == 0xEBu;
+                const auto displacement = shortDisplacement
+                    ? static_cast<std::int64_t>(
+                        static_cast<std::int8_t>(instruction.imm.imm8))
+                    : static_cast<std::int64_t>(
+                        static_cast<std::int32_t>(instruction.imm.imm32));
+                const auto target = static_cast<std::int64_t>(offset) +
+                    static_cast<std::int64_t>(length) + displacement;
+                ++result.Edges;
+                if (target >= 0 &&
+                    static_cast<std::uint64_t>(target) < functionSize)
+                    enqueue(static_cast<std::size_t>(target), state);
+                else
+                    ++result.UnknownExits;
+                if (directJump) continue;
+            }
+            if (op == 0xFFu && modrm &&
+                (instruction.modrm_reg == 4u ||
+                 instruction.modrm_reg == 5u))
+            {
+                ++result.UnknownExits;
+                continue;
+            }
+            if (op == 0xEAu)
+            {
+                ++result.UnknownExits;
+                continue;
+            }
+            if (op == 0xE8u ||
+                (op == 0xFFu && modrm &&
+                 (instruction.modrm_reg == 2u ||
+                  instruction.modrm_reg == 3u)))
+            {
+                state.RcxMask = state.RdxMask = 16u;
+                state.RcxWriteOffset = state.RdxWriteOffset =
+                    static_cast<std::uint32_t>(offset);
+            }
+            enqueue(offset + length, state);
+        }
+        if (!pending.empty()) ++result.UnknownExits;
+        return result;
+    }
+
+    void RecordEnhancedInboundCallEvidence(
+        ImageView image,
+        const EnhancedReceiverTriplet& selected,
+        CEventGenerator::EventLocatorDiagnostics& diagnostics)
+    {
+        if (selected.UniqueGroups != 1u || image.Base == nullptr)
+        {
+            return;
+        }
+        const std::uintptr_t base =
+            reinterpret_cast<std::uintptr_t>(image.Base);
+        const std::uintptr_t limit = base + image.Size;
+        if (limit < base)
+        {
+            return;
+        }
+        std::array<std::uint32_t, 3> entries{};
+        for (std::size_t i = 0; i < entries.size(); ++i)
+        {
+            if (!Contains(image, selected.Entries[i], 1))
+            {
+                return;
+            }
+            entries[i] = static_cast<std::uint32_t>(
+                selected.Entries[i] - image.Base);
+        }
+
+        for (std::uintptr_t address = base; address < limit;)
+        {
+            MEMORY_BASIC_INFORMATION info{};
+            if (VirtualQuery(reinterpret_cast<const void*>(address),
+                    &info, sizeof(info)) != sizeof(info))
+            {
+                break;
+            }
+            const std::uintptr_t regionBase =
+                reinterpret_cast<std::uintptr_t>(info.BaseAddress);
+            const std::uintptr_t regionLimit = regionBase + info.RegionSize;
+            if (regionLimit <= address || regionLimit < regionBase)
+            {
+                break;
+            }
+            const std::uintptr_t end = std::min(regionLimit, limit);
+            const DWORD protection = info.Protect & 0xFFu;
+            const bool executable = info.State == MEM_COMMIT &&
+                (info.Protect & PAGE_GUARD) == 0u &&
+                (protection == PAGE_EXECUTE ||
+                 protection == PAGE_EXECUTE_READ ||
+                 protection == PAGE_EXECUTE_READWRITE ||
+                 protection == PAGE_EXECUTE_WRITECOPY);
+            if (executable && end - address >= 5u)
+            {
+                for (std::uintptr_t current = address;
+                     current <= end - 5u; ++current)
+                {
+                    const auto* instruction =
+                        reinterpret_cast<const std::byte*>(current);
+                    if (ByteAt(instruction) != 0xE8u)
+                    {
+                        continue;
+                    }
+                    const std::int64_t target =
+                        static_cast<std::int64_t>(current - base) + 5 +
+                        ReadInt32(instruction + 1);
+                    if (target < 0 ||
+                        static_cast<std::uint64_t>(target) >= image.Size)
+                    {
+                        continue;
+                    }
+                    for (std::uint32_t role = 0; role < 3u; ++role)
+                    {
+                        if (static_cast<std::uint32_t>(target) != entries[role])
+                        {
+                            continue;
+                        }
+                        const auto caller = ResolveRuntimeFunction(
+                            image, instruction);
+                        if (!caller ||
+                            static_cast<std::uint64_t>(current - base) + 5u >
+                                caller.EndRva)
+                        {
+                            break;
+                        }
+                        ++diagnostics.EnhancedIncomingCallCounts[role];
+                        IncomingCallTrace trace{};
+                        IncomingCfgTrace graph{};
+                        IncomingCfgArgumentTrace arguments{};
+                        const auto* callerStart = image.Base + caller.BeginRva;
+                        MEMORY_BASIC_INFORMATION callerPage{};
+                        if (VirtualQuery(callerStart, &callerPage,
+                                sizeof(callerPage)) == sizeof(callerPage))
+                        {
+                            const auto pageBase = reinterpret_cast<std::uintptr_t>(
+                                callerPage.BaseAddress);
+                            const auto pageLimit = pageBase + callerPage.RegionSize;
+                            const DWORD codeProtection = callerPage.Protect & 0xFFu;
+                            const bool callerExecutable = callerPage.State == MEM_COMMIT &&
+                                (callerPage.Protect & PAGE_GUARD) == 0u &&
+                                (codeProtection == PAGE_EXECUTE ||
+                                 codeProtection == PAGE_EXECUTE_READ ||
+                                 codeProtection == PAGE_EXECUTE_READWRITE ||
+                                 codeProtection == PAGE_EXECUTE_WRITECOPY);
+                            if (callerExecutable && pageLimit >= pageBase &&
+                                pageLimit >= current + 5u)
+                            {
+                                const auto callOffset = current -
+                                    reinterpret_cast<std::uintptr_t>(callerStart);
+                                trace = TraceIncomingCallerCode(callerStart,
+                                    callOffset);
+                                const auto graphLimit = std::min<std::size_t>(
+                                    caller.Size(), pageLimit -
+                                        reinterpret_cast<std::uintptr_t>(callerStart));
+                                graph = TraceIncomingCallerGraph(callerStart,
+                                    graphLimit, callOffset);
+                                if (graph.Boundary != 0u)
+                                    arguments = TraceIncomingCallerArgumentsGraph(
+                                        callerStart, graphLimit, callOffset);
+                            }
+                        }
+                        if (graph.Boundary == 1u)
+                        {
+                            ++diagnostics.EnhancedIncomingCfgCounts[role];
+                        }
+                        else
+                        {
+                            ++diagnostics.EnhancedIncomingCfgUnresolvedCounts[role];
+                        }
+                        if (trace.Boundary == 1u)
+                        {
+                            ++diagnostics.EnhancedIncomingDecodedCounts[role];
+                            if (trace.RdxState == 1u)
+                            {
+                                ++diagnostics.EnhancedIncomingRdxZeroCounts[role];
+                            }
+                            else if (trace.RdxState == 2u ||
+                                     trace.RdxState == 3u)
+                            {
+                                ++diagnostics.EnhancedIncomingRdxDataCounts[role];
+                            }
+                        }
+                        else
+                        {
+                            ++diagnostics.EnhancedIncomingUnresolvedCounts[role];
+                        }
+                        std::uint32_t shown = 0;
+                        for (std::uint32_t i = 0;
+                             i < diagnostics.EnhancedIncomingCallSampleCount;
+                             ++i)
+                        {
+                            if (diagnostics.EnhancedIncomingCallSamples[i].Role ==
+                                role)
+                            {
+                                ++shown;
+                            }
+                        }
+                        if (shown >= 6u ||
+                            diagnostics.EnhancedIncomingCallSampleCount >=
+                                diagnostics.EnhancedIncomingCallSamples.size())
+                        {
+                            break;
+                        }
+                        auto& sample = diagnostics.EnhancedIncomingCallSamples[
+                            diagnostics.EnhancedIncomingCallSampleCount++];
+                        sample.Role = role;
+                        sample.CallerRva = caller.BeginRva;
+                        sample.CallsiteRva = static_cast<std::uint32_t>(
+                            current - base);
+                        sample.TargetRva = entries[role];
+                        sample.DecodedBoundary = trace.Boundary;
+                        sample.CfgBoundary = graph.Boundary;
+                        sample.CfgInstructions = graph.Instructions;
+                        sample.CfgEdges = graph.Edges;
+                        sample.CfgUnknownExits = graph.UnknownExits;
+                        sample.CfgArgumentBoundary = arguments.Boundary;
+                        sample.CfgArgumentVisits = arguments.Visits;
+                        sample.CfgArgumentEdges = arguments.Edges;
+                        sample.CfgArgumentUnknownExits = arguments.UnknownExits;
+                        sample.CfgRcxMask = arguments.RcxMask;
+                        sample.CfgRdxMask = arguments.RdxMask;
+                        sample.CfgRcxWriteRva = arguments.Boundary != 0u &&
+                            arguments.RcxWriteOffset != UINT32_MAX
+                            ? caller.BeginRva + arguments.RcxWriteOffset : 0u;
+                        sample.CfgRdxWriteRva = arguments.Boundary != 0u &&
+                            arguments.RdxWriteOffset != UINT32_MAX
+                            ? caller.BeginRva + arguments.RdxWriteOffset : 0u;
+                        if (arguments.Boundary != 0u)
+                        {
+                            ++diagnostics.EnhancedIncomingCfgArgumentCounts[role];
+                            if (arguments.RdxMask == 2u ||
+                                arguments.RdxMask == 4u)
+                                ++diagnostics.EnhancedIncomingCfgRdxDataCounts[role];
+                            if (arguments.RdxMask == 1u)
+                                ++diagnostics.EnhancedIncomingCfgRdxZeroCounts[role];
+                        }
+                        sample.LinearBranches = trace.Branches;
+                        sample.RcxState = trace.Boundary ? trace.RcxState : 0u;
+                        sample.RdxState = trace.Boundary ? trace.RdxState : 0u;
+                        sample.RcxWriteRva = trace.Boundary &&
+                            trace.RcxWriteOffset != UINT32_MAX
+                            ? caller.BeginRva + trace.RcxWriteOffset : 0u;
+                        sample.RdxWriteRva = trace.Boundary &&
+                            trace.RdxWriteOffset != UINT32_MAX
+                            ? caller.BeginRva + trace.RdxWriteOffset : 0u;
+                        const std::uintptr_t windowBegin = std::max(
+                            {address, base + caller.BeginRva,
+                             current > base + 24u ? current - 24u : base});
+                        sample.ContextRva = static_cast<std::uint32_t>(
+                            windowBegin - base);
+                        sample.ContextLength = static_cast<std::uint32_t>(
+                            std::min<std::uintptr_t>(
+                                sample.Context.size(), current + 5u - windowBegin));
+                        std::memcpy(sample.Context.data(),
+                            reinterpret_cast<const void*>(windowBegin),
+                            sample.ContextLength);
+                        break;
+                    }
+                }
+            }
+            address = end;
+        }
     }
 
     void RecordEnhancedReceiverEvidence(
@@ -4322,6 +5241,27 @@ namespace
             ? CorrelateEnhancedReceivers(pedMatches, globalMatches,
                 selectedComplete)
             : directCorrelation;
+        RecordEnhancedOutgoingAbi(
+            image, pedMatches, 1u, result.Diagnostics);
+        RecordEnhancedOutgoingAbi(
+            image, globalMatches, 2u, result.Diagnostics);
+        const auto& hybridCorrelation = correlation;
+        RecordEnhancedInboundCallEvidence(
+            image, hybridCorrelation, result.Diagnostics);
+        result.Diagnostics.EnhancedHybridCorrelationGroupCount =
+            hybridCorrelation.UniqueGroups;
+        if (hybridCorrelation.UniqueGroups == 1u)
+        {
+            for (std::size_t index = 0;
+                 index < hybridCorrelation.Entries.size(); ++index)
+            {
+                result.Diagnostics.EnhancedHybridSelectedEntries[index] =
+                    static_cast<std::uint32_t>(
+                        hybridCorrelation.Entries[index] - image.Base);
+            }
+            result.Diagnostics.EnhancedHybridSelectedCalleeRva =
+                static_cast<std::uint32_t>(hybridCorrelation.Callee - image.Base);
+        }
         result.Diagnostics.EnhancedReceiverScanLimit =
             static_cast<std::uint32_t>(SearchLimit);
         result.Diagnostics.EnhancedDirectPedCount =
@@ -4440,7 +5380,6 @@ namespace
         result.Diagnostics.CEventStackOffset =
             static_cast<std::uint32_t>(stackOffset);
         result.Diagnostics.EventTypeVFuncOffset = typeOffset;
-        result.Targets.EventIdVFuncOffset = typeOffset;
 
         RecordEnhancedAnchorCallEvidence(image,
             countFunction.BeginRva, typeFunction.BeginRva,
@@ -4490,3 +5429,6 @@ namespace CEventGenerator
         return LocateLegacy(image, result);
     }
 }
+
+
+

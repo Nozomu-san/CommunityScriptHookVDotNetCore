@@ -377,8 +377,12 @@ namespace
     constexpr std::size_t DynamicProbeCorrelationHistoryLimit = 1024;
     constexpr std::size_t DynamicProbeCorrelationMatchCapacity = 64;
     constexpr std::uint8_t DynamicProbeBreakpoint = 0xCC;
-    constexpr int DynamicProbeToggleKey = VK_F10;
-    constexpr std::uint64_t DynamicProbeMaximumSessionMs = 3000;
+    constexpr std::uint64_t DynamicProbeRestartDelayMs = 1000;
+    constexpr std::uint64_t DynamicProbeQuietRestartDelayMs = 3000;
+    constexpr std::uint64_t DynamicProbeHighTrafficDelayMs = 5000;
+    constexpr std::uint64_t DynamicProbeMaximumSessionHits = 64;
+    constexpr std::uint64_t DynamicProbeFailureRetryMs = 5000;
+    constexpr std::uint64_t DynamicProbeMaximumSessionMs = 8000;
     constexpr wchar_t DiagnosticLogName[] = L"CEventGenerator.log";
 
     enum class DynamicProbeRecordKind : std::uint32_t
@@ -507,7 +511,10 @@ namespace
         DynamicProbeWalkerHistoryCapacity> g_dynamicProbeWalkerHistory{};
     std::atomic<void*> g_dynamicProbeHandler{};
     std::array<wchar_t, MAX_PATH> g_dynamicProbeLogPath{};
-    bool g_dynamicProbeToggleDown{};
+    std::uint64_t g_dynamicProbeNextSessionTick{};
+    std::atomic<std::uint32_t> g_dynamicProbeSelectedVirtualSite{};
+    std::uint32_t g_dynamicProbeNextVirtualSite{};
+    std::uint32_t g_dynamicProbeQuietSessions{};
 
     std::atomic<Status> g_status{Status::Uninitialized};
     std::atomic<GameEdition> g_gameEdition{GameEdition::Unknown};
@@ -2477,7 +2484,7 @@ namespace
         SYSTEMTIME localTime{};
         GetLocalTime(&localTime);
         std::fprintf(file,
-            "CEventGenerator 17/11/2026 - locator snapshot "
+            "CEventGenerator v6r11 - locator snapshot "
             "started=%04u-%02u-%02uT%02u:%02u:%02u.%03u (local)\n",
             static_cast<unsigned int>(localTime.wYear),
             static_cast<unsigned int>(localTime.wMonth),
@@ -2498,6 +2505,128 @@ namespace
             "3=virtual-slot-rejected)\n",
             d.FiveMReceiverPathStatus, d.FiveMPedSignatureCount,
             d.FiveMGlobalSignatureCount, d.FiveMDamageSignatureCount);
+        std::fprintf(file,
+            "hybrid-outgoing-abi: selected=%s ped-raw=%u ped-local-zero=%u "
+            "ped-move64=%u ped-address=%u global-raw=%u global-local-zero=%u "
+            "global-move64=%u global-address=%u hybrid-groups=%u "
+            "(outgoing-call observations only; no receiver exclusion, "
+            "CEvent identity or hook admission)\n",
+            d.EnhancedUsedPointerFallback ? "pointer-fallback" : "direct",
+            d.PedMatchCount, d.EnhancedHybridPedOutgoingZero,
+            d.EnhancedHybridPedForwarded,
+            d.EnhancedHybridPedAddressDerived,
+            d.GlobalMatchCount, d.EnhancedHybridGlobalOutgoingZero,
+            d.EnhancedHybridGlobalForwarded,
+            d.EnhancedHybridGlobalAddressDerived,
+            d.EnhancedHybridCorrelationGroupCount);
+        std::fprintf(file,
+            "hybrid-triplet: entries=0x%X,0x%X,0x%X callee=0x%X "
+            "(unfiltered shared-callee shortlist; not hook admission)\n",
+            d.EnhancedHybridSelectedEntries[0],
+            d.EnhancedHybridSelectedEntries[1],
+            d.EnhancedHybridSelectedEntries[2],
+            d.EnhancedHybridSelectedCalleeRva);
+        std::fprintf(file, "hybrid-outgoing-abi-samples: shown=%u "
+            "(kind:1=ped 2=global; state:1=zero 2=move64 3=address/load)\n",
+            d.EnhancedHybridAbiSampleCount);
+        for (std::uint32_t index = 0;
+             index < d.EnhancedHybridAbiSampleCount &&
+             index < d.EnhancedHybridAbiSamples.size(); ++index)
+        {
+            const auto& item = d.EnhancedHybridAbiSamples[index];
+            std::fprintf(file,
+                "  hybrid-abi[%u] kind=%u entry=0x%X call=0x%X "
+                "callee=0x%X rdx-write=0x%X state=%u "
+                "(local linear decode, not flow-certified)\n",
+                index, item.Kind, item.EntryRva, item.CallsiteRva,
+                item.CalleeRva, item.LastRdxWriteRva, item.State);
+            std::fprintf(file, "    bytes-rva=0x%X hex=", item.ContextRva);
+            for (std::uint32_t offset = 0; offset < item.ContextLength &&
+                 offset < item.Context.size(); ++offset)
+            {
+                std::fprintf(file, "%02X", item.Context[offset]);
+            }
+            std::fprintf(file, "\n");
+        }
+        std::fprintf(file,
+            "hybrid-incoming-direct-xrefs: ped0=%u ped1=%u global=%u "
+            "shown=%u (byte-level E8 candidates, not decoded instruction "
+            "boundaries or validated receiver ABI)\n",
+            d.EnhancedIncomingCallCounts[0],
+            d.EnhancedIncomingCallCounts[1],
+            d.EnhancedIncomingCallCounts[2],
+            d.EnhancedIncomingCallSampleCount);
+        std::fprintf(file,
+            "hybrid-incoming-linear-decode: ped0=%u ped1=%u global=%u "
+            "unresolved=%u,%u,%u rdx-zero=%u,%u,%u rdx-data=%u,%u,%u "
+            "(linear runtime-function-entry decode; not CFG-certified)\n",
+            d.EnhancedIncomingDecodedCounts[0],
+            d.EnhancedIncomingDecodedCounts[1],
+            d.EnhancedIncomingDecodedCounts[2],
+            d.EnhancedIncomingUnresolvedCounts[0],
+            d.EnhancedIncomingUnresolvedCounts[1],
+            d.EnhancedIncomingUnresolvedCounts[2],
+            d.EnhancedIncomingRdxZeroCounts[0],
+            d.EnhancedIncomingRdxZeroCounts[1],
+            d.EnhancedIncomingRdxZeroCounts[2],
+            d.EnhancedIncomingRdxDataCounts[0],
+            d.EnhancedIncomingRdxDataCounts[1],
+            d.EnhancedIncomingRdxDataCounts[2]);
+        std::fprintf(file,
+            "hybrid-incoming-cfg: ped0=%u ped1=%u global=%u "
+            "unresolved=%u,%u,%u "
+            "(bounded function-entry direct-edge reachability, no CEvent ABI proof)\n",
+            d.EnhancedIncomingCfgCounts[0],
+            d.EnhancedIncomingCfgCounts[1],
+            d.EnhancedIncomingCfgCounts[2],
+            d.EnhancedIncomingCfgUnresolvedCounts[0],
+            d.EnhancedIncomingCfgUnresolvedCounts[1],
+            d.EnhancedIncomingCfgUnresolvedCounts[2]);
+        std::fprintf(file,
+            "hybrid-incoming-cfg-abi: reached=%u,%u,%u "
+            "rdx-data=%u,%u,%u rdx-zero=%u,%u,%u "
+            "(conservative register-origin masks; not CEvent identity)\n",
+            d.EnhancedIncomingCfgArgumentCounts[0],
+            d.EnhancedIncomingCfgArgumentCounts[1],
+            d.EnhancedIncomingCfgArgumentCounts[2],
+            d.EnhancedIncomingCfgRdxDataCounts[0],
+            d.EnhancedIncomingCfgRdxDataCounts[1],
+            d.EnhancedIncomingCfgRdxDataCounts[2],
+            d.EnhancedIncomingCfgRdxZeroCounts[0],
+            d.EnhancedIncomingCfgRdxZeroCounts[1],
+            d.EnhancedIncomingCfgRdxZeroCounts[2]);
+        for (std::uint32_t index = 0;
+             index < d.EnhancedIncomingCallSampleCount &&
+             index < d.EnhancedIncomingCallSamples.size(); ++index)
+        {
+            const auto& item = d.EnhancedIncomingCallSamples[index];
+            std::fprintf(file,
+                "  incoming-xref[%u] role=%u caller=0x%X "
+                "call=0x%X receiver=0x%X decoded=%u branches=%u "
+                "cfg=%u cfg-instructions=%u cfg-edges=%u cfg-unknown=%u "
+                "rcx-state=%u rcx-write=0x%X rdx-state=%u rdx-write=0x%X "
+                "cfg-args=%u cfg-args-visits=%u cfg-args-edges=%u "
+                "cfg-args-unknown=%u cfg-rcx-mask=0x%X "
+                "cfg-rcx-write=0x%X cfg-rdx-mask=0x%X "
+                "cfg-rdx-write=0x%X bytes-rva=0x%X hex=",
+                index, item.Role, item.CallerRva, item.CallsiteRva,
+                item.TargetRva, item.DecodedBoundary, item.LinearBranches,
+                item.CfgBoundary, item.CfgInstructions, item.CfgEdges,
+                item.CfgUnknownExits,
+                item.RcxState, item.RcxWriteRva,
+                item.RdxState, item.RdxWriteRva,
+                item.CfgArgumentBoundary, item.CfgArgumentVisits,
+                item.CfgArgumentEdges, item.CfgArgumentUnknownExits,
+                item.CfgRcxMask, item.CfgRcxWriteRva,
+                item.CfgRdxMask, item.CfgRdxWriteRva, item.ContextRva);
+            for (std::uint32_t offset = 0;
+                 offset < item.ContextLength &&
+                 offset < item.Context.size(); ++offset)
+            {
+                std::fprintf(file, "%02X", item.Context[offset]);
+            }
+            std::fprintf(file, "\n");
+        }
         std::fprintf(file, "anchors: count=%u stack=%u type=%u\n",
             d.CEventCountAnchorCount, d.CEventStackAnchorCount,
             d.EventTypeAnchorCount);
@@ -3025,6 +3154,56 @@ namespace
         }
     }
 
+    void AppendDynamicProbeControlEvent(
+        const char* phase,
+        std::uint32_t reason = 0) noexcept
+    {
+        if (!CEventGenerator::Configuration::LogEnabled())
+        {
+            return;
+        }
+        if (g_dynamicProbeLogPath[0] == L'\0')
+        {
+            BuildDynamicProbeLogPath();
+        }
+        if (g_dynamicProbeLogPath[0] == L'\0')
+        {
+            return;
+        }
+        std::FILE* file{};
+        if (_wfopen_s(&file, g_dynamicProbeLogPath.data(), L"ab") != 0 ||
+            file == nullptr)
+        {
+            return;
+        }
+        SYSTEMTIME time{};
+        GetLocalTime(&time);
+        std::fprintf(file,
+            "probe-control: phase=%s local=%02u:%02u:%02u.%03u "
+            "armed=%u active=%u virtual=%u walker=%u "
+            "sessions=%u hits=%llu reason=%u mode=automatic window-ms=%llu "
+            "first-site-rva=0x%X selected-site=%u quiet-sessions=%u\n",
+            phase,
+            static_cast<unsigned int>(time.wHour),
+            static_cast<unsigned int>(time.wMinute),
+            static_cast<unsigned int>(time.wSecond),
+            static_cast<unsigned int>(time.wMilliseconds),
+            g_dynamicProbeArmed.load(std::memory_order_acquire) ? 1u : 0u,
+            g_dynamicProbeActive.load(std::memory_order_acquire) ? 1u : 0u,
+            g_dynamicProbeVirtualSiteCount.load(std::memory_order_acquire),
+            g_dynamicProbeWalkerSiteCount.load(std::memory_order_acquire),
+            g_dynamicProbeSessionCount.load(std::memory_order_acquire),
+            static_cast<unsigned long long>(
+                g_dynamicProbeHitCount.load(std::memory_order_acquire)),
+            reason,
+            static_cast<unsigned long long>(DynamicProbeMaximumSessionMs),
+            g_dynamicProbeVirtualSiteCount.load(std::memory_order_acquire) != 0
+                ? g_dynamicProbeVirtualSites[0].CallsiteRva : 0u,
+            g_dynamicProbeSelectedVirtualSite.load(std::memory_order_acquire),
+            g_dynamicProbeQuietSessions);
+        static_cast<void>(std::fclose(file));
+    }
+
     [[nodiscard]] const char* DynamicProbeRecordKindName(
         std::uint32_t value) noexcept
     {
@@ -3193,7 +3372,7 @@ namespace
         const std::uint64_t endTick = GetTickCount64();
         std::fprintf(
             file,
-            "Session=%u;LocatorRevision=%u;Mode=EventGatedCorrelation;StartTick=%llu;EndTick=%llu;VirtualSites=%u;WalkerSites=%u;Hits=%llu;Records=%llu;WalkerHistory=%llu\n",
+            "Session=%u;LocatorRevision=%u;Mode=EventGatedCorrelation;StartTick=%llu;EndTick=%llu;VirtualSites=%u;WalkerSites=%u;Hits=%llu;Records=%llu;WalkerHistory=%llu;SelectedSite=%u\n",
             session,
             LocatorRevision,
             static_cast<unsigned long long>(startTick),
@@ -3203,7 +3382,8 @@ namespace
             static_cast<unsigned long long>(
                 g_dynamicProbeHitCount.load(std::memory_order_acquire)),
             static_cast<unsigned long long>(totalRecords),
-            static_cast<unsigned long long>(walkerHistory));
+            static_cast<unsigned long long>(walkerHistory),
+            g_dynamicProbeSelectedVirtualSite.load(std::memory_order_acquire));
         for (std::uint32_t index = 0;
              index < virtualSiteCount;
              ++index)
@@ -3310,14 +3490,16 @@ namespace
     {
         const std::uint32_t virtualCount =
             g_dynamicProbeVirtualSiteCount.load(std::memory_order_acquire);
-        for (std::uint32_t index = 0; index < virtualCount; ++index)
+        const std::uint32_t selected =
+            g_dynamicProbeSelectedVirtualSite.load(std::memory_order_acquire);
+        if (selected < virtualCount)
         {
             WriteDynamicProbeByte(
-                g_dynamicProbeVirtualSites[index].Pre,
-                g_dynamicProbeVirtualSites[index].PreOriginal);
+                g_dynamicProbeVirtualSites[selected].Pre,
+                g_dynamicProbeVirtualSites[selected].PreOriginal);
             WriteDynamicProbeByte(
-                g_dynamicProbeVirtualSites[index].Post,
-                g_dynamicProbeVirtualSites[index].PostOriginal);
+                g_dynamicProbeVirtualSites[selected].Post,
+                g_dynamicProbeVirtualSites[selected].PostOriginal);
         }
         const std::uint32_t walkerCount =
             g_dynamicProbeWalkerSiteCount.load(std::memory_order_acquire);
@@ -3352,6 +3534,7 @@ namespace
         {
             AppendDynamicProbeSnapshot();
         }
+        AppendDynamicProbeControlEvent("stopped");
     }
 
     [[nodiscard]] bool StartDynamicProbe() noexcept
@@ -3360,6 +3543,7 @@ namespace
         if (!g_dynamicProbeArmed.load(std::memory_order_acquire) ||
             g_dynamicProbeActive.load(std::memory_order_acquire))
         {
+            AppendDynamicProbeControlEvent("start-rejected", 1);
             return false;
         }
         ResetDynamicProbeSessionData();
@@ -3368,16 +3552,23 @@ namespace
             g_dynamicProbeVirtualSiteCount.load(std::memory_order_acquire);
         const std::uint32_t walkerCount =
             g_dynamicProbeWalkerSiteCount.load(std::memory_order_acquire);
-        for (std::uint32_t index = 0; index < virtualCount; ++index)
+        if (virtualCount == 0)
         {
-            if (!AddDynamicProbeWritablePage(
-                    g_dynamicProbeVirtualSites[index].Pre) ||
-                !AddDynamicProbeWritablePage(
-                    g_dynamicProbeVirtualSites[index].Post))
-            {
-                RestoreDynamicProbePages();
-                return false;
-            }
+            AppendDynamicProbeControlEvent("start-failed", 2);
+            return false;
+        }
+        const std::uint32_t selected =
+            g_dynamicProbeNextVirtualSite % virtualCount;
+        g_dynamicProbeSelectedVirtualSite.store(
+            selected, std::memory_order_release);
+        if (!AddDynamicProbeWritablePage(
+                g_dynamicProbeVirtualSites[selected].Pre) ||
+            !AddDynamicProbeWritablePage(
+                g_dynamicProbeVirtualSites[selected].Post))
+        {
+            RestoreDynamicProbePages();
+            AppendDynamicProbeControlEvent("start-failed", 2);
+            return false;
         }
         for (std::uint32_t index = 0; index < walkerCount; ++index)
         {
@@ -3387,6 +3578,7 @@ namespace
                     g_dynamicProbeWalkerSites[index].Post))
             {
                 RestoreDynamicProbePages();
+                AppendDynamicProbeControlEvent("start-failed", 3);
                 return false;
             }
         }
@@ -3397,6 +3589,7 @@ namespace
         if (handler == nullptr)
         {
             RestoreDynamicProbePages();
+            AppendDynamicProbeControlEvent("start-failed", 4);
             return false;
         }
         g_dynamicProbeHandler.store(
@@ -3406,18 +3599,16 @@ namespace
             1,
             std::memory_order_acq_rel);
         g_dynamicProbeActive.store(true, std::memory_order_release);
-        for (std::uint32_t index = 0; index < virtualCount; ++index)
-        {
-            WriteDynamicProbeByte(
-                g_dynamicProbeVirtualSites[index].Pre,
-                DynamicProbeBreakpoint);
-        }
+        WriteDynamicProbeByte(
+            g_dynamicProbeVirtualSites[selected].Pre,
+            DynamicProbeBreakpoint);
         for (std::uint32_t index = 0; index < walkerCount; ++index)
         {
             WriteDynamicProbeByte(
                 g_dynamicProbeWalkerSites[index].Pre,
                 DynamicProbeBreakpoint);
         }
+        AppendDynamicProbeControlEvent("started");
         return true;
 #else
         return false;
@@ -3574,6 +3765,115 @@ namespace
             ++virtualCount;
         }
 
+        if (virtualCount == 0)
+        {
+            const auto& stack = located.Diagnostics.EnhancedStackPath;
+            if (stack.CallsiteRva != 0 &&
+                stack.SlotOffset == DynamicProbeEventTypeSlotOffset)
+            {
+                auto* pre = imageBase + stack.CallsiteRva;
+                MEMORY_BASIC_INFORMATION memory{};
+                if (VirtualQuery(pre, &memory, sizeof(memory)) ==
+                    sizeof(memory) && memory.State == MEM_COMMIT &&
+                    (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) == 0 &&
+                    ((memory.Protect & 0xFFu) == PAGE_EXECUTE ||
+                     (memory.Protect & 0xFFu) == PAGE_EXECUTE_READ ||
+                     (memory.Protect & 0xFFu) == PAGE_EXECUTE_READWRITE ||
+                     (memory.Protect & 0xFFu) == PAGE_EXECUTE_WRITECOPY))
+                {
+                    const auto begin =
+                        reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+                    const auto address =
+                        reinterpret_cast<std::uintptr_t>(pre);
+                    if (address >= begin &&
+                        address - begin < memory.RegionSize &&
+                        memory.RegionSize - (address - begin) >= 8)
+                    {
+                        EnhancedVirtualSlotCallsiteDiagnostic diagnostic{};
+                        diagnostic.SlotOffset = stack.SlotOffset;
+                        const std::uint32_t length =
+                            DynamicProbeVirtualInstructionLength(
+                                diagnostic, pre);
+                        if (length != 0)
+                        {
+                            auto& site = g_dynamicProbeVirtualSites[0];
+                            site.Pre = pre;
+                            site.Post = pre + length;
+                            site.PreOriginal =
+                                reinterpret_cast<const std::uint8_t*>(pre)[0];
+                            site.PostOriginal =
+                                reinterpret_cast<const std::uint8_t*>(site.Post)[0];
+                            site.WalkerRva =
+                                located.Diagnostics.CEventCountFunctionRva;
+                            site.CallsiteRva = stack.CallsiteRva;
+                            site.SlotOffset = stack.SlotOffset;
+                            virtualCount = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        const std::uint32_t virtualCallCount =
+            std::min<std::uint32_t>(
+                located.Diagnostics.EnhancedVirtualCallDiagnosticCount,
+                static_cast<std::uint32_t>(
+                    located.Diagnostics.EnhancedVirtualCalls.size()));
+        for (std::uint32_t index = 0;
+             index < virtualCallCount && virtualCount < 2;
+             ++index)
+        {
+            const auto& call = located.Diagnostics.EnhancedVirtualCalls[index];
+            if (call.OwnerRva != located.Diagnostics.EventTypeFunctionRva ||
+                call.SlotOffset != DynamicProbeEventTypeSlotOffset ||
+                call.CallsiteRva == 0)
+            {
+                continue;
+            }
+            auto* pre = imageBase + call.CallsiteRva;
+            MEMORY_BASIC_INFORMATION memory{};
+            if (VirtualQuery(pre, &memory, sizeof(memory)) != sizeof(memory) ||
+                memory.State != MEM_COMMIT ||
+                (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+                ((memory.Protect & 0xFFu) != PAGE_EXECUTE &&
+                 (memory.Protect & 0xFFu) != PAGE_EXECUTE_READ &&
+                 (memory.Protect & 0xFFu) != PAGE_EXECUTE_READWRITE &&
+                 (memory.Protect & 0xFFu) != PAGE_EXECUTE_WRITECOPY))
+            {
+                continue;
+            }
+            const auto begin =
+                reinterpret_cast<std::uintptr_t>(memory.BaseAddress);
+            const auto address = reinterpret_cast<std::uintptr_t>(pre);
+            if (address < begin ||
+                address - begin >= memory.RegionSize ||
+                memory.RegionSize - (address - begin) < 8)
+            {
+                continue;
+            }
+            EnhancedVirtualSlotCallsiteDiagnostic diagnostic{};
+            diagnostic.SlotOffset = call.SlotOffset;
+            const auto length = DynamicProbeVirtualInstructionLength(
+                diagnostic, pre);
+            if (length == 0 ||
+                DynamicProbeEndpointInUse(pre, virtualCount, 0) ||
+                DynamicProbeEndpointInUse(pre + length, virtualCount, 0))
+            {
+                continue;
+            }
+            auto& site = g_dynamicProbeVirtualSites[virtualCount];
+            site.Pre = pre;
+            site.Post = pre + length;
+            site.PreOriginal =
+                reinterpret_cast<const std::uint8_t*>(pre)[0];
+            site.PostOriginal =
+                reinterpret_cast<const std::uint8_t*>(site.Post)[0];
+            site.WalkerRva = call.OwnerRva;
+            site.CallsiteRva = call.CallsiteRva;
+            site.SlotOffset = call.SlotOffset;
+            ++virtualCount;
+        }
+
         std::uint32_t walkerCount{};
         const std::uint32_t candidateCount =
             std::min<std::uint32_t>(
@@ -3624,6 +3924,11 @@ namespace
             ++walkerCount;
         }
 
+        g_dynamicProbeNextVirtualSite = 0;
+        g_dynamicProbeQuietSessions = 0;
+        g_dynamicProbeSelectedVirtualSite.store(
+            0, std::memory_order_release);
+        g_dynamicProbeNextSessionTick = 0;
         g_dynamicProbeVirtualSiteCount.store(
             virtualCount,
             std::memory_order_release);
@@ -3641,6 +3946,8 @@ namespace
         {
             g_dynamicProbeLogPath.fill(L'\0');
         }
+        AppendDynamicProbeControlEvent(
+            "prepared", virtualCount == 0 ? 1u : 0u);
     }
 
     [[nodiscard]] bool QueueEnableRequired() noexcept
@@ -4258,6 +4565,7 @@ namespace CEventGenerator
         }
 
         StopDynamicProbe(true);
+        AppendDynamicProbeControlEvent("shutdown");
         RemoveCreatedHooks();
         static_cast<void>(MH_Uninitialize());
         g_status.store(Status::Stopped, std::memory_order_release);
@@ -4269,25 +4577,59 @@ namespace CEventGenerator
         {
             return;
         }
-        const bool down = (GetAsyncKeyState(DynamicProbeToggleKey) & 0x8000) != 0;
-        if (down && !g_dynamicProbeToggleDown)
+        const std::uint64_t now = GetTickCount64();
+        if (g_dynamicProbeActive.load(std::memory_order_acquire))
         {
-            if (g_dynamicProbeActive.load(std::memory_order_acquire))
+            const std::uint64_t hits =
+                g_dynamicProbeHitCount.load(std::memory_order_acquire);
+            const std::uint32_t selected =
+                g_dynamicProbeSelectedVirtualSite.load(std::memory_order_acquire);
+            const std::uint32_t virtualCount =
+                g_dynamicProbeVirtualSiteCount.load(std::memory_order_acquire);
+            const bool excessiveHits =
+                hits >= DynamicProbeMaximumSessionHits ||
+                (selected < virtualCount &&
+                 g_dynamicProbeVirtualSites[selected].PreHits.load(
+                     std::memory_order_acquire) >=
+                     DynamicProbeMaximumSessionHits);
+            const bool timedOut =
+                now - g_dynamicProbeSessionStartTick.load(
+                    std::memory_order_acquire) >= DynamicProbeMaximumSessionMs;
+            if (excessiveHits || timedOut)
             {
+                AppendDynamicProbeControlEvent(
+                    excessiveHits ? "stop-hit-cap" : "stop-timeout");
                 StopDynamicProbe(true);
+                if (virtualCount != 0)
+                {
+                    g_dynamicProbeNextVirtualSite =
+                        (selected + 1) % virtualCount;
+                }
+                if (hits == 0)
+                {
+                    g_dynamicProbeQuietSessions =
+                        std::min(g_dynamicProbeQuietSessions + 1u, 2u);
+                }
+                else
+                {
+                    g_dynamicProbeQuietSessions = 0;
+                }
+                g_dynamicProbeNextSessionTick = now +
+                    (excessiveHits ? DynamicProbeHighTrafficDelayMs :
+                     g_dynamicProbeQuietSessions >= 2
+                         ? DynamicProbeQuietRestartDelayMs
+                         : DynamicProbeRestartDelayMs);
             }
-            else
-            {
-                static_cast<void>(StartDynamicProbe());
-            }
+            return;
         }
-        g_dynamicProbeToggleDown = down;
-        if (g_dynamicProbeActive.load(std::memory_order_acquire) &&
-            GetTickCount64() -
-                g_dynamicProbeSessionStartTick.load(
-                    std::memory_order_acquire) >= DynamicProbeMaximumSessionMs)
+        if (now < g_dynamicProbeNextSessionTick)
         {
-            StopDynamicProbe(true);
+            return;
+        }
+        if (!StartDynamicProbe())
+        {
+            g_dynamicProbeNextSessionTick =
+                now + DynamicProbeFailureRetryMs;
         }
     }
 

@@ -7,6 +7,7 @@ open CommunityScriptHookVDotNetCore.Source
 
 type internal IManualReloadInput =
     inherit IDisposable
+    abstract IsDown: bool
     abstract WasPressed: bool
 
 [<Sealed>]
@@ -16,6 +17,7 @@ type internal ManualReloadInput(context: RuntimeExtensionContext, inputText: str
     let action = actions.CreateSingle("Script4Reload.Manual", inputText)
 
     interface IManualReloadInput with
+        member _.IsDown = action.State.IsDown
         member _.WasPressed = action.State.WasPressed
         member _.Dispose() = action.Dispose()
 
@@ -45,6 +47,7 @@ type Scripts4Lifecycle
     let mutable manualInputWaitStarted = 0L
     let mutable manualInputWaitWarningShown = false
     let mutable manualInputRejected = false
+    let mutable manualInputArmed = false
 
     let selfSourceExists() =
         File.Exists(Path.Combine(context.ExtensionsDirectory, "Script4Reload.dll"))
@@ -111,6 +114,7 @@ type Scripts4Lifecycle
                 value.Dispose()
             with _ -> ())
         manualInput <- None
+        manualInputArmed <- false
 
     let requestPlan (plan: ScriptLifecycleTransitionPlan) (changedFiles: int) =
         if activeOperation.IsSome || shutdown then
@@ -278,8 +282,19 @@ type Scripts4Lifecycle
             match manualInput with
             | Some input ->
                 try
-                    if input.WasPressed then
-                        if selfSourceExists() then
+                    if not input.IsDown then
+                        manualInputArmed <- true
+                    if input.WasPressed && manualInputArmed then
+                        manualInputArmed <- false
+                        let transitionBusy =
+                            activeOperation.IsSome ||
+                            explicitReloadPending ||
+                            explicitRestartPending.IsSome ||
+                            (host.SnapshotOperations()
+                             |> Seq.exists (fun snapshot -> not snapshot.IsTerminal))
+                        if transitionBusy then
+                            ()
+                        elif selfSourceExists() then
                             selfUnloadConfirmationPending <- false
                             try
                                 pendingChangeCount <- inspectChanges()

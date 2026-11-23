@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.Reflection;
 
 namespace CommunityScriptHookVDotNetCore.Source;
@@ -26,15 +25,10 @@ internal sealed partial class PackageManager
         ArgumentNullException.ThrowIfNull(plan);
         EnsureRuntimeThread();
         ThrowIfStopping();
-        PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
-
         IRuntimeExtensionReloadController extensionReload =
             _extensionReloadController
             ?? throw new InvalidOperationException(
                 "The runtime-extension reload controller is unavailable.");
-        RuntimeExtensionReloadPlan extensionPlan = extensionReload.CaptureReloadPlan(
-            plan.Reason is not ScriptLifecycleTransitionReason.AutomaticReload);
-
         ScriptLifecycleTransitionOperationId id =
             ScriptLifecycleTransitionOperationId.Create();
         LifecycleTransitionOperation operation = new(
@@ -43,13 +37,12 @@ internal sealed partial class PackageManager
             _scriptsDirectory,
             _log,
             extensionReload,
-            extensionPlan,
             _diagnostics);
         _operations.Add(operation);
         _pendingOperations.Enqueue(operation);
         _log.Information(
-            $"lifecycle operation '{id.Value:D}' queued; reason={plan.Reason}; " +
-            $"extensions={extensionPlan?.TargetIds.Count ?? 0}.");
+            $"lifecycle operation '{id.Value:D}' queued; reason={plan.Reason}. " +
+            "Both root and scripts4 images will be captured off the runtime frame thread.");
         return id;
     }
 
@@ -103,9 +96,10 @@ internal sealed partial class PackageManager
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(static value => value, StringComparer.OrdinalIgnoreCase)];
 
-    private string[] CreateFullCaptureTargets()
+    private string[] CreateFullCaptureTargets(
+        IReadOnlyCollection<string> knownPackageNames)
     {
-        HashSet<string> names = [with(_catalog.Select(value => value.Name),
+        HashSet<string> names = [with(knownPackageNames,
             StringComparer.OrdinalIgnoreCase)];
         names.UnionWith(EnumerateDiskPackageNames());
         return [.. names.OrderBy(value => value, StringComparer.OrdinalIgnoreCase)];
@@ -469,16 +463,12 @@ internal sealed partial class PackageManager
         string _scriptsDirectory,
         RuntimeLog _log,
         IRuntimeExtensionReloadController extensionReload,
-        RuntimeExtensionReloadPlan? extensionPlan,
         RuntimeDiagnosticHub diagnostics) : IDisposable
     {
-        private static readonly TimeSpan CaptureDeadline = TimeSpan.FromSeconds(10);
-        private static readonly TimeSpan RemovalConfirmationWindow =
-            TimeSpan.FromMilliseconds(250);
         private readonly string _scriptsDirectory = _scriptsDirectory;
         private readonly RuntimeLog _log = _log;
         private readonly IRuntimeExtensionReloadController _extensionReload = extensionReload;
-        private readonly RuntimeExtensionReloadPlan? _extensionPlan = extensionPlan;
+        private RuntimeExtensionReloadPlan? _extensionPlan;
         private readonly RuntimeDiagnosticHub _diagnostics = diagnostics;
         private readonly CancellationTokenSource _lifetime = new();
         private readonly List<string> _restartedInPlace = [];
@@ -493,8 +483,9 @@ internal sealed partial class PackageManager
         private string[] _binarySeeds = [];
         private HashSet<string> _originalPackageNames = [with(StringComparer.OrdinalIgnoreCase)];
         private Task<CaptureAttempt>? _captureTask;
-        private long _captureStarted;
-        private long _removalConfirmationStarted;
+        private Task<RootCaptureCandidate>? _rootCaptureTask;
+        private Task<StagedReloadImage>? _resolveTask;
+        private RootCaptureCandidate? _rootCandidate;
         private string? _pendingRemovalManifest;
         private StagedReloadImage? _staged;
         private Queue<string>? _stopQueue;
@@ -613,7 +604,6 @@ internal sealed partial class PackageManager
             _diagnostic = diagnostic;
             _staged = null;
             _pendingRemovalManifest = null;
-            _removalConfirmationStarted = 0;
             if (_stoppingPackage is not null)
             {
                 owner.AdoptPackageRetirement(
@@ -664,114 +654,96 @@ internal sealed partial class PackageManager
             _lifetime.Dispose();
         }
 
-        private void StartCapture(PackageManager owner)
+        private void StartCapture(PackageManager owner, bool retry = false)
         {
             State = ScriptLifecycleTransitionOperationState.CapturingImages;
-            string[] targets = owner.CreateFullCaptureTargets();
+            string[] knownPackages = [.. owner._catalog.Select(value => value.Name)];
             CancellationToken cancellationToken = _lifetime.Token;
-            if (_captureStarted == 0)
-            {
-                _captureStarted = Stopwatch.GetTimestamp();
-            }
             _captureTask = Task.Run(
-                () => PackageImageCapture.CaptureAsync(
-                    _scriptsDirectory,
-                    targets,
-                    _log,
-                    cancellationToken),
+                async () =>
+                {
+                    if (retry)
+                        await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                    PackageDiscovery.EnsureFlatAssemblyLayout(_scriptsDirectory);
+                    string[] targets = owner.CreateFullCaptureTargets(knownPackages);
+                    return await PackageImageCapture.CaptureAsync(
+                        _scriptsDirectory,
+                        targets,
+                        _log,
+                        cancellationToken).ConfigureAwait(false);
+                },
                 cancellationToken);
+            _rootCaptureTask = _extensionReload.CaptureReloadCandidateAsync(
+                cancellationToken);
+            _extensionPlan = null;
+            _rootCandidate = null;
+            _resolveTask = null;
         }
 
         private void AdvanceCapture(PackageManager owner)
         {
-            Task<CaptureAttempt>? task = _captureTask;
-            if (task is null)
-            {
-                if (_pendingRemovalManifest is not null &&
-                    Stopwatch.GetElapsedTime(_removalConfirmationStarted) <
-                        RemovalConfirmationWindow)
-                {
-                    return;
-                }
-                StartCapture(owner);
-                return;
-            }
-            if (!task.IsCompleted)
-            {
-                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
-                {
-                    _lifetime.Cancel();
-                    Fail(owner,
-                        "The disk candidate did not become a coherent readable " +
-                        "generation before the capture deadline. The committed " +
-                        "RAM generation was left untouched.");
-                }
-                return;
-            }
-
-            CaptureAttempt attempt;
-            try
-            {
-                attempt = task.GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException)
-            {
-                Cancel(owner, "Generation capture was cancelled.");
-                return;
-            }
-            catch (Exception exception)
-            {
-                attempt = CaptureAttempt.Retry(exception.Message);
-            }
-
-            _captureTask = null;
-            if (attempt.Image is null)
-            {
-                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
-                {
-                    Fail(owner,
-                        "The disk candidate remained incomplete: " +
-                        attempt.Diagnostic);
-                    return;
-                }
-
-                _diagnostic = attempt.Diagnostic;
-                string[] targets = owner.CreateFullCaptureTargets();
-                CancellationToken cancellationToken = _lifetime.Token;
-                _captureTask = Task.Run(
-                    () => PackageImageCapture.CaptureAsync(
-                        _scriptsDirectory,
-                        targets,
-                        _log,
-                        cancellationToken),
-                    cancellationToken);
-                return;
-            }
-
             StagedReloadImage staged;
-            try
+            if (_resolveTask is { } resolve)
             {
-                staged = owner.ResolveCapturedImage(attempt.Image);
-            }
-            catch (Exception exception) when (
-                exception is BadImageFormatException or InvalidDataException)
-            {
-                if (Stopwatch.GetElapsedTime(_captureStarted) >= CaptureDeadline)
+                if (!resolve.IsCompleted)
                 {
-                    Fail(owner,
-                        "The disk candidate remained incoherent: " + exception.Message);
                     return;
                 }
-                _diagnostic = exception.Message;
-                string[] targets = owner.CreateFullCaptureTargets();
-                CancellationToken cancellationToken = _lifetime.Token;
-                _captureTask = Task.Run(
-                    () => PackageImageCapture.CaptureAsync(
-                        _scriptsDirectory,
-                        targets,
-                        _log,
-                        cancellationToken),
-                    cancellationToken);
+                try
+                {
+                    staged = resolve.GetAwaiter().GetResult();
+                }
+                catch (Exception exception) when (
+                    exception is BadImageFormatException or InvalidDataException)
+                {
+                    _diagnostic = exception.Message;
+                    StartCapture(owner, retry: true);
+                    return;
+                }
+
+                _resolveTask = null;
+                _extensionPlan = _extensionReload.FinalizeReloadPlan(
+                    _rootCandidate ?? throw new InvalidOperationException(
+                        "The captured root generation is unavailable."),
+                    restartActive: true);
+                _rootCandidate = null;
+            }
+            else
+            {
+                Task<CaptureAttempt>? task = _captureTask;
+                Task<RootCaptureCandidate>? rootTask = _rootCaptureTask;
+                if (task is null || rootTask is null)
+                {
+                    StartCapture(owner);
+                    return;
+                }
+                if (!task.IsCompleted || !rootTask.IsCompleted)
+                {
+                    return;
+                }
+
+                CaptureAttempt attempt;
+                try
+                {
+                    attempt = task.GetAwaiter().GetResult();
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    attempt = CaptureAttempt.Retry(exception.Message);
+                }
+                if (attempt.Image is null)
+                {
+                    _diagnostic = attempt.Diagnostic;
+                    StartCapture(owner, retry: true);
+                    return;
+                }
+
+                _rootCandidate = rootTask.GetAwaiter().GetResult();
+                _captureTask = null;
+                _rootCaptureTask = null;
+                CapturedReloadImage captured = attempt.Image;
+                _resolveTask = Task.Run(
+                    () => owner.ResolveCapturedImage(captured), _lifetime.Token);
                 return;
             }
 
@@ -783,23 +755,20 @@ internal sealed partial class PackageManager
                     !_pendingRemovalManifest.Equals(manifest, StringComparison.Ordinal))
                 {
                     _pendingRemovalManifest = manifest;
-                    _removalConfirmationStarted = Stopwatch.GetTimestamp();
                     _diagnostic =
-                        "A committed DLL is absent from disk. Automatic " +
-                        "reload is confirming the same desired-state deletion " +
-                        "after a second stable observation before entering the " +
-                        "global lifecycle barrier.";
+                        "A committed DLL is absent from disk. Automatic reload " +
+                        "requires a second coherent RAM snapshot of the same " +
+                        "desired-state deletion before entering the barrier.";
                     _log.Information(_diagnostic);
+                    StartCapture(owner);
                     return;
                 }
 
                 _pendingRemovalManifest = null;
-                _removalConfirmationStarted = 0;
             }
             else
             {
                 _pendingRemovalManifest = null;
-                _removalConfirmationStarted = 0;
             }
 
             _binarySeeds = owner.DetectChangedSeeds(staged);
